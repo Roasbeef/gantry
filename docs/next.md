@@ -6,7 +6,9 @@ The initial runnable slice implements immutable Git inputs, a native action
 graph, restricted ad hoc actions, durable claims and results, and guarded
 grouped submission. Controllers share Khepri/Ra. A standalone Docker
 worker journals each slot and can replay a result after losing a response.
-The [runbook](running.md) covers configuration and the API.
+The [runtime architecture](architecture/runtime.md) maps the shipped code.
+The [runbook](running.md) covers deployment, and the
+[integration guide](integrating.md) covers onboarding and the GitHub pilot.
 
 The [queue decision](adr/001-khepri-owns-queue-decisions.md) records the
 council result and the throughput condition that would change it. Run
