@@ -3,8 +3,8 @@
 Gantry turns a pinned Git revision into an action graph, stores the
 current run and leases in Khepri, and runs leased actions on Docker
 workers. The same graph can supply evidence for a guarded Git push.
-This document reflects commit [`f070382`](https://github.com/Roasbeef/gantry/commit/f070382f94990b08f9d78acce9928a8df55d2efa).
-Deployment and the proposed design live in separate documents.
+The source links point to the implementation in this checkout, including
+the Gleam worker and the controller and worker OTP entry points.
 [Runbook](../running.md) · [Build and submit design](build-and-submit.md)
 
 ## Components
@@ -25,9 +25,11 @@ flowchart TB
         GRAPH["graph.compile"]
         QUEUE["queue.State"]
     end
-    subgraph worker["worker_service.py"]
-        SLOT["Slot.step / publish"]
-        EXEC["worker_executor.execute"]
+    subgraph worker["gantry/worker"]
+        SLOT["worker.step / publish"]
+        CUSTODY["worker/custody"]
+        EXEC["worker/docker"]
+        NET["worker/controllers / Gun"]
     end
     subgraph adapters["Controller adapters"]
         PREP["prepare.build / group"]
@@ -43,8 +45,11 @@ flowchart TB
     TX -->|"CAS"| RA
     REC -->|"proposal"| TX
     REC -->|"intent"| GIT
-    SLOT -->|"HTTP"| API
+    SLOT -->|"journal"| CUSTODY
+    SLOT -->|"claims and results"| NET
     SLOT -->|"assignment"| EXEC
+    EXEC -->|"verified input blobs"| NET
+    NET -->|"HTTP"| API
     API -->|"bytes"| BLOB
 ```
 
@@ -58,7 +63,9 @@ target's expected old object ID at the point of the ref update.
 | `http_api.handle`, `api` | Role checks, request decoding, admission and receipt responses | `prepare`, `store.change`, and `blobs` |
 | `graph`, `queue` | Pure graph closure, cache keys, lease decisions, and submission transitions | Controllers supply data and persist the resulting `State` |
 | `store`, `gantry_khepri_ffi` | Quorum reads and atomic queue replacement | Khepri and its Ra system |
-| `Slot`, `worker_executor` | Local assignment custody, Docker execution, cleanup, and receipt replay | SQLite journal, Docker daemon, and controller HTTP endpoints |
+| `gantry/worker`, `worker/custody` | Slot lifecycle, journaled assignment and receipt, and publication replay | SQLite journal in the worker directory |
+| `worker/docker` | Input staging, Docker execution, output collection, and cleanup | Docker CLI through an Erlang port |
+| `worker/controllers` | Bounded HTTP requests, controller failover, and input digest checks | Gun through the HTTP FFI |
 | `prepare`, `git`, `submit` | Git input projection, candidate construction, and exact-ref reconciliation | Shared candidate bundle and remote Git ref |
 
 ## Start a controller and replica
@@ -135,16 +142,18 @@ flowchart TB
     A -->|"queue refusal"| H
     C -->|"no eligible action"| N["claim_reply 204"]
     C -->|"matching Proof"| C
-    C -->|"committed Assignment"| S["Slot.step"]
-    S -->|"started assignment on restart"| K["worker_executor.cleanup"]
-    K --> R["Slot.record"]
-    S -->|"durable new assignment"| E["Slot.perform"]
+    C -->|"committed Assignment"| J["custody.claim"]
+    J --> S["worker.step"]
+    S -->|"possible start, no receipt"| K["docker.cleanup"]
+    K --> R["custody.record"]
+    S -->|"durable unstarted assignment"| E["worker.perform / docker.execute"]
     E -->|"pass or failure"| R
     E -->|"uncertain Docker custody"| S
-    R --> U["Slot.publish"]
+    R --> U["worker.publish"]
+    S -->|"recorded receipt"| U
     U -->|"blob upload and receipt"| F["api.finish / queue.finish"]
     U -->|"controller unavailable"| S
-    F -->|"accepted or inactive lease"| T["Slot.publish acknowledges"]
+    F -->|"accepted or inactive lease"| T["custody.acknowledge"]
 ```
 
 1. **Prepare.** `prepare.build` fetches the immutable revision. For a
@@ -158,28 +167,35 @@ flowchart TB
    for both edge types. Only `deps` supplies files to the cache key.
    A cache hit reuses the stored proof. A miss creates a lease in the
    same `store.change` that advances the queue serial.
-3. **Execute.** `Slot.step` journals the assignment. `Slot.perform`
-   verifies the input digests and records that the action may start
-   before creating Docker resources. The action receives read-only
-   archives and a private temporary workspace. After the action
-   container exits, the collector reads the declared outputs.
-4. **Publish.** `Slot.publish` uploads the spooled bytes before posting
+3. **Execute.** `worker.claim` records the assignment in SQLite.
+   `docker.execute` stages input blobs after `controllers.fetch` verifies
+   their digests, then calls `custody.mark_started` before creating
+   Docker resources. The action receives read-only archives and a private
+   temporary workspace. After the action container exits, the collector
+   reads the declared outputs.
+4. **Publish.** `worker.publish` uploads the spooled bytes before posting
    its receipt. `api.finish` reads and rehashes the referenced blobs.
    `queue.finish` accepts the receipt only for the active action,
    worker, and serial. A passing receipt must also match the declared
    output paths.
-5. **Resume.** After a controller disconnect, `Controllers.request`
-   tries its configured endpoints. The worker publishes a saved receipt
-   or resumes staging an unstarted assignment. If the journal records
-   a possible start with no receipt, the worker removes any remaining
-   Docker resources before reporting failure.
+5. **Resume.** `controllers.call` tries the next configured origin
+   after a transport error or a 5xx response. Gun bounds each request
+   and verifies the peer certificate and host name for HTTPS. On restart,
+   the worker publishes a saved receipt or resumes staging an unstarted
+   assignment. If the journal records a possible start with no receipt,
+   the worker removes any remaining Docker resources before reporting
+   failure.
 
 The action key combines the prepared recipe digest with the resolved
 dependency file digests. The recipe includes the selected source archive
 and worker image. A producer can run again and return identical files.
 Its dependent action then retains the same key and can reuse its proof.
 [Graph and queue](../../packages/core/src/gantry_core/queue.gleam) ·
-[Worker custody](../../packages/server/priv/worker_service.py)
+[Worker loop](../../packages/server/src/gantry/worker.gleam) ·
+[Worker custody](../../packages/server/src/gantry/worker/custody.gleam) ·
+[Docker adapter](../../packages/server/src/gantry/worker/docker.gleam) ·
+[Controller client](../../packages/server/src/gantry/worker/controllers.gleam) ·
+[Gun FFI](../../packages/server/src/gantry_worker_http_ffi.erl)
 
 ## Land an ordered PR group
 
@@ -256,12 +272,12 @@ journal for its active assignment and unpublished result.
 
 | Store | Owner and key | Data |
 | --- | --- | --- |
-| Khepri | `gantry_khepri_ffi`, path `queue_snapshot_v1) | Encoded `State` with runs, action phases, proofs, and submission intents |
+| Khepri | `gantry_khepri_ffi`, path `queue_snapshot_v1` | Encoded `State` with runs, action phases, proofs, and submission intents |
 | Shared filesystem | `blobs.put`, `objects/<digest>` | Source archives, output bytes, and logs addressed by SHA-256 |
 | Shared filesystem | `git.preserve`, `git/<repo>/<commit>.bundle` | Candidate objects required beyond the pinned base |
-| Worker SQLite | `Slot`, `custody.sqlite3` in the worker directory | Slot identity, assignments, receipts, and upload spool |
+| Worker SQLite | `worker/custody`, `custody.sqlite3` in the worker directory | Slot identity, assignments, receipts, and upload spool |
 
-`Slot` records execution and publication using one SQLite connection.
+`gantry/worker` holds one SQLite connection for execution and publication.
 The following tables are local to that worker.
 
 ```mermaid
@@ -282,11 +298,12 @@ erDiagram
     }
 ```
 
-The journal uses SQLite `synchronous=FULL`. `Slot.record` stores the
-receipt after execution or cleanup. `Slot.publish` acknowledges it
-locally and clears the upload spool after the server returns success
-or reports an inactive lease. The queue refers to uploaded bytes by
-digest. The journal stores those references in the recorded receipt.
+The journal uses SQLite `synchronous=FULL`. `custody.record` stores
+the receipt after execution or cleanup. After the server returns success
+or reports an inactive lease, `custody.acknowledge` acknowledges the
+receipt and clears the upload spool in one transaction. Both the queue
+and the journaled receipt refer to uploaded bytes by digest.
+[Worker journal schema](../../packages/server/priv/worker-schema.sql)
 
 `store.change` compares the exact encoded bytes from a quorum-fenced
 read. It rebuilds the pure proposal after a conflicting write, with
@@ -309,8 +326,9 @@ propose changes concurrently.
 | Mist request handler | The request, its validation, and a proposal submitted to `store.change` |
 | Khepri and Ra | The committed queue snapshot and ordering of accepted replacements |
 | Weft reconciler per controller | Its periodic `Reconcile` message and sequential provider calls for the intents it received |
-| Python `Slot` loop | The worker directory lock, journal connection, and outcome publication |
-| Erlang worker port owner | Framing and dispatch of assignment and completion checks to the Gleam codecs |
+| `gantry/worker` loop | One slot, its journal connection, and outcome publication |
+| Erlang worker FFI | The worker's `flock` process, Docker command execution, and tar operations |
+| Gun connection | One controller request, with bounded response bytes and a deadline |
 | Docker daemon | Container execution and temporary volumes |
 | Remote Git server | The target ref and the expected-old-SHA check at update time |
 
@@ -322,11 +340,11 @@ attempt identity when retrying. A worker directory lock covers one
 machine's local journal. Operators assign each worker ID to a single
 slot across the deployment.
 [Reconciler](../../packages/server/src/gantry/reconcile.gleam) ·
-[Worker port](../../packages/server/src/gantry_worker_ffi.erl)
+[Worker host FFI](../../packages/server/src/gantry_worker_ffi.erl)
 
 ## Known gaps
 
-- The hosted fixture covers a local bare Git remote. Live GitHub
+- The end-to-end fixture covers a local bare Git remote. Live GitHub
   branch rules, PR updates, and workflow comments need a repo pilot.
 - A permanently lost worker can leave an active lease. Recovery uses
   the original worker directory and journal. Safe reassignment needs

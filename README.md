@@ -9,7 +9,8 @@ Gantry builds their combined commit and lands that exact commit if it passes
 and the target branch still matches the tested base.
 
 [Try it locally](#get-started) · [Integrate a repository](docs/integrating.md) ·
-[Run a worker pool](docs/running.md) · [Architecture](docs/architecture/runtime.md)
+[Run a worker pool](docs/running.md) · [CLI](docs/cli.md) ·
+[Architecture](docs/architecture/runtime.md)
 
 ## Why Gantry
 
@@ -41,6 +42,11 @@ survives controller loss, that an action is reused when its inputs stay the
 same, and that a local Git branch advances to the tested commit. It also
 races a concurrent update against a pending merge to check that the newer
 branch tip is preserved.
+
+To install the controller, worker, and CLI from the checkout, run
+`make install PREFIX="$HOME/.local"` and put `$HOME/.local/bin` on your
+`PATH`. Follow the [runbook](docs/running.md#build-and-install-a-release)
+to configure and start the services.
 
 ## Run your first build
 
@@ -76,6 +82,10 @@ run_id="check-$(date +%s)"
 "$gantry" run "$run_id" owner/project "$revision" check
 "$gantry" watch "$run_id"
 ```
+
+Run `gantry describe run` with the installed CLI to inspect the request
+schema, inputs, and defaults without a controller connection.
+[CLI discovery and examples](docs/cli.md#discover-commands)
 
 An agent can save the run ID and use `status` or `watch` after reconnecting.
 Use `blob <sha256>` to fetch a log or artifact from the result. Split a

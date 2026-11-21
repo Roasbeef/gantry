@@ -1,0 +1,485 @@
+{
+  "schema_version": 1,
+  "positional_separator": "Use -- before positional arguments that begin with a dash.",
+  "commands": {
+    "plan": {
+      "description": "Resolve the action graph for a pinned build.",
+      "usage": "gantry plan ID REPO COMMIT TARGET [AD_HOC_ACTION.json]",
+      "output": "json",
+      "method": "POST",
+      "route": "/v1/plans",
+      "credential": [
+        "GANTRY_TOKEN"
+      ],
+      "effect": "resolve graph without queue admission",
+      "positionals": [
+        {
+          "name": "ID",
+          "schema": {
+            "$ref": "#/$defs/id"
+          },
+          "required": true
+        },
+        {
+          "name": "REPO",
+          "schema": {
+            "$ref": "#/$defs/repo"
+          },
+          "required": true
+        },
+        {
+          "name": "COMMIT",
+          "schema": {
+            "$ref": "#/$defs/revision"
+          },
+          "required": true
+        },
+        {
+          "name": "TARGET",
+          "schema": {
+            "$ref": "#/$defs/target"
+          },
+          "required": true
+        },
+        {
+          "name": "AD_HOC_ACTION.json",
+          "schema": {
+            "type": "string",
+            "format": "local-file"
+          },
+          "required": false
+        }
+      ],
+      "request_body": {
+        "$ref": "#/$defs/build"
+      },
+      "options": [
+        "--json",
+        "--dry-run",
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "revision",
+        "actions"
+      ]
+    },
+    "run": {
+      "description": "Admit a pinned build.",
+      "usage": "gantry run ID REPO COMMIT TARGET [AD_HOC_ACTION.json]",
+      "output": "json",
+      "method": "POST",
+      "route": "/v1/runs",
+      "credential": [
+        "GANTRY_TOKEN"
+      ],
+      "effect": "admit a build",
+      "positionals": [
+        {
+          "name": "ID",
+          "schema": {
+            "$ref": "#/$defs/id"
+          },
+          "required": true
+        },
+        {
+          "name": "REPO",
+          "schema": {
+            "$ref": "#/$defs/repo"
+          },
+          "required": true
+        },
+        {
+          "name": "COMMIT",
+          "schema": {
+            "$ref": "#/$defs/revision"
+          },
+          "required": true
+        },
+        {
+          "name": "TARGET",
+          "schema": {
+            "$ref": "#/$defs/target"
+          },
+          "required": true
+        },
+        {
+          "name": "AD_HOC_ACTION.json",
+          "schema": {
+            "type": "string",
+            "format": "local-file"
+          },
+          "required": false
+        }
+      ],
+      "request_body": {
+        "$ref": "#/$defs/build"
+      },
+      "options": [
+        "--json",
+        "--dry-run",
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "id",
+        "repo",
+        "revision",
+        "target",
+        "submission",
+        "work",
+        "phase"
+      ]
+    },
+    "submit": {
+      "description": "Admit an ordered group of PRs for guarded landing.",
+      "usage": "gantry submit ID REPO PR [PR ...]",
+      "output": "json",
+      "method": "POST",
+      "route": "/v1/submits",
+      "credential": [
+        "GANTRY_SUBMIT_TOKEN"
+      ],
+      "effect": "admit a submission that can advance the configured branch",
+      "positionals": [
+        {
+          "name": "ID",
+          "schema": {
+            "$ref": "#/$defs/id"
+          },
+          "required": true
+        },
+        {
+          "name": "REPO",
+          "schema": {
+            "$ref": "#/$defs/repo"
+          },
+          "required": true
+        },
+        {
+          "name": "PR",
+          "schema": {
+            "$ref": "#/$defs/pull"
+          },
+          "required": true,
+          "repeatable": true
+        }
+      ],
+      "request_body": {
+        "$ref": "#/$defs/submit"
+      },
+      "options": [
+        "--json",
+        "--dry-run",
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "id",
+        "repo",
+        "revision",
+        "target",
+        "submission",
+        "work",
+        "phase"
+      ]
+    },
+    "status": {
+      "description": "Read one run or submission.",
+      "usage": "gantry status ID",
+      "output": "json",
+      "method": "GET",
+      "route": "/v1/runs/{ID}",
+      "credential": [
+        "GANTRY_TOKEN",
+        "GANTRY_SUBMIT_TOKEN"
+      ],
+      "effect": "read run state",
+      "positionals": [
+        {
+          "name": "ID",
+          "schema": {
+            "$ref": "#/$defs/id"
+          },
+          "required": true
+        }
+      ],
+      "options": [
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "id",
+        "repo",
+        "revision",
+        "target",
+        "submission",
+        "work",
+        "phase"
+      ]
+    },
+    "watch": {
+      "description": "Stream changed run states until a terminal outcome.",
+      "usage": "gantry watch ID",
+      "output": "ndjson",
+      "method": "GET",
+      "route": "/v1/runs/{ID}",
+      "credential": [
+        "GANTRY_TOKEN",
+        "GANTRY_SUBMIT_TOKEN"
+      ],
+      "effect": "poll run state",
+      "positionals": [
+        {
+          "name": "ID",
+          "schema": {
+            "$ref": "#/$defs/id"
+          },
+          "required": true
+        }
+      ],
+      "options": [
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "id",
+        "repo",
+        "revision",
+        "target",
+        "submission",
+        "work",
+        "phase"
+      ]
+    },
+    "blob": {
+      "description": "Download an artifact or log by SHA-256.",
+      "usage": "gantry blob SHA256",
+      "output": "raw",
+      "method": "GET",
+      "route": "/v1/blobs/{SHA256}",
+      "credential": [
+        "GANTRY_TOKEN",
+        "GANTRY_WORKER_TOKEN"
+      ],
+      "effect": "read stored bytes",
+      "positionals": [
+        {
+          "name": "SHA256",
+          "schema": {
+            "$ref": "#/$defs/sha256"
+          },
+          "required": true
+        }
+      ],
+      "options": [
+        "--output"
+      ]
+    },
+    "describe": {
+      "description": "Inspect command metadata without a controller or credentials.",
+      "usage": "gantry describe [COMMAND]",
+      "output": "json",
+      "options": [
+        "--output"
+      ]
+    }
+  },
+  "options": {
+    "--output": {
+      "argument": "FORMAT",
+      "description": "Use json for JSON results and watch NDJSON, or raw for blob bytes."
+    },
+    "--json": {
+      "argument": "PAYLOAD",
+      "description": "Supply a full request object inline, or use - to read it from stdin. Use in place of positional arguments. jq parses the input before schema validation."
+    },
+    "--fields": {
+      "argument": "PATHS",
+      "description": "Project comma-separated object fields or dotted object paths. Missing paths are omitted. Applies to live JSON responses."
+    },
+    "--dry-run": {
+      "description": "Validate the local request and print the method, URL and body. Requires no credentials or controller."
+    }
+  },
+  "environment": {
+    "GANTRY_URL": {
+      "default": "http://127.0.0.1:4737",
+      "description": "Controller base URL."
+    },
+    "GANTRY_WATCH_SECONDS": {
+      "default": 1800,
+      "description": "Watch deadline in seconds."
+    }
+  },
+  "exit_codes": {
+    "0": "Success, including a valid dry run.",
+    "1": "Transport or service failure, watch deadline, or terminal failed or blocked run.",
+    "2": "Invalid command, arguments, request, or configuration.",
+    "3": "Missing credentials or HTTP 401/403.",
+    "4": "HTTP 404.",
+    "5": "HTTP 429.",
+    "6": "HTTP 409."
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^(?!\\.(?:\\.|git)?$)[A-Za-z0-9._-]+$",
+      "maxLength": 240
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._-]+$"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "string",
+      "pattern": "^[^\u0000-\u001f\u007f]+$"
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^(?!\\.(?:\\.|git)?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\\.(?:\\.|git)?(?:/|$))[A-Za-z0-9._-]+)*$",
+      "maxLength": 240
+    },
+    "pull": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "action": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/id"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\u0000]*$"
+          },
+          "minItems": 1
+        },
+        "inputs": {
+          "oneOf": [
+            {
+              "const": [
+                "."
+              ]
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/path"
+              }
+            }
+          ],
+          "default": [
+            "."
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          },
+          "default": []
+        },
+        "deps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "default": []
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 0,
+          "default": []
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 300
+        }
+      },
+      "required": [
+        "name",
+        "argv"
+      ],
+      "additionalProperties": false
+    },
+    "build": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "action": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/action"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "repo",
+        "revision",
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "submit": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo"
+        },
+        "pulls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pull"
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "repo",
+        "pulls"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
