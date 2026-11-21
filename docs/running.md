@@ -88,6 +88,13 @@ reservations to fit. Retain the worker directory on restart. It records
 whether a container could have started and keeps unpublished outcomes
 until a controller acknowledges them.
 
+The current Docker adapter runs under Python 3 from the Gleam worker entry
+point. It uses the standard library for controller HTTP requests, a local
+SQLite journal, and Docker subprocess management. The build graph, cache
+keys, and queue transitions live in the Gleam core. Action images supply
+the tools their commands need.
+[Worker lifecycle](architecture/runtime.md#run-an-action-graph)
+
 ## Use the agent and submit API
 
 Commit a `gantry.json` to the project. The
