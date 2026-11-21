@@ -19,3 +19,8 @@ Work in slices with an independently checkable exit. Record architectural
 decisions in `docs/adr/` and proposals in `docs/design-notes/`. Reuse Loom's
 linter and pin its provenance. Capture gate exit codes directly, report the
 cases exercised, and update `docs/next.md` at the end of the slice.
+
+Keep the queue's safety model and deterministic simulation aligned with
+changes to leases, capacity, or submit authority. Extend the seeded fault
+schedule when adding a new failure mode. Run the model and use the live
+end-to-end gate for effects that cross process or provider boundaries.

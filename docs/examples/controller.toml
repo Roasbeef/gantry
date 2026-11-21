@@ -1,0 +1,11 @@
+data_dir = "/srv/gantry/controller"
+blob_dir = "/srv/gantry/shared"
+port = 4737
+seed = ""
+
+[[repository]]
+name = "owner/project"
+branch = "main"
+target = "check"
+pool = "linux"
+image = "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"

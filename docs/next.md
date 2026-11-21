@@ -2,27 +2,22 @@
 
 **2026-11-21**
 
-The product decisions are agreed. Gantry owns a native action graph. Agents
-can run declared targets and restricted ad hoc actions with structured
-results. Controllers share a durable queue and executor pool with automatic
-takeover. GitHub submit lands the exact tested integration commit where
-the target rules permit it.
+The initial runnable slice implements immutable Git inputs, a native action
+graph, restricted ad hoc actions, durable claims and results, and guarded
+grouped submission. Controllers share Khepri/Ra. A standalone Docker
+worker journals each slot and can replay a result after losing a response.
+The [runbook](running.md) covers configuration and the API.
 
-The [design note](design-notes/central-build-submit-queue.md) defines the
-agent loop and implementation slices. The
-[architecture](architecture/build-and-submit.md) proposes Khepri/Ra for
-shared authority and Loom's standalone executor as the first execution
-seam to test. The [pure transition contract](architecture/state-machines.md)
-specifies the state evidence and durable effect boundary. The
-[research note](design-notes/build-system-research.md) records the
-Ninja action counts and the bare Git expected-base probe.
+The [queue decision](adr/001-khepri-owns-queue-decisions.md) records the
+council result and the throughput condition that would change it. Run
+`make check`, `make model-check`, and `make e2e` from a clean checkout.
+The end-to-end gate exercises real three-voter recovery, a Docker build,
+content-based cutoff, and guarded landing against a bare Git provider.
+The [model and deterministic simulation](../protocol/models/queue/README.md)
+cover claim, generation, custody, and exact-ref safety.
 
-The next implementation decision depends on the
-[verification proposal](design-notes/depth-signoff.md). Start by proving
-whether the Loom executor can stage pinned inputs and preserve a durable
-attempt across controller takeover. Follow with the native graph prototype
-and the transaction model for shared capacity and submission intent.
-
-Initial pre-interview experiments in the local workspace explore Gleam,
-Loom lint, and SQLite. SQLite fits local ledgers or test fixtures. The shared
-queue design uses a quorum-backed store.
+The next implementation slices are scoped GitHub deployment validation,
+the Loom executor interop test, and indexed queue metadata with retention.
+Obtain a measured short-action workload before selecting a different
+storage or dispatch architecture. The [verification proposal](design-notes/depth-signoff.md)
+defines the load and fault traces.

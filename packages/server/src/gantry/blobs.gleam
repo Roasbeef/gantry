@@ -1,0 +1,115 @@
+//// Source archives, logs and outputs are immutable content-addressed bytes.
+//// Queue transitions reference objects after their atomic publication.
+
+import gantry/internal/ffi_host
+import gleam/bit_array
+import gleam/crypto
+import gleam/list
+import gleam/result
+import gleam/string
+import simplifile
+
+/// Largest single object transferred through the first worker protocol.
+pub const limit = 67_108_864
+
+/// Compute the lowercase SHA-256 identity used over the wire.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // blobs.digest(<<"artifact">>)
+/// ```
+pub fn digest(bytes: BitArray) -> String {
+  crypto.hash(crypto.Sha256, bytes)
+  |> bit_array.base16_encode
+  |> string.lowercase
+}
+
+/// Check a digest before it crosses the filesystem boundary.
+///
+/// ## Examples
+///
+/// ```gleam
+/// blobs.valid("not-a-digest") == False
+/// ```
+pub fn valid(value: String) -> Bool {
+  string.byte_size(value) == 64
+  && list.all(string.to_utf_codepoints(value), fn(point) {
+    let n = string.utf_codepoint_to_int(point)
+    { n >= 48 && n <= 57 } || { n >= 97 && n <= 102 }
+  })
+}
+
+/// Atomically publish bytes at their immutable object path.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // blobs.put(shared_root, <<"artifact">>)
+/// ```
+pub fn put(root: String, bytes: BitArray) -> Result(String, String) {
+  use Nil <- result.try(check_size(bytes))
+  let id = digest(bytes)
+  let directory = root <> "/objects"
+  let path = directory <> "/" <> id
+
+  use Nil <- result.try(
+    simplifile.create_directory_all(directory)
+    |> result.replace_error("cannot open blob directory"),
+  )
+  let suffix = crypto.strong_random_bytes(16) |> bit_array.base16_encode
+  let temporary = directory <> "/.upload-" <> suffix
+  use Nil <- result.try(
+    simplifile.write_bits(bytes, to: temporary)
+    |> result.replace_error("cannot stage blob"),
+  )
+
+  // Concurrent writers publish identical bytes at the same destination.
+  let published = {
+    use Nil <- result.try(ffi_host.sync_path(temporary))
+    use Nil <- result.try(
+      simplifile.rename(temporary, path)
+      |> result.replace_error("cannot publish blob"),
+    )
+    use Nil <- result.try(ffi_host.sync_path(directory))
+    ffi_host.sync_path(root) |> result.map(fn(_) { id })
+  }
+  let _ = simplifile.delete_file(temporary)
+  published
+}
+
+/// Fetch and verify one immutable object.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // blobs.get(shared_root, id)
+/// ```
+pub fn get(root: String, id: String) -> Result(BitArray, String) {
+  use Nil <- result.try(check_digest(id))
+  use bytes <- result.try(
+    simplifile.read_bits(root <> "/objects/" <> id)
+    |> result.replace_error("blob unavailable"),
+  )
+  use Nil <- result.try(check_size(bytes))
+
+  // Return the object only if its bytes still match its address.
+  case digest(bytes) == id {
+    True -> Ok(bytes)
+    False -> Error("stored blob failed digest verification")
+  }
+}
+
+fn check_digest(id: String) -> Result(Nil, String) {
+  case valid(id) {
+    True -> Ok(Nil)
+    False -> Error("invalid SHA-256 digest")
+  }
+}
+
+fn check_size(bytes: BitArray) -> Result(Nil, String) {
+  case bit_array.byte_size(bytes) <= limit {
+    True -> Ok(Nil)
+    False -> Error("blob exceeds 64 MiB")
+  }
+}

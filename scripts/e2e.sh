@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Three local voters, one independent worker, real Docker and a bare Git remote.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root/packages/server"
+tmp=$(mktemp -d)
+declare -a pids=()
+cleanup() {
+  local status=$?
+  trap - EXIT
+  for pid in "${pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+  if (( status != 0 )); then
+    for log in "$tmp"/*.log; do
+      [[ -f $log ]] && { echo "$log" >&2; tail -40 "$log" >&2; }
+    done
+    echo "Retained test directory $tmp" >&2
+  else
+    rm -rf "$tmp"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+export GANTRY_TOKEN="agent-$(openssl rand -hex 24)"
+export GANTRY_WORKER_TOKEN="worker-$(openssl rand -hex 24)"
+export GANTRY_SUBMIT_TOKEN="submit-$(openssl rand -hex 24)"
+cookie=$(openssl rand -hex 20)
+node="gantry_e2e_$$"
+base_port=${GANTRY_E2E_PORT:-18080}
+endpoints=()
+for i in 1 2 3; do endpoints+=("http://127.0.0.1:$((base_port+i-1))"); done
+docker image inspect alpine:3.22 >/dev/null 2>&1 || docker pull alpine:3.22
+image=$(docker image inspect alpine:3.22 | jq -er '.[0].RepoDigests | map(select(test("(^|/)alpine@sha256:[a-f0-9]{64}$"))) | first')
+echo "Worker image $image"
+remote="$tmp/remote.git"
+source_dir="$tmp/source"
+git init -q --bare --initial-branch=main "$remote"
+git init -q --initial-branch=main "$source_dir"
+g() { git -C "$source_dir" "$@"; }
+g config user.email gantry@example.invalid
+g config user.name Gantry
+cp "$root/scripts/fixtures/e2e/gantry.json" "$source_dir/"
+echo 'stable first' > "$source_dir/source.txt"
+echo left > "$source_dir/left.txt"
+echo right > "$source_dir/right.txt"
+g add .
+g commit -qm base
+base=$(g rev-parse HEAD)
+g push -q "$remote" HEAD:refs/heads/main
+echo 'stable second' > "$source_dir/source.txt"
+g commit -qam normalization
+changed=$(g rev-parse HEAD)
+g push -q "$remote" HEAD:refs/heads/normalize-change
+for pr in 12 13; do
+  g checkout -q --detach "$base"
+  if [[ $pr == 12 ]]; then file=left; else file=right; fi
+  echo "pull-$pr" > "$source_dir/$file.txt"
+  g commit -qam "Change $file"
+  g push -q "$remote" "HEAD:refs/pull/$pr/head"
+done
+start() {
+  local log=$1
+  shift
+  setsid "$@" >"$tmp/$log.log" 2>&1 &
+  pids+=("$!")
+}
+wait_for() {
+  local description=$1
+  shift
+  local deadline=$((SECONDS+120))
+  until "$@"; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for $description" >&2
+      return 1
+    fi
+    sleep 0.3
+  done
+}
+get() { curl -fsS --connect-timeout 1 --max-time 5 -H "Authorization: Bearer $GANTRY_TOKEN" "$1"; }
+healthy() { get "$1/health" >/dev/null 2>&1; }
+gleam build
+for i in 1 2 3; do
+  seed=""
+  if (( i > 1 )); then seed="${node}1@127.0.0.1"; fi
+  cat > "$tmp/node$i.toml" <<TOML
+data_dir = "$tmp/data$i"
+blob_dir = "$tmp/blobs"
+port = $((base_port+i-1))
+seed = "$seed"
+
+[[repository]]
+name = "fixture/project"
+local_remote = "$remote"
+branch = "main"
+target = "check"
+pool = "default"
+image = "$image"
+TOML
+  start "node$i" env GANTRY_CONFIG="$tmp/node$i.toml" ERL_FLAGS="+S 2:2 -name ${node}$i@127.0.0.1 -setcookie $cookie" gleam run
+  wait_for "voter $i" healthy "${endpoints[i-1]}"
+done
+post() {
+  curl -fsS --max-time 60 -H "Authorization: Bearer $2" -H 'Content-Type: application/json' --data "$3" "$1" > "$tmp/post.json"
+}
+run() {
+  post "$1/v1/runs" "$GANTRY_TOKEN" "$(jq -nc --arg id "$2" --arg rev "$3" '{id:$id,repo:"fixture/project",target:"check",revision:$rev}')"
+}
+worker_urls=$(IFS=,; echo "${endpoints[*]}")
+start worker env ERL_FLAGS="+S 2:2" GANTRY_ENDPOINT="$worker_urls" GANTRY_POOL=default GANTRY_WORKER_ID=worker-one GANTRY_WORKER_DIR="$tmp/worker" gleam run -m gantry/worker
+run "${endpoints[0]}" initial "$base"
+matches() {
+  get "$1/v1/runs/$2" > "$tmp/current.json" || return 1
+  if jq -e "$3" "$tmp/current.json" >/dev/null; then return 0; fi
+  if jq -e '.phase == "failed" or .phase == "blocked"' "$tmp/current.json" >/dev/null; then
+    cat "$tmp/current.json" >&2
+    exit 1
+  fi
+  return 1
+}
+wait_for 'active producer with waiting consumer' matches "${endpoints[1]}" initial '
+  [.work[] | {(.task.action.name):.step.kind}] | add == {normalize:"active",collect:"pending"}'
+kill -KILL -- "-${pids[0]}"
+wait "${pids[0]}" 2>/dev/null || true
+unset 'pids[0]'
+wait_for 'surviving quorum to complete initial run' matches "${endpoints[1]}" initial '
+  .phase == "passed" and all(.work[]; .step.kind == "passed")'
+run "${endpoints[2]}" cutoff "$changed"
+wait_for 'unchanged normalized bytes to reuse consumer' matches "${endpoints[1]}" cutoff '
+  .phase == "passed" and ([.work[] | {(.task.action.name):.step.kind}] | add == {normalize:"passed",collect:"reused"})'
+post "${endpoints[2]}/v1/submits" "$GANTRY_SUBMIT_TOKEN" '{"id":"group","repo":"fixture/project","pulls":[12,13]}'
+wait_for 'tested group to land' matches "${endpoints[1]}" group '.phase == "landed"'
+candidate=$(jq -er '.submission.candidate.commit' "$tmp/current.json")
+[[ $(git -C "$remote" rev-parse refs/heads/main) == "$candidate" ]]
+[[ $(jq -er '.submission.candidate.base' "$tmp/current.json") == "$base" ]]
+for rev in "$base" refs/pull/12/head refs/pull/13/head; do
+  git -C "$remote" merge-base --is-ancestor "$rev" "$candidate"
+done
+digest=$(jq -er '.work[] | select(.task.action.name == "collect") | .step.proof.files[] | select(.path=="report.txt") | .digest' "$tmp/current.json")
+get "${endpoints[2]}/v1/blobs/$digest" > "$tmp/report"
+printf '%s\n' stable pull-12 pull-13 > "$tmp/expected-report"
+cmp "$tmp/expected-report" "$tmp/report"
+# Race an independent fast-forward against a candidate whose checks are pending.
+g fetch -q "$remote" refs/heads/main
+g checkout -q --detach "$candidate"
+echo 'new race' > "$source_dir/source.txt"
+g commit -qam 'Require a fresh producer execution'
+g push -q "$remote" HEAD:refs/pull/14/head
+post "${endpoints[1]}/v1/submits" "$GANTRY_SUBMIT_TOKEN" '{"id":"race","repo":"fixture/project","pulls":[14]}'
+wait_for 'race candidate to start testing' matches "${endpoints[2]}" race '
+  .submission.kind == "queued" and any(.work[]; .step.kind == "active")'
+g checkout -q --detach "$candidate"
+echo concurrent > "$source_dir/concurrent.txt"
+g add concurrent.txt
+g commit -qm 'Advance protected branch while candidate is testing'
+winner=$(g rev-parse HEAD)
+g push -q "$remote" HEAD:refs/heads/main
+wait_for 'stale base to block landing' matches "${endpoints[2]}" race '.phase == "blocked"'
+[[ $(git -C "$remote" rev-parse refs/heads/main) == "$winner" ]]
+echo "Passed stale-base protection at $winner"
+echo "Passed DAG, seed loss during active lease, early cutoff, grouped landing and artifact byte checks ($candidate)"
+
+# Check an agent-only failure through the normal CLI and read its persisted log.
+export GANTRY_URL="${endpoints[1]}"
+cli="$root/scripts/gantry"
+"$cli" plan agent-plan fixture/project "$candidate" check > "$tmp/agent-plan.json"
+jq -e '[.actions[].name] == ["normalize", "collect"]' "$tmp/agent-plan.json" >/dev/null
+code=$(curl -sS -o "$tmp/unauthorized.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $GANTRY_TOKEN" --data '{"id":"denied","repo":"fixture/project","pulls":[14]}' \
+  "$GANTRY_URL/v1/submits")
+[[ $code == 401 ]]
+cat > "$tmp/diagnostic.json" <<'JSON'
+{"name":"diagnostic","argv":["sh","-ec","echo fixture-error >&2; exit 23"],"inputs":[],"outputs":[]}
+JSON
+for i in 1 2; do
+  "$cli" run adhoc-failure fixture/project "$candidate" check "$tmp/diagnostic.json" > "$tmp/adhoc.json"
+  jq -e '.id == "adhoc-failure"' "$tmp/adhoc.json" >/dev/null
+done
+if "$cli" watch adhoc-failure > "$tmp/adhoc-watch.jsonl"; then
+  echo 'An ad hoc action with exit 23 unexpectedly succeeded' >&2
+  exit 1
+fi
+failed_log=$(jq -ser 'last | select(.phase == "failed") | .work[0].step | select(.reason | contains("23")) | .log' "$tmp/adhoc-watch.jsonl")
+"$cli" blob "$failed_log" > "$tmp/adhoc-result.log"
+grep -Fx 'fixture-error' "$tmp/adhoc-result.log"
+echo 'Passed agent plan, ad hoc admission replay, failure diagnostics, and submit authorization'

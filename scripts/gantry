@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+url=${GANTRY_URL:-http://127.0.0.1:4737}
+url=${url%/}
+timeout=${GANTRY_WATCH_SECONDS:-1800}
+
+usage() {
+  printf '%s\n' 'gantry plan|run ID REPO COMMIT TARGET [AD_HOC_ACTION.json]' \
+    'gantry submit ID REPO PR [PR ...]' 'gantry status|watch ID' 'gantry blob SHA256' >&2
+  exit 2
+}
+
+request() {
+  local token=$1
+  shift
+  printf 'Authorization: Bearer %s\n' "$token" | curl --fail-with-body -sS --max-time 180 -H @- "$@"
+}
+
+read_token() {
+  local token=${GANTRY_TOKEN:-${GANTRY_SUBMIT_TOKEN:-}}
+  printf '%s\n' "${token:?Set GANTRY_TOKEN or GANTRY_SUBMIT_TOKEN}"
+}
+
+command=${1:-}
+[[ -n $command ]] || usage
+shift
+case $command in
+  plan|run)
+    (( $# == 4 || $# == 5 )) || usage
+    action=null
+    if (( $# == 5 )); then action=$(jq -ce 'select(type == "object")' "$5"); fi
+    payload=$(jq -nc --arg id "$1" --arg repo "$2" --arg revision "$3" --arg target "$4" \
+      --argjson action "$action" '{id:$id,repo:$repo,revision:$revision,target:$target,action:$action}')
+    route=plans
+    [[ $command == plan ]] || route=runs
+    request "${GANTRY_TOKEN:?Set GANTRY_TOKEN}" -H 'Content-Type: application/json' \
+      --data "$payload" "$url/v1/$route"
+    ;;
+  submit)
+    (( $# >= 3 )) || usage
+    id=$1 repo=$2
+    shift 2
+    pulls=$(jq -nc --args '$ARGS.positional | map(tonumber)' -- "$@")
+    payload=$(jq -nc --arg id "$id" --arg repo "$repo" --argjson pulls "$pulls" \
+      '{id:$id,repo:$repo,pulls:$pulls}')
+    request "${GANTRY_SUBMIT_TOKEN:?Set GANTRY_SUBMIT_TOKEN}" -H 'Content-Type: application/json' \
+      --data "$payload" "$url/v1/submits"
+    ;;
+  status|watch|blob)
+    (( $# == 1 )) || usage
+    [[ $1 =~ ^[a-zA-Z0-9._-]+$ ]] || usage
+    token=$(read_token)
+    if [[ $command == blob ]]; then request "$token" "$url/v1/blobs/$1"; exit; fi
+    if [[ $command == status ]]; then request "$token" "$url/v1/runs/$1"; exit; fi
+    deadline=$((SECONDS + timeout))
+    previous=
+    while (( SECONDS < deadline )); do
+      if current=$(request "$token" "$url/v1/runs/$1"); then
+        if [[ $current != "$previous" ]]; then printf '%s\n' "$current"; fi
+        previous=$current
+        state=$(jq -r '.phase' <<<"$current")
+        case $state in
+          landed) exit 0 ;;
+          failed|blocked) exit 1 ;;
+          passed) if jq -e '.submission.kind == "build"' <<<"$current" >/dev/null; then exit 0; fi ;;
+        esac
+      fi
+      sleep 1
+    done
+    echo "Timed out watching $1" >&2
+    exit 1
+    ;;
+  *) usage ;;
+esac

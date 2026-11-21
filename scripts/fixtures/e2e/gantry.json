@@ -1,0 +1,20 @@
+{
+  "actions": [
+    {
+      "name": "normalize",
+      "argv": ["sh", "-ec", "sleep 10; cut -d ' ' -f 1 source.txt > normalized.txt"],
+      "inputs": ["source.txt"],
+      "outputs": ["normalized.txt"],
+      "timeout": 60
+    },
+    {
+      "name": "collect",
+      "argv": ["sh", "-ec", "cat normalized.txt left.txt right.txt > report.txt"],
+      "inputs": ["left.txt", "right.txt"],
+      "outputs": ["report.txt"],
+      "deps": ["normalize"],
+      "timeout": 60
+    }
+  ],
+  "targets": {"check": ["collect"]}
+}

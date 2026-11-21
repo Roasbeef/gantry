@@ -1,0 +1,67 @@
+name: Gantry submit
+on:
+  workflow_dispatch:
+    inputs:
+      pulls:
+        description: Ordered PR numbers as a JSON array, for example [12,13]
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: gantry-admission-${{ github.repository }}-${{ github.run_id }}
+
+jobs:
+  submit:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GANTRY_URL: ${{ vars.GANTRY_URL }}
+      GANTRY_SUBMIT_TOKEN: ${{ secrets.GANTRY_SUBMIT_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      PULLS: ${{ inputs.pulls }}
+      REPO: ${{ github.repository }}
+      RUN_ID: github-${{ github.run_id }}
+    steps:
+      - name: Submit the ordered group and link the landed commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GANTRY_URL:?Configure the trusted Gantry HTTPS endpoint}"
+          : "${GANTRY_SUBMIT_TOKEN:?Configure the Gantry submit credential}"
+          [[ $GANTRY_URL == https://* ]]
+          api() {
+            printf 'Authorization: Bearer %s\n' "$GANTRY_SUBMIT_TOKEN" |
+              curl -fsS --max-time 180 -H @- "$@"
+          }
+          payload=$(jq -nc --arg id "$RUN_ID" --arg repo "$REPO" --argjson pulls "$PULLS" \
+            '{id:$id,repo:$repo,pulls:$pulls}')
+          api -H 'Content-Type: application/json' --data "$payload" "${GANTRY_URL%/}/v1/submits" >/dev/null
+          deadline=$((SECONDS + 2400))
+          commit=
+          while (( SECONDS < deadline )); do
+            if state=$(api "${GANTRY_URL%/}/v1/runs/$RUN_ID"); then
+              case "$(jq -r .phase <<<"$state")" in
+                landed) commit=$(jq -er '.submission.candidate.commit' <<<"$state"); break ;;
+                failed|blocked) jq . <<<"$state" >&2; exit 1 ;;
+              esac
+            fi
+            sleep 5
+          done
+          [[ $commit =~ ^[a-f0-9]{40}$ ]]
+          marker="<!-- gantry-run:$RUN_ID -->"
+          body=$(printf '%s\n\nGantry tested and landed this group in [%s](https://github.com/%s/commit/%s).\n' \
+            "$marker" "${commit:0:12}" "$REPO" "$commit")
+          while IFS= read -r pull; do
+            comments=$(gh api --paginate --slurp "repos/$REPO/issues/$pull/comments")
+            if jq -e --arg marker "$marker" \
+                'add | any(.user.login == "github-actions[bot]" and (.body | startswith($marker)))' \
+                <<<"$comments" >/dev/null; then
+              continue
+            fi
+            gh api --method POST "repos/$REPO/issues/$pull/comments" -f body="$body" >/dev/null
+          done < <(jq -r '.submission.candidate.members[].pull' <<<"$state")

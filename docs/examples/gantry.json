@@ -1,0 +1,20 @@
+{
+  "targets": {"check": ["test"]},
+  "actions": [
+    {
+      "name": "build",
+      "argv": ["sh", "-ec", "mkdir -p out && cp source.txt out/product"],
+      "inputs": ["source.txt"],
+      "outputs": ["out/product"],
+      "timeout": 60
+    },
+    {
+      "name": "test",
+      "argv": ["sh", "-ec", "test -s out/product && printf 'passed\n' > report.txt"],
+      "inputs": [],
+      "deps": ["build"],
+      "outputs": ["report.txt"],
+      "timeout": 30
+    }
+  ]
+}
