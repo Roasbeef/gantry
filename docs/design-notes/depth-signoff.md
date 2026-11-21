@@ -6,7 +6,9 @@ The design depends on two beliefs. A native action graph should save
 actual work when an agent edits and retries a target. Loom's existing
 executor should let a different controller continue an attempt without
 moving authority over the build to the executor. Prove both before
-freezing the graph or worker interfaces.
+freezing the graph or worker interfaces. The
+[reference probes](build-system-research.md#reference-probes) supply
+initial action-count and Git-ref oracles.
 
 ## Raw material and instruments
 
@@ -38,7 +40,10 @@ complete trace to make the result reproducible.
 
 - **Incrementality.** On the recorded edit series, execute zero actions
   outside the changed-input closure. For deterministic fixtures, compare
-  every declared output digest with a cold run. A policy, platform, or
+  every declared output digest with a cold run. If a changed input
+produces identical output bytes, downstream actions keep their keys.
+An order-only edit runs its own prerequisite without invalidating the
+target's artifact. A policy, platform, or
   toolchain identity change must invalidate its affected keys. Report
   command counts and cache outcomes per snapshot.
 - **Agent wait.** Aim for p95 under 250 ms from a warm, 10,000-action

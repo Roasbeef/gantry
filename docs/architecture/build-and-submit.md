@@ -7,7 +7,9 @@ can another controller finish, and which externally visible effects might
 already have happened? The controller commits the decision and its identity
 before calling an executor or Git. Those external systems enforce their own
 conditions. The controller records the outcome before telling the caller
-that the effect is complete.
+that the effect is complete. The
+[state and effect contracts](state-machines.md) define what evidence
+each transition carries.
 
 ```mermaid
 flowchart LR
@@ -33,7 +35,9 @@ a pinned toolchain, platform and isolation requirements, resource needs,
 and a timeout. The compiler resolves paths in a snapshot, rejects cycles
 and overlapping outputs, and exposes the action closure in stable order.
 Dependencies that supply bytes participate in identity. Ordering-only
-dependencies constrain scheduling.
+dependencies constrain scheduling. Resolve downstream keys against the
+upstream output digests. A producer that reruns with identical outputs
+leaves the downstream keys intact.
 
 A build references a Git commit, with a separately digested overlay when
 an agent wants to test before committing. Actions receive a projected tree
@@ -62,7 +66,7 @@ also requires provenance from an approved executor and policy.
 | --- | --- |
 | Plan target | Dependency closure, declared inputs, resource class, and possible cache reuse |
 | Start / watch | Idempotent request key, run and action IDs, and ordered lifecycle events with a resumable cursor |
-| Inspect failure | Failed action and attempt, exit or infrastructure reason, blocked dependents, log ranges, artifact digests, and reproduction parameters |
+| Explain or inspect failure | An invalidation reason and dependency path, or a failed action, attempt, typed outcome, log ranges, artifact digests, and replay reference |
 | Retry / cancel | A new attempt or run with explicit lineage, or a durable cancellation state with any running work identified |
 | Submit / inspect landing | Source PRs and heads, candidate and base SHAs, required build evidence, and GitHub reconciliation state |
 
@@ -141,18 +145,20 @@ eligible PRs and records each PR number and head SHA, the current base SHA,
 the integration commit, and the required policy digest. Prepare the
 candidate in a managed Git object store using Git's merge machinery. Keep
 the base on its first-parent chain and all tested heads reachable. Record
-and retain the candidate object before dispatch. Resolve a conflict or
-failed build before trying to land that group. An operator can split the
-group and requeue ordered subsets, each with its own candidate and evidence.
+and retain the candidate object before dispatch. Start with one active
+candidate per lane. The candidate can use many executors through its
+action graph. Resolve a conflict or failed build before trying to land
+that group. An operator can split the group and requeue ordered subsets,
+each with its own candidate and evidence.
 
 When the required targets pass, commit a submission intent containing the
 exact lane, base, candidate, group, and build evidence. A lane holds one
-unresolved intent. Revalidate each PR head and the repository's configured source-PR review
-and check policy before attempting the push. Check the candidate's
-ancestry, then use an explicit expected-old-OID Git push to update the
-target. GitHub's branch rules still apply. A repository that requires
-PR-native approval for every update can use Gantry checks while direct
-landing is unavailable.
+unresolved intent. Revalidate each PR head and the repository's configured
+source PR review and check policy before attempting the push. Check the
+candidate's ancestry, then use an explicit expected-old-OID Git push to
+update the target. GitHub's branch rules still apply. A repository that
+requires PR-native approval for every update can use Gantry checks
+while direct landing is unavailable.
 
 A disconnect or controller failover leaves that same intent available to
 any controller. If the candidate is on the target's history, record it as
@@ -176,10 +182,12 @@ close a PR, publish the landed SHA and keep the PR reconciliation visible.
 An unconditional close could close a newer revision between a read and an
 update. Retry status publication without repeating the Git update.
 
-A trusted GitHub Actions workflow can submit a request with scoped
-authorization and wait for Gantry's result. Keep privileged admission out
-of workflows that execute PR code. A GitHub App can report checks and
-reconcile PRs. In each path Gantry owns the build and the effect history.
+A trusted GitHub Actions workflow can authenticate with a short-lived
+OIDC token and wait for Gantry's result. Admission binds the audience,
+repository identity, and approved workflow identity to the configured
+scope. Gantry resolves the pinned PR metadata on the provider. Use a
+trusted workflow for privileged admission. A GitHub App can report checks
+and reconcile PRs. In each path Gantry owns the build and effect history.
 [Git push lease semantics](https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-leaseltrefnamegtltexpectgt) ·
 [GitHub branch protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) ·
 [GitHub indirect merges](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/about-pull-request-merges) ·

@@ -7,5 +7,7 @@ system can test a group of GitHub PRs and submit the resulting commit.
 
 - [Design and scope](docs/design-notes/central-build-submit-queue.md)
 - [Proposed architecture](docs/architecture/build-and-submit.md)
+- [Pure decisions and durable effects](docs/architecture/state-machines.md)
+- [Build system and merge queue research](docs/design-notes/build-system-research.md)
 - [Verification proposal](docs/design-notes/depth-signoff.md)
 - [Current handoff](docs/next.md)

@@ -12,7 +12,10 @@ The [design note](design-notes/central-build-submit-queue.md) defines the
 agent loop and implementation slices. The
 [architecture](architecture/build-and-submit.md) proposes Khepri/Ra for
 shared authority and Loom's standalone executor as the first execution
-seam to test.
+seam to test. The [pure transition contract](architecture/state-machines.md)
+specifies the state evidence and durable effect boundary. The
+[research note](design-notes/build-system-research.md) records the
+Ninja action counts and the bare Git expected-base probe.
 
 The next implementation decision depends on the
 [verification proposal](design-notes/depth-signoff.md). Start by proving
