@@ -1,0 +1,10 @@
+{
+  "targets": {"check": ["verify-pilot"]},
+  "actions": [{
+    "name": "verify-pilot",
+    "argv": ["sh", "-ec", "grep -qx left pilot-left.txt; grep -qx right pilot-right.txt; printf 'both PRs built\\n' > report.txt"],
+    "inputs": ["pilot-left.txt", "pilot-right.txt"],
+    "outputs": ["report.txt"],
+    "timeout": 60
+  }]
+}
