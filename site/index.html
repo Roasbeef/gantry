@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Gantry is self-hosted build infrastructure for coding agents, with inspectable action plans, durable runs, and guarded merges of the exact commits it tests.">
+  <meta name="theme-color" content="#101612">
+  <title>Gantry — Self-hosted builds and tested merges</title>
+  <link rel="icon" href="./gantry.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./site.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header">
+    <div class="wrap nav">
+      <a class="brand" href="./" aria-label="Gantry home">
+        <img src="./gantry.svg" alt="" width="32" height="32">
+        <span>gantry</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#workflow">Workflow</a>
+        <a href="#runtime">Runtime</a>
+        <a href="https://github.com/Roasbeef/gantry" class="source-link">GitHub <span class="external" aria-hidden="true"></span></a>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow"><span aria-hidden="true"></span> Self-hosted CI for coding agents</p>
+          <h1 id="hero-title">Build on your<br> own runners.<br> <em>Land what passed.</em></h1>
+          <p>Give an agent a Git commit and a target. Gantry previews the actions, runs them on your machines, and saves the results under a durable run ID.</p>
+          <div class="hero-links">
+            <a class="primary" href="#start">Run it locally <span aria-hidden="true">↓</span></a>
+            <a class="text-link" href="https://github.com/Roasbeef/gantry/blob/main/docs/cli.md">CLI reference <span class="external" aria-hidden="true"></span></a>
+          </div>
+        </div>
+        <div class="hero-visual">
+          <div class="terminal">
+            <div class="terminal-bar">
+              <span class="terminal-icon" aria-hidden="true">›_</span>
+              <h2>Build a pinned revision</h2>
+              <button class="copy" type="button" hidden>Copy commands</button>
+            </div>
+            <pre><code><span class="prompt" aria-hidden="true"></span>revision=$(git rev-parse HEAD)
+<span class="prompt" aria-hidden="true"></span>run_id="check-$(date +%s)"
+
+<span class="prompt" aria-hidden="true"></span>gantry <b>plan</b> "$run_id" owner/project "$revision" check
+<span class="prompt" aria-hidden="true"></span>gantry <b>run</b> "$run_id" owner/project "$revision" check
+<span class="prompt" aria-hidden="true"></span>gantry <b>watch</b> "$run_id"</code></pre>
+            <div class="terminal-note">From a registered project with the CLI configured.</div>
+          </div>
+          <div class="hero-track">
+            <div><i aria-hidden="true"></i><span>Plan</span><small>Action graph</small></div>
+            <div><i aria-hidden="true"></i><span>Run</span><small>Worker pool</small></div>
+            <div><i aria-hidden="true"></i><span>Watch</span><small>Durable results</small></div>
+          </div>
+        </div>
+      </div>
+      <div class="wrap assurance">
+        <svg viewBox="0 0 24 24" width="23" height="23" fill="none" aria-hidden="true"><path d="M5 4v16m0-8h7a6 6 0 0 0 6-6V4m0 0-3 3m3-3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <p><strong>The tested commit is the merge.</strong> Gantry advances the target to the exact commit that passed, provided the branch still points to the tested base.</p>
+      </div>
+    </section>
+
+    <section class="section workflow" id="workflow" aria-labelledby="workflow-title">
+      <div class="wrap">
+        <div class="section-intro">
+          <p class="eyebrow">Workflow</p>
+          <h2 id="workflow-title">Build a revision.<br> Submit a group.</h2>
+          <p>Both use the same action graph. Submission uses a passing run to authorize a guarded Git update.</p>
+        </div>
+        <div class="modes">
+          <article>
+            <h3><span aria-hidden="true">›_</span> Ordinary build</h3>
+            <p>Run a target against a pinned revision. Inspect per-action status and fetch logs or artifacts by digest. Check back later with the same run ID.</p>
+            <code>gantry run &lt;id&gt; &lt;repo&gt; &lt;commit&gt; &lt;target&gt;</code>
+          </article>
+          <article>
+            <h3><span aria-hidden="true">↳</span> Guarded submit</h3>
+            <p>Submit PRs in order. Gantry pins their heads, builds a combined commit, and uses the tested base SHA to guard the target update.</p>
+            <code>gantry submit &lt;id&gt; &lt;repo&gt; &lt;pr&gt; [&lt;pr&gt; ...]</code>
+          </article>
+        </div>
+
+        <figure class="trace" aria-labelledby="trace-title">
+          <figcaption>
+            <div>
+              <p class="eyebrow">Guarded submit</p>
+              <h3 id="trace-title">Follow the candidate</h3>
+            </div>
+            <p class="trace-caption">Illustrative run · Abbreviated hashes</p>
+          </figcaption>
+          <ol class="trace-steps">
+            <li>
+              <span class="station" aria-hidden="true"><span>↳</span></span>
+              <h4>Pin the inputs</h4>
+              <p>Combine PRs #12 and #13 in order on <code>main</code> at <code>53ad9e2</code>.</p>
+              <div class="trace-id"><small>Candidate commit</small><code>c42f8b7</code></div>
+            </li>
+            <li>
+              <span class="station" aria-hidden="true"><span>›_</span></span>
+              <h4>Test the candidate</h4>
+              <p>Run the required actions using files from the candidate.</p>
+              <div class="trace-id"><small>Tested commit</small><code>c42f8b7</code></div>
+              <div class="artifact"><small>Example artifact digest</small><code>sha256:89e7d31…</code></div>
+            </li>
+            <li>
+              <span class="station" aria-hidden="true"><span>◇</span></span>
+              <h4>Record the intent</h4>
+              <p>After the required work passes, persist the intended ref update.</p>
+              <div class="trace-id"><small>Commit to land</small><code>c42f8b7</code></div>
+            </li>
+            <li>
+              <span class="station" aria-hidden="true"><span>→</span></span>
+              <h4>Apply the Git guard</h4>
+              <p>Advance <code>main</code> only while its tip equals <code>53ad9e2</code>.</p>
+              <div class="trace-id"><small>Proposed new tip</small><code>c42f8b7</code></div>
+            </li>
+          </ol>
+          <div class="trace-result">
+            <div class="trace-output" aria-live="polite" aria-atomic="true">
+              <span class="outcome" id="outcome-label">Landed</span>
+              <p id="outcome-text">Base matches. <code>main</code> advances from <code>53ad9e2</code> to <code>c42f8b7</code>.</p>
+            </div>
+            <button type="button" id="toggle-base" hidden>Simulate a moved base</button>
+          </div>
+          <p class="trace-fallback" id="trace-fallback">If <code>main</code> advances elsewhere before the update, Git rejects the push. A fresh submission builds on the new tip.</p>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section runtime" id="runtime" aria-labelledby="runtime-title">
+      <div class="wrap runtime-grid">
+        <div class="section-intro">
+          <p class="eyebrow">Runtime</p>
+          <h2 id="runtime-title">A shared queue.<br> Your machines.</h2>
+          <p>Route registered projects to named worker pools. When an action’s definition, image, inputs, and upstream artifacts match, Gantry can reuse its result across commits.</p>
+          <a href="https://github.com/Roasbeef/gantry/blob/main/docs/architecture/runtime.md" class="text-link">Read the runtime architecture <span class="external" aria-hidden="true"></span></a>
+        </div>
+        <div class="runtime-map" aria-label="Runtime components and connections">
+          <div class="map-in">
+            <span>Agent or CI</span><span>↓</span><small>Plans, runs, submissions</small>
+          </div>
+          <article class="controller">
+            <div class="node-mark" aria-hidden="true">▦</div>
+            <div><h3>Controllers</h3><p>Khepri and Ra replicate the queue, including run state, leases, and submit intents.</p></div>
+          </article>
+          <div class="map-branches">
+            <article>
+              <span class="relation">↕ Claims and results</span>
+              <h3>Worker pools</h3>
+              <p>Docker actions on your hosts. A local SQLite journal tracks custody and lets a worker replay results.</p>
+            </article>
+            <article>
+              <span class="relation">↕ Bytes by digest</span>
+              <h3>Blob store</h3>
+              <p>Shared storage for input snapshots, logs, and artifacts, addressed by SHA-256.</p>
+            </article>
+            <article>
+              <span class="relation">↕ Fetch and update</span>
+              <h3>Git remote</h3>
+              <p>Supplies commits and checks the expected target SHA when Gantry pushes.</p>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section start" id="start" aria-labelledby="start-title">
+      <div class="wrap start-grid">
+        <div class="section-intro">
+          <p class="eyebrow">Get started</p>
+          <h2 id="start-title">Run it locally.</h2>
+          <p>On Linux, install the pinned toolchain and Docker prerequisites, then run the end-to-end check. It starts three controllers and a Docker worker, and exercises failover, action reuse, and exact-commit landing against a local bare Git remote.</p>
+          <p class="verification">GitHub provider verification has covered builds. Live GitHub landing and PR reconciliation still need deployment validation.</p>
+        </div>
+        <div>
+          <div class="terminal">
+            <div class="terminal-bar">
+              <span class="terminal-icon" aria-hidden="true">›_</span>
+              <h3>From a Linux shell</h3>
+              <button class="copy" type="button" hidden>Copy commands</button>
+            </div>
+            <pre><code><span class="prompt" aria-hidden="true"></span>git clone https://github.com/Roasbeef/gantry.git
+<span class="prompt" aria-hidden="true"></span>cd gantry
+<span class="prompt" aria-hidden="true"></span>make e2e</code></pre>
+          </div>
+          <div class="start-links">
+            <a class="text-link" href="https://github.com/Roasbeef/gantry/blob/main/docs/running.md#build-and-verify">Setup and runbook <span class="external" aria-hidden="true"></span></a>
+            <a class="text-link" href="https://github.com/Roasbeef/gantry/blob/main/docs/integrating.md">Integrate a repo <span class="external" aria-hidden="true"></span></a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer>
+    <div class="wrap footer-inner">
+      <a class="brand" href="./"><img src="./gantry.svg" alt="" width="28" height="28"><span>gantry</span></a>
+      <a class="text-link" href="https://github.com/Roasbeef/gantry">Source on GitHub <span class="external" aria-hidden="true"></span></a>
+    </div>
+  </footer>
+</body>
+</html>
