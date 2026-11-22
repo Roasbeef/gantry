@@ -16,6 +16,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import gleam/uri
 import parrot/dev
 import simplifile
 import sqlight
@@ -48,6 +49,43 @@ pub fn open(
     }),
   )
   use Nil <- result.try(exec(db, "PRAGMA synchronous=FULL;" <> ddl))
+  use Nil <- result.try(migrate_attempts(db))
+  use identity <- result.try(query(db, sql.worker_identity()))
+
+  // Each slot directory is bound to exactly one worker identity.
+  case identity {
+    [] -> update(db, sql.register_worker(worker:)) |> result.replace(db)
+    [sql.WorkerIdentity(existing)] if existing == worker -> Ok(db)
+    _ -> Error("GANTRY_WORKER_DIR already belongs to a different worker ID")
+  }
+}
+
+/// Preserve an established slot's existing tables and identity on restart.
+fn reopen(path: String, worker: String) -> Result(sqlight.Connection, String) {
+  let db_uri = "file:" <> uri.percent_encode(path) <> "?mode=rw"
+  use db <- result.try(sqlight.open(db_uri) |> result.map_error(sql_fault))
+  use identity <- result.try(
+    query(db, sql.worker_identity())
+    |> result.replace_error("managed worker journal has no readable identity"),
+  )
+
+  // Only matching custody can advance to validation and migration.
+  case identity {
+    [sql.WorkerIdentity(existing)] if existing == worker -> {
+      use Nil <- result.try(exec(
+        db,
+        "PRAGMA synchronous=FULL;"
+          <> "SELECT name, assignment, receipt, acknowledged FROM attempts LIMIT 0;"
+          <> "SELECT sha, data FROM blobs LIMIT 0;",
+      ))
+      migrate_attempts(db) |> result.replace(db)
+    }
+    _ -> Error("managed worker journal does not contain the saved identity")
+  }
+}
+
+/// Upgrade old attempt rows conservatively before resuming custody.
+fn migrate_attempts(db: sqlight.Connection) -> Result(Nil, String) {
   use columns <- result.try(
     sqlight.query(
       "PRAGMA table_info(attempts)",
@@ -59,19 +97,10 @@ pub fn open(
   )
 
   // Old journals conservatively treat every unresolved attempt as started.
-  use Nil <- result.try(case list.contains(columns, "started") {
+  case list.contains(columns, "started") {
     True -> Ok(Nil)
     False ->
       exec(db, "ALTER TABLE attempts ADD COLUMN started INTEGER DEFAULT 1")
-  })
-
-  use identity <- result.try(query(db, sql.worker_identity()))
-
-  // Each slot directory is bound to exactly one worker identity.
-  case identity {
-    [] -> update(db, sql.register_worker(worker:)) |> result.replace(db)
-    [sql.WorkerIdentity(existing)] if existing == worker -> Ok(db)
-    _ -> Error("GANTRY_WORKER_DIR already belongs to a different worker ID")
   }
 }
 
@@ -108,7 +137,7 @@ pub fn open_managed(
 
       // An established slot may still have a lease or unpublished receipt.
       case exists {
-        True -> open(path, worker)
+        True -> reopen(path, worker)
         False ->
           Error(
             "managed worker journal is missing; restore it before restarting",

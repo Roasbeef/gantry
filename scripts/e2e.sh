@@ -285,6 +285,11 @@ code=0
 timeout 8 env "${worker_environment[@]}" "${worker[@]}" >"$tmp/missing-journal.log" 2>&1 || code=$?
 [[ $code == 1 && ! -e "$tmp/journal/custody.sqlite3" ]]
 grep -F 'managed worker journal is missing' "$tmp/missing-journal.log"
+: > "$tmp/journal/custody.sqlite3"
+code=0
+timeout 8 env "${worker_environment[@]}" "${worker[@]}" >"$tmp/empty-journal.log" 2>&1 || code=$?
+[[ $code == 1 && ! -s "$tmp/journal/custody.sqlite3" ]]
+grep -F 'managed worker journal has no readable identity' "$tmp/empty-journal.log"
 
 # A quiescent queue still needs a majority to return an empty poll.
 wait_for 'empty poll from the surviving quorum' empty_poll "${endpoints[2]}"

@@ -101,7 +101,7 @@ credentials. Init reopens the same identity, credentials, and journal on
 rerun and verifies the existing artifact if the smoke already passed.
 Set `GANTRY_LOCAL_PORT` on first init to choose a port other than 4737.
 Restore an established profile's Ra state or worker journal from backup
-if either is missing.
+if either is missing or damaged.
 
 Use `gantry local start` to run both services in the foreground or as
 one supervisor-managed process. Load the agent credential and endpoint
