@@ -79,7 +79,8 @@ checked in alongside the schema and queries.
 
 ### Verify a local installation
 
-Run this command on Linux with the installed release.
+Run this command on Linux with the installed release, Docker, OpenSSL,
+and util-linux (`flock`, `setsid`, and `setpriv`).
 
 ```sh
 gantry init --local
@@ -99,8 +100,8 @@ controller configuration and queue, worker journal, logs, and role
 credentials. Init reopens the same identity, credentials, and journal on
 rerun and verifies the existing artifact if the smoke already passed.
 Set `GANTRY_LOCAL_PORT` on first init to choose a port other than 4737.
-Recover the voter from backup if an established profile loses its Ra
-state.
+Restore an established profile's Ra state or worker journal from backup
+if either is missing.
 
 Use `gantry local start` to run both services in the foreground or as
 one supervisor-managed process. Load the agent credential and endpoint

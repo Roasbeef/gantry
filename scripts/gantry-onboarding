@@ -71,13 +71,26 @@ open_profile() {
 
 stop_children() {
   local pid
-  for pid in "${child_pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+  for pid in "${child_pids[@]}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  done
   local deadline=$((SECONDS + 10))
   for pid in "${child_pids[@]}"; do
     while kill -0 -- "-$pid" 2>/dev/null && (( SECONDS < deadline )); do sleep 0.1; done
     kill -KILL -- "-$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
+}
+
+# Wait in Bash so a signal can interrupt the wait and tear down the
+# process group, even if a Docker or watch command is still running.
+run_child() {
+  setsid setpriv --pdeathsig TERM "$@" 9>&- &
+  local pid=$! status=0
+  child_pids+=("$pid")
+  wait "$pid" || status=$?
+  unset 'child_pids[-1]'
+  return "$status"
 }
 
 # Publish intent files before any process can consume their values.
@@ -203,13 +216,13 @@ JSON
 
 check_docker() {
   command -v docker >/dev/null &&
-    timeout 10 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 ||
+    run_child timeout --foreground 10 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 ||
     error 1 docker_unavailable "Install Docker and verify this user can run docker info. Then rerun the command."
 }
 
 ensure_image() {
-  if ! timeout 10 docker image inspect "$local_image" >/dev/null 2>&1; then
-    timeout 120 docker pull "$local_image" >"$profile/docker.log" 2>&1 ||
+  if ! run_child timeout --foreground 10 docker image inspect "$local_image" >/dev/null 2>&1; then
+    run_child timeout --foreground 120 docker pull "$local_image" >"$profile/docker.log" 2>&1 ||
       error 1 image_unavailable "Could not pull the pinned fixture image. See $profile/docker.log."
   fi
 }
@@ -231,8 +244,7 @@ start_local_controller() {
   ) >"$profile/controller.log" 2>&1 9>&- &
   controller_pid=$!
   child_pids+=("$controller_pid")
-  until curl --disable --noproxy '*' -fs --max-time 6 "$endpoint/ready" |
-      jq -e '.status == "ready"' >/dev/null; do
+  until local_controller_ready; do
     if ! kill -0 "$controller_pid" 2>/dev/null || (( SECONDS >= deadline )); then
       error 1 controller_unavailable "Controller did not become ready. See $profile/controller.log."
     fi
@@ -244,6 +256,14 @@ start_local_controller() {
   if [[ ! -e $profile/controller-established ]]; then
     printf '%s\n' "$node" | save "$profile/controller-established"
   fi
+}
+
+local_controller_ready() {
+  # Wait for the child to bind before trusting a response on its port.
+  grep -Fxq -- "Listening on $endpoint" "$profile/controller.log" &&
+    curl --disable --noproxy '*' -fs --max-time 6 "$endpoint/ready" |
+    jq -e '.status == "ready"' >/dev/null &&
+    kill -0 "$controller_pid" 2>/dev/null
 }
 
 start_local_worker() {
@@ -259,12 +279,12 @@ start_local_worker() {
   child_pids+=("$worker_pid")
 }
 
-local_cli() (
-  unset GANTRY_SUBMIT_TOKEN GANTRY_WORKER_TOKEN
-  export NO_PROXY=127.0.0.1 no_proxy=127.0.0.1
-  export GANTRY_URL="$endpoint" GANTRY_TOKEN="$agent_token" GANTRY_WATCH_SECONDS=90
-  exec "$cli" "$@"
-)
+local_cli() {
+  local -x GANTRY_SUBMIT_TOKEN= GANTRY_WORKER_TOKEN=
+  local -x NO_PROXY=127.0.0.1 no_proxy=127.0.0.1
+  local -x GANTRY_URL="$endpoint" GANTRY_TOKEN="$agent_token" GANTRY_WATCH_SECONDS=90
+  run_child "$cli" "$@"
+}
 
 smoke() {
   local run= result= status=0 digest resumed=false attempt
@@ -418,7 +438,6 @@ start_remote_worker() {
   worker_pool=$(jq -r .pool "$profile/profile.json")
   remote_origin "$endpoint"
   check_docker
-  check_remote
   unset GANTRY_TOKEN GANTRY_SUBMIT_TOKEN GH_TOKEN
   export GANTRY_ENDPOINT="$endpoint" GANTRY_POOL="$worker_pool" GANTRY_WORKER_ID="$worker_id"
   export GANTRY_WORKER_DIR="$profile/journal" GANTRY_WORKER_GUARD="$profile" GANTRY_WORKER_TOKEN="$worker_token"
