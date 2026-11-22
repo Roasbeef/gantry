@@ -43,3 +43,11 @@ admission and drain under concurrent clients, alongside idle polling with
 retained runs. The [verification proposal](design-notes/depth-signoff.md)
 defines additional load and fault traces for evaluating a change in storage
 or dispatch architecture.
+
+The verification suite now includes generated graph and receipt properties,
+mutational JSON tests, and a replayable queue simulation with nightly swarm
+and coverage-guided campaigns. The controller benchmark records an initial
+CPU, RSS, throughput and latency baseline. The first optimization was
+reverted after the three-voter workload failed to show a measurable win.
+[Queue verification](queue-verification.md) ·
+[Controller benchmark](controller-load.md)
