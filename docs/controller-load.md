@@ -143,3 +143,33 @@ workloads measure one repository and retain the full run history.
 The Ra commit index stayed at 21 through a separate run of 240 empty
 polls sent to the two followers. A mixed-version run also exercised
 updated followers querying a leader running the previous Gantry build.
+
+## Quiet queues
+
+A controller remembers one snapshot in which every work item is terminal.
+Worker polls can confirm those exact bytes through Ra before decoding the
+snapshot. A change to the queue makes the bytes differ and sends the poll
+through the full claim path. The live test warms the hint on one voter,
+admits an uncached build through another, and checks the issued and
+replayed lease serials across voters.
+
+The first comparison against `a36413f` measured 62% and 74% less CPU per
+poll using the median paired change for the 32-run and 64-run workloads.
+The final build was then compared directly with `0316e2f` in ten more
+alternating pairs with 64 retained runs, two clients, three local voters,
+and 720 empty polls. Both builds reused the same compiled dependencies.
+
+| Empty-poll metric | Original | Quiet queue |
+| --- | ---: | ---: |
+| Polls/s | 243.15 | 1,589.51 |
+| p50 latency, ms | 7.61 | 1.01 |
+| p95 latency, ms | 12.57 | 2.49 |
+| BEAM CPU, ms/poll | 8.85 | 0.53 |
+| Peak combined BEAM RSS, MiB | 529.37 | 278.32 |
+| RSS increase during polling, MiB | 244.96 | 0.00 |
+
+The RSS increase is the median per-sample difference between peak RSS
+and RSS at the start of polling. The three fresh controller VMs already
+used about 200 MiB before enrollment. Enrollment and drain throughput
+remained within baseline variation. The test measures controller VMs
+serving one repository. [Performance workflow](../skills/gantry-perf/SKILL.md)
