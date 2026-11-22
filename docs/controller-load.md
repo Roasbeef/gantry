@@ -86,3 +86,60 @@ persisting them. The benchmark rejected its duplicate lease delivery.
 The one-repository workload uses three separate phases and gives an
 initial controller baseline for further measurement against the broader
 [queue architecture target](adr/001-khepri-owns-queue-decisions.md).
+
+## Profiling with Pickglass
+
+Pickglass can attach to an isolated benchmark voter without putting its
+viewer in the controller VM. Give it the voter's node name and the
+benchmark run's distribution cookie in a file readable only by its owner.
+For an isolated benchmark capture, use a copy of the driver that writes
+the generated cookie with mode `0600` in its temporary directory and
+launches the probes during the empty-poll phase. Use enough polls to keep
+the workload active for the sampling window.
+
+```sh
+pickglass profile --node "$leader" --cookie-file "$cookie_file" \
+  --top 16 --seconds 6 --format text
+pickglass profile --node "$follower" --cookie-file "$cookie_file" \
+  --top 8 --seconds 6 --allocation --format text \
+  --module 'gantry@store,gantry_core@protocol,gleam@dynamic@decode,gleam_json_ffi,json'
+```
+
+With 5,400 empty polls across three voters and Pickglass at `b2ff8cb`,
+Ra's WAL sync and write calls accounted for
+254 of the leader's 397 running or runnable samples during empty polls.
+On a follower, the instrumented functions allocated 14.5 million heap
+words across eight selected processes in six seconds. JSON parsing,
+field decoding, and encoding ranked highest. Stack shares are sample
+counts, and the allocation counters measure cumulative heap allocation.
+Disable probes when collecting the benchmark timings.
+[Pickglass attachment guide](https://github.com/Roasbeef/pickglass/blob/b2ff8cb603a0b7ca11a27c2f2a4d8c62862bea55/docs/attach.md)
+
+The profiled controller appended a full snapshot CAS even when the queue
+decision left state unchanged. The candidate keeps the fenced local read
+and exact-byte CAS for mutations. For an unchanged receipt, it checks the
+same snapshot bytes through a Ra consistent query. The leader confirms its
+authority with a majority before answering. A mismatch reruns the proposal
+within the existing retry budget.
+
+The comparison alternates baseline and candidate order over ten fresh pairs
+per configuration. The builds share identical dependency BEAM files and
+differ only in the three Gantry queue storage modules. The profilers ran in
+separate samples. The second configuration doubles the number of retained
+runs and uses two clients across three voters.
+
+| Retained runs | Empty polls | Polls/s | p95 ms | BEAM CPU ms/poll | Peak BEAM RSS MiB |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 360 | 329.45 → 997.76 | 14.14 → 5.21 | 6.64 → 1.50 | 310.66 → 242.76 |
+| 64 | 720 | 213.20 → 685.07 | 14.47 → 4.51 | 9.91 → 1.94 | 530.76 → 283.77 |
+
+The table shows the median across runs. Median paired poll throughput rose
+198.5% and 226.5%, against baseline variation of 8.0% and 11.5%.
+Paired enrollment and queue-drain throughput changes were within baseline
+variation in both configurations. Every sample passed the durable proof
+and artifact checks. No samples exhausted the CAS retry budget. These
+workloads measure one repository and retain the full run history.
+
+The Ra commit index stayed at 21 through a separate run of 240 empty
+polls sent to the two followers. A mixed-version run also exercised
+updated followers querying a leader running the previous Gantry build.

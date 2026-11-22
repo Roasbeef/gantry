@@ -11,7 +11,7 @@
 @external(erlang, "gantry_khepri_ffi", "boot")
 pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
 
-/// Read bytes after a bounded quorum fence.
+/// Read bytes after Khepri's bounded fence.
 ///
 /// ## Examples
 ///
@@ -20,6 +20,16 @@ pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
 /// ```
 @external(erlang, "gantry_khepri_ffi", "read")
 pub fn read() -> Result(String, String)
+
+/// Check whether a quorum-confirmed snapshot has the expected bytes.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.confirm(expected)
+/// ```
+@external(erlang, "gantry_khepri_ffi", "confirm")
+pub fn confirm(expected: String) -> Result(Bool, String)
 
 /// Compare exact bytes. False means another proposal won.
 ///

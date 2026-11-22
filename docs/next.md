@@ -44,10 +44,11 @@ retained runs. The [verification proposal](design-notes/depth-signoff.md)
 defines additional load and fault traces for evaluating a change in storage
 or dispatch architecture.
 
-The verification suite now includes generated graph and receipt properties,
+The verification suite includes generated graph and receipt properties,
 mutational JSON tests, and a replayable queue simulation with nightly swarm
-and coverage-guided campaigns. The controller benchmark records an initial
-CPU, RSS, throughput and latency baseline. The first optimization was
-reverted after the three-voter workload failed to show a measurable win.
+and coverage-guided campaigns. Pickglass identified Ra writes during
+unchanged polls. A majority-confirmed snapshot check now validates those
+receipts. Three-voter empty-poll throughput tripled in both benchmark
+configurations, with lower controller CPU, latency and peak RSS.
 [Queue verification](queue-verification.md) ·
 [Controller benchmark](controller-load.md)

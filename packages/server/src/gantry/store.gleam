@@ -1,6 +1,7 @@
 //// One quorum snapshot holds the proof deployment's queue metadata. Every
-//// successful change compares the exact bytes read before computing its
-//// proposal. A losing writer recomputes from a fresh fenced snapshot.
+//// mutation compares the exact bytes read before computing its proposal.
+//// A proposal with no changes confirms the same bytes with the Ra leader
+//// and its quorum. A losing proposal recomputes from a fresh snapshot.
 //// Each mutation reads and writes the full document. The 4 MiB ceiling
 //// bounds replicated metadata and makes this unsuitable for unbounded history.
 
@@ -51,7 +52,8 @@ pub fn read() -> Result(queue.State, String) {
   Ok(state)
 }
 
-/// Run a pure proposal and return its receipt only after the majority commits.
+/// Run a pure proposal and return its receipt after a majority confirms the
+/// unchanged snapshot or commits a mutation.
 /// A storage timeout leaves the outcome unknown. Recover by operation identity.
 ///
 /// ## Examples
@@ -72,20 +74,28 @@ fn attempt(
 ) -> Result(a, String) {
   use #(prior, state) <- result.try(snapshot())
   use #(next, receipt) <- result.try(propose(state))
+
+  // A quorum can confirm an unchanged receipt without appending a write.
+  use accepted <- result.try(case next == state {
+    True -> ffi_khepri.confirm(prior)
+    False -> commit(prior, next)
+  })
+
+  // A competing write invalidates the proposal and its receipt.
+  case accepted, remaining {
+    True, _ -> Ok(receipt)
+    False, 1 -> Error("queue contention exceeded retry budget")
+    False, _ -> attempt(propose, remaining - 1)
+  }
+}
+
+/// Replace the expected snapshot with a bounded mutation.
+fn commit(prior: String, next: queue.State) -> Result(Bool, String) {
   let bytes = encode(next)
 
   // Reject oversized metadata before it reaches the replicated log.
   case string.byte_size(bytes) > max_bytes {
     True -> Error("queue snapshot exceeds 4 MiB")
-    False -> {
-      use committed <- result.try(ffi_khepri.swap(prior, bytes))
-
-      // Return the receipt on commit. Recompute a losing proposal within the retry budget.
-      case committed, remaining {
-        True, _ -> Ok(receipt)
-        False, 1 -> Error("queue contention exceeded retry budget")
-        False, _ -> attempt(propose, remaining - 1)
-      }
-    }
+    False -> ffi_khepri.swap(prior, bytes)
   }
 }
