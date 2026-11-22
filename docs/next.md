@@ -38,6 +38,8 @@ Live GitHub provider validation remains open. Use the integration guide
 to verify branch rules, exact landing, PR reconciliation, and workflow
 comments on a GitHub pilot repository. Loom executor interop and indexed
 queue metadata with retention also remain open.
-Obtain a measured short-action workload before selecting a different
-storage or dispatch architecture. The [verification proposal](design-notes/depth-signoff.md)
-defines the load and fault traces.
+The [controller load benchmark](controller-load.md) measures short-action
+admission and drain under concurrent clients, alongside idle polling with
+retained runs. The [verification proposal](design-notes/depth-signoff.md)
+defines additional load and fault traces for evaluating a change in storage
+or dispatch architecture.
