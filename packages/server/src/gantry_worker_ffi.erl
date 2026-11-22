@@ -1,16 +1,6 @@
 %% OS resources that OTP ports and erl_tar can provide to the Gleam worker.
 -module(gantry_worker_ffi).
--export([lock/1, schema/0, docker/4, entries/1, archive_open/1, archive_add/3, archive_close/1]).
-
-schema() ->
-    case code:priv_dir(gantry) of
-        {error, _} -> {error, <<"cannot locate the worker journal schema">>};
-        Priv ->
-            case file:read_file(filename:join(Priv, "worker-schema.sql")) of
-                {ok, Text} -> {ok, Text};
-                {error, _} -> {error, <<"cannot read the worker journal schema">>}
-            end
-    end.
+-export([lock/1, docker/5, entries/1, archive_open/1, archive_add/3, archive_close/1]).
 
 lock(Path) ->
     case os:find_executable("flock") of
@@ -47,20 +37,15 @@ hold_lock(Flock, Path, Owner, Ref) ->
         error:system_limit -> Owner ! {Ref, {error, <<"worker lock port limit reached">>}}
     end.
 
-docker(Args, Milliseconds, Limit, Stream) ->
+docker(Args, Settings, Milliseconds, Limit, Stream) ->
     case {os:find_executable("docker"), os:find_executable("timeout"),
           os:find_executable("env")} of
         {false, _, _} -> {error, <<"Docker executable not found">>};
         {_, false, _} -> {error, <<"GNU timeout executable not found">>};
         {_, _, false} -> {error, <<"env executable not found">>};
         {Docker, Timeout, Env} ->
-            Settings = ["PATH=" ++ os:getenv("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                        "DOCKER_CONFIG=/nonexistent"] ++
-                       [Key ++ "=" ++ Value ||
-                           Key <- ["DOCKER_HOST", "XDG_RUNTIME_DIR"],
-                           Value <- [os:getenv(Key)], Value =/= false],
             Seconds = integer_to_list((Milliseconds + 999) div 1000) ++ "s",
-            Arguments = ["-i" | Settings] ++
+            Arguments = ["-i" | lists:map(fun unicode:characters_to_list/1, Settings)] ++
                         [Timeout, "--kill-after=5s", Seconds, Docker |
                          lists:map(fun unicode:characters_to_list/1, Args)],
             Streams = case Stream of combined -> [stderr_to_stdout]; stdout -> [] end,

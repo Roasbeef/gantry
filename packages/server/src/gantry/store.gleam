@@ -5,7 +5,9 @@
 //// Each mutation reads and writes the full document. The 4 MiB ceiling
 //// bounds replicated metadata and makes this unsuitable for unbounded history.
 
-import gantry/internal/ffi_khepri
+import gantry/internal/ffi_khepri.{
+  type ProposalOutcome, Accepted, ConfirmedQuiet, NeedsClaim, SnapshotChanged,
+}
 import gantry_core/protocol
 import gantry_core/queue
 import gleam/json
@@ -95,8 +97,9 @@ pub fn claim(
 
   // A quiet snapshot cannot offer a lease to any worker.
   case confirmed {
-    True -> Ok(None)
-    False -> change(fn(state) { Ok(queue.claim(state, worker, pool, now)) })
+    ConfirmedQuiet -> Ok(None)
+    NeedsClaim ->
+      change(fn(state) { Ok(queue.claim(state, worker, pool, now)) })
   }
 }
 
@@ -116,18 +119,21 @@ fn attempt(
 
   // A competing write invalidates the proposal and its receipt.
   case accepted, remaining {
-    True, _ -> Ok(receipt)
-    False, 1 -> Error("queue contention exceeded retry budget")
-    False, _ -> attempt(propose, remaining - 1)
+    Accepted, _ -> Ok(receipt)
+    SnapshotChanged, 1 -> Error("queue contention exceeded retry budget")
+    SnapshotChanged, _ -> attempt(propose, remaining - 1)
   }
 }
 
 /// Remember a quiet snapshot after it authorizes an unchanged receipt.
-fn confirm(prior: String, state: queue.State) -> Result(Bool, String) {
+fn confirm(
+  prior: String,
+  state: queue.State,
+) -> Result(ProposalOutcome, String) {
   use accepted <- result.try(ffi_khepri.confirm(prior))
 
   // Pending and active work require the full decision even on a snapshot hit.
-  case accepted && queue.quiescent(state) {
+  case accepted == Accepted && queue.quiescent(state) {
     True -> ffi_khepri.remember_quiet(prior)
     False -> Nil
   }
@@ -136,7 +142,7 @@ fn confirm(prior: String, state: queue.State) -> Result(Bool, String) {
 }
 
 /// Replace the expected snapshot with a bounded mutation.
-fn commit(prior: String, next: queue.State) -> Result(Bool, String) {
+fn commit(prior: String, next: queue.State) -> Result(ProposalOutcome, String) {
   let bytes = encode(next)
 
   // Reject oversized metadata before it reaches the replicated log.

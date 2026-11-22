@@ -4,18 +4,19 @@
 //// the assignment and clears the spool.
 
 import gantry/blobs
-import gantry/internal/ffi_worker
 import gantry/sql
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
 import gleam/dynamic/decode
+import gleam/erlang/application
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import parrot/dev
+import simplifile
 import sqlight
 
 /// The persisted state needed to recover one worker attempt.
@@ -37,7 +38,14 @@ pub fn open(
   worker: String,
 ) -> Result(sqlight.Connection, String) {
   use db <- result.try(sqlight.open(path) |> result.map_error(sql_fault))
-  use ddl <- result.try(ffi_worker.schema())
+  use ddl <- result.try(
+    application.priv_directory("gantry")
+    |> result.replace_error("cannot locate the worker journal schema")
+    |> result.try(fn(path) {
+      simplifile.read(path <> "/worker-schema.sql")
+      |> result.replace_error("cannot read the worker journal schema")
+    }),
+  )
   use Nil <- result.try(exec(db, "PRAGMA synchronous=FULL;" <> ddl))
   use columns <- result.try(
     sqlight.query(

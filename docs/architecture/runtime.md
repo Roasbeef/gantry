@@ -58,6 +58,12 @@ result can affect the graph. The worker can replay its result without
 asking a controller to execute the action again. Git evaluates the
 target's expected old object ID at the point of the ref update.
 
+Configuration reads use Envoy. The worker loads its journal schema through
+the typed OTP application and filesystem bindings. Custom Erlang bridges
+handle Khepri/Ra, process ports, durable filesystem sync, tar, and bounded
+Gun streams. The Gleam adapters expose HTTP methods and queue outcomes as
+domain types, and construct the Docker environment from its allowlist.
+
 | Component | Responsibilities | Effect or state owner it calls |
 | --- | --- | --- |
 | `http_api.handle`, `api` | Role checks, request decoding, admission and receipt responses | `prepare`, `store.change`, and `blobs` |

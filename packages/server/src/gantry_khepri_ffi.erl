@@ -50,14 +50,15 @@ confirm_quiet() ->
         case ets:lookup(?QUIET, quiet) of
             [{quiet, Expected} = Entry] ->
                 case confirm(Expected) of
-                    {ok, false} = Miss ->
+                    {ok, accepted} -> {ok, confirmed_quiet};
+                    {ok, snapshot_changed} ->
                         true = ets:delete_object(?QUIET, Entry),
-                        Miss;
-                    Other -> Other
+                        {ok, needs_claim};
+                    {error, _} = Error -> Error
                 end;
-            [] -> {ok, false}
+            [] -> {ok, needs_claim}
         end
-    catch error:badarg -> {ok, false}
+    catch error:badarg -> {ok, needs_claim}
     end.
 
 open_replica(Marker, Seed) ->
@@ -147,7 +148,10 @@ confirm_snapshot(Expected) ->
             case khepri_tree:find_matching_nodes(Tree, Path, #{props_to_return => [payload]}) of
                 {ok, #{Path := #{data := Bytes}}}
                   when is_binary(Bytes), byte_size(Bytes) =< 4194304 ->
-                    {ok, Bytes =:= Expected};
+                    case Bytes =:= Expected of
+                        true -> {ok, accepted};
+                        false -> {ok, snapshot_changed}
+                    end;
                 _ -> {error, <<"invalid durable queue snapshot">>}
             end;
         {timeout, _} -> {error, <<"queue quorum read timed out">>};
@@ -157,8 +161,8 @@ confirm_snapshot(Expected) ->
 
 swap(Expected, Proposed) ->
     try khepri:compare_and_swap(?STORE, ?PATH, Expected, Proposed, #{timeout => ?TIMEOUT}) of
-        ok -> {ok, true};
-        {error, {khepri, mismatching_node, _}} -> {ok, false};
+        ok -> {ok, accepted};
+        {error, {khepri, mismatching_node, _}} -> {ok, snapshot_changed};
         Other -> failure(Other)
     catch Class:Why -> failure({Class, Why})
     end.
