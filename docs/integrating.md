@@ -41,6 +41,12 @@ pre-pulled image digest. The controller's `GH_TOKEN` needs access to
 the registered repository. Deploy the controller and matching workers
 using the runbook. [Controller example](examples/controller.toml) · [Runbook](running.md)
 
+GitHub submissions target the default branch by default. To use another
+branch, set `branch` to that exact ref name and
+`github_target = "registered"` in the controller's repository entry.
+Use the same setting on every voter. Gantry checks the PR base and
+pinned head and applies GitHub's merge policy to that configured branch.
+
 From the project checkout, run a commit that the registered remote can fetch.
 Set `GANTRY_TOKEN` to the build credential before calling the CLI.
 

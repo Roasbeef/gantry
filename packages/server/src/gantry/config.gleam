@@ -11,9 +11,15 @@ import gleam/string
 import simplifile
 import tom
 
+/// The operator chooses which GitHub branch policy to apply to a repository.
+pub type GitHubTarget {
+  DefaultBranch
+  RegisteredBranch
+}
+
 /// The Git remote shape controls how source PR metadata is read.
 pub type Provider {
-  GitHub
+  GitHub(target: GitHubTarget)
   Local(path: String)
 }
 
@@ -162,7 +168,12 @@ fn config_decoder() {
 
     use image <- decode.field("image", decode.string)
     use local <- decode.optional_field("local_remote", "", decode.string)
-    decode.success(#(name, branch, target, pool, image, local))
+    use github_target <- decode.optional_field(
+      "github_target",
+      "default",
+      decode.string,
+    )
+    decode.success(#(name, branch, target, pool, image, local, github_target))
   }
   use data <- decode.field("data_dir", decode.string)
   use blobs <- decode.field("blob_dir", decode.string)
@@ -181,16 +192,19 @@ fn config_decoder() {
 /// // validate_repository(project)
 /// ```
 fn validate_repository(
-  row: #(String, String, String, String, String, String),
+  row: #(String, String, String, String, String, String, String),
 ) -> Result(#(String, Repository), String) {
-  let #(name, branch, target, pool, image, local) = row
+  let #(name, branch, target, pool, image, local, github_target) = row
   let name = string.lowercase(name)
 
-  // An explicit local path selects the operator's local Git repository.
-  let provider = case local {
-    "" -> GitHub
-    dir -> Local(dir)
-  }
+  // Only an explicit GitHub configuration can authorize a non-default branch.
+  use provider <- result.try(case local, github_target {
+    "", "default" -> Ok(GitHub(DefaultBranch))
+    "", "registered" -> Ok(GitHub(RegisteredBranch))
+    "", _ -> Error("github_target must be default or registered")
+    path, "default" -> Ok(Local(path))
+    _, _ -> Error("github_target is only supported for GitHub repositories")
+  })
 
   // Archive and push operands come from the operator's registered policy.
   case

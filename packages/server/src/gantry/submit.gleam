@@ -64,7 +64,7 @@ pub fn reconcile(
         list.try_map(c.members, fn(m) {
           // GitHub provides policy and head together. A local repository supplies its pull ref.
           case repo.provider {
-            config.GitHub ->
+            config.GitHub(_) ->
               github.can_land(
                 cfg.github_token,
                 repo.name,
