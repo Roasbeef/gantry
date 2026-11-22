@@ -35,12 +35,11 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
         store.read()
         |> result.map(fn(_) { json.object([#("status", json.string("ok"))]) }),
       )
-    Get, ["ready"] ->
-      respond(
-        store.ready()
-        |> result.replace_error("queue quorum unavailable")
-        |> result.map(fn(_) { json.object([#("status", json.string("ready"))]) }),
-      )
+    Get, ["ready"] -> ready_reply()
+    Get, ["v1", "worker", "ready"] -> {
+      use <- authorized(req, cfg.worker_token)
+      ready_reply()
+    }
     Post, ["v1", "runs"] -> {
       use <- authorized(req, cfg.agent_token)
       with_json(req, fn(body) { api.build(cfg, body, api.Run) |> respond })
@@ -76,6 +75,15 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
     }
     _, _ -> error(404, "route not found")
   }
+}
+
+/// Confirm quorum access for gateway and worker probes without claiming work.
+fn ready_reply() -> Reply {
+  respond(
+    store.ready()
+    |> result.replace_error("queue quorum unavailable")
+    |> result.map(fn(_) { json.object([#("status", json.string("ready"))]) }),
+  )
 }
 
 /// Separate empty polls from errors and reserved work.

@@ -46,7 +46,7 @@ pub fn session(
       // Send credentials only to the configured GitHub HTTPS endpoint.
       let #(url, auth) = case repo.provider {
         config.Local(path) -> #(path, [])
-        config.GitHub -> {
+        config.GitHub(_) -> {
           let url = "https://github.com/" <> repo.name <> ".git"
           let auth =
             bit_array.base64_encode(

@@ -41,6 +41,12 @@ pre-pulled image digest. The controller's `GH_TOKEN` needs access to
 the registered repository. Deploy the controller and matching workers
 using the runbook. [Controller example](examples/controller.toml) · [Runbook](running.md)
 
+GitHub submissions target the default branch by default. To use another
+branch, set `branch` to that exact ref name and
+`github_target = "registered"` in the controller's repository entry.
+Use the same setting on every voter. Gantry checks the PR base and
+pinned head and applies GitHub's merge policy to that configured branch.
+
 From the project checkout, run a commit that the registered remote can fetch.
 Set `GANTRY_TOKEN` to the build credential before calling the CLI.
 
@@ -100,7 +106,7 @@ outstanding intent holds the lane, so later groups wait. Include this
 case in the pilot when validating operator recovery.
 [Runtime architecture](architecture/runtime.md#land-an-ordered-pr-group)
 
-## Check the first live deployment
+## Check a live deployment
 
 Start with one build-only run, then submit two small PRs in a pilot
 repository. Compare the landed SHA with the candidate in the Gantry run
@@ -109,3 +115,17 @@ and inspect both PR links. The end-to-end harness exercises those Git
 invariants with a local bare remote. The live pilot supplies the GitHub
 branch policy and PR reconciliation evidence.
 [Verification plan](design-notes/depth-signoff.md)
+
+On 2026-11-22 a GitHub Actions runner booted an installed controller and
+Docker worker behind a fixture HTTPS endpoint. The default-branch policy
+refused the disposable target. With `github_target = "registered"`, the
+documented workflow's submission step tested and landed
+`0b7c4b298e9a84c332a75958a27751aee0cf07da` on the pilot branch. The job
+verified both pinned heads as ancestors, downloaded the verified output,
+and replayed the workflow to check that each PR had one comment linking
+the final tested commit. GitHub marked both PRs merged. The pilot branch
+was unprotected. Rehearse your repository's branch rules and the
+controller's write identity as part of deployment.
+[Pilot run](https://github.com/Roasbeef/gantry/actions/runs/45058513752) ·
+[Pilot PR #6](https://github.com/Roasbeef/gantry/pull/6) ·
+[Pilot PR #7](https://github.com/Roasbeef/gantry/pull/7)

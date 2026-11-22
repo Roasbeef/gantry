@@ -276,6 +276,38 @@
         "--output"
       ]
     },
+    "skill": {
+      "description": "Read the Gantry agent skill without a controller or credentials.",
+      "usage": "gantry skill [--output raw]",
+      "output": "raw",
+      "options": [
+        "--output"
+      ]
+    },
+    "init": {
+      "description": "Prepare a private Linux profile, run a Docker smoke build, and stop the local services.",
+      "usage": "gantry init --local",
+      "output": "json",
+      "effect": "create or reopen the local profile and verify an uncached Docker build",
+      "options": ["--local", "--fields", "--output"],
+      "response_fields": ["status", "endpoint", "node", "worker_id", "pool", "run_id", "artifact", "profile", "services", "start", "client_env"]
+    },
+    "local": {
+      "description": "Run the local controller and worker together in the foreground.",
+      "usage": "gantry local start",
+      "output": "service logs",
+      "effect": "start the installed local controller and worker until interrupted",
+      "options": []
+    },
+    "worker": {
+      "description": "Prepare a single worker slot on a trusted HTTPS gateway and start it explicitly.",
+      "usage": "gantry worker setup HTTPS_URL POOL [--token-stdin] | gantry worker start",
+      "output": "json for setup, service logs for start",
+      "credential": ["GANTRY_WORKER_TOKEN", "--token-stdin", "saved worker profile"],
+      "effect": "setup checks authenticated readiness without claiming work; start launches the worker",
+      "options": ["--token-stdin", "--fields", "--output"],
+      "response_fields": ["status", "endpoint", "pool", "worker_id", "profile", "journal", "worker", "start"]
+    },
     "describe": {
       "description": "Inspect command metadata without a controller or credentials.",
       "usage": "gantry describe [COMMAND]",
@@ -288,7 +320,7 @@
   "options": {
     "--output": {
       "argument": "FORMAT",
-      "description": "Use json for JSON results and watch NDJSON, or raw for blob bytes."
+      "description": "Use json for JSON results and watch NDJSON, or raw for blob bytes and skill Markdown."
     },
     "--json": {
       "argument": "PAYLOAD",
@@ -297,6 +329,12 @@
     "--fields": {
       "argument": "PATHS",
       "description": "Project comma-separated object fields or dotted object paths. Missing paths are omitted. Applies to live JSON responses."
+    },
+    "--local": {
+      "description": "Initialize a single-host deployment bound to loopback."
+    },
+    "--token-stdin": {
+      "description": "Read one worker token from standard input for worker setup."
     },
     "--dry-run": {
       "description": "Validate the local request and print the method, URL and body. Requires no credentials or controller."
@@ -307,6 +345,14 @@
       "default": "http://127.0.0.1:4737",
       "description": "Controller base URL."
     },
+    "XDG_STATE_HOME": {
+      "default": "$HOME/.local/state",
+      "description": "Absolute directory containing the private Gantry profiles under gantry/."
+    },
+    "GANTRY_LOCAL_PORT": {
+      "default": 4737,
+      "description": "Loopback TCP port chosen when initializing a new local profile."
+    },
     "GANTRY_WATCH_SECONDS": {
       "default": 1800,
       "description": "Watch deadline in seconds."
@@ -314,12 +360,12 @@
   },
   "exit_codes": {
     "0": "Success, including a valid dry run.",
-    "1": "Transport or service failure, watch deadline, or terminal failed or blocked run.",
+    "1": "Local resource, transport, or service failure, watch deadline, or terminal failed or blocked run.",
     "2": "Invalid command, arguments, request, or configuration.",
     "3": "Missing credentials or HTTP 401/403.",
-    "4": "HTTP 404.",
+    "4": "HTTP 404 or missing local profile.",
     "5": "HTTP 429.",
-    "6": "HTTP 409."
+    "6": "HTTP 409 or a local profile conflict."
   },
   "$defs": {
     "id": {

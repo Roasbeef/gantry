@@ -69,7 +69,13 @@ fn boot() -> Result(#(Slot, controllers.Controllers), String) {
   use raw_directory <- result.try(required("GANTRY_WORKER_DIR"))
   use directory <- result.try(worker_directory(raw_directory))
   use Nil <- result.try(ffi_worker.lock(directory <> "/slot.lock"))
-  use db <- result.try(custody.open(directory <> "/custody.sqlite3", worker))
+
+  // A managed profile must preserve custody even if its journal is removed.
+  use db <- result.try(case envoy.get("GANTRY_WORKER_GUARD") {
+    Ok(profile) -> custody.open_managed(profile, directory, worker)
+    Error(Nil) -> custody.open(directory <> "/custody.sqlite3", worker)
+  })
+
   Ok(#(Slot(directory, worker, pool, db, limits), network))
 }
 

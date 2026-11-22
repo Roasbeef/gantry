@@ -9,12 +9,29 @@ metadata:
 
 # Gantry
 
+Use `gantry skill` to load these instructions from the installed release.
+In a source checkout, run `scripts/gantry skill`.
+
+## Start on Linux
+
+1. Install the Linux release and ensure Docker is running and accessible
+   to the user running Gantry. Run `gantry init --local` to initialize a
+   loopback deployment and run its fixture build. Follow the
+   [deployment runbook](https://github.com/Roasbeef/gantry/blob/main/docs/running.md)
+   for installation and prerequisites.
+2. Use `gantry local start` to start the saved local deployment. The
+   default state directory is `${XDG_STATE_HOME:-$HOME/.local/state}/gantry`.
+3. To add a worker on another Linux host, install Gantry and Docker there.
+   Run `gantry worker setup HTTPS_URL POOL` with the worker credential in
+   `GANTRY_WORKER_TOKEN`. Use the stable HTTPS controller origin and the pool
+   assigned to the repository. The `--token-stdin` option accepts the token
+   through standard input. Run `gantry worker start` to start the saved slot.
+
 ## Deploy controllers and workers
 
-1. Follow the [deployment runbook](https://github.com/Roasbeef/gantry/blob/main/docs/running.md)
-   in the checkout at `docs/running.md`. Start with one controller for a
-   local installation or three voters for failover. Use the controller
-   example in `docs/examples/controller.toml`.
+1. Start with one controller for a local installation or three voters for
+   failover. Use the
+   [controller configuration example](https://github.com/Roasbeef/gantry/blob/main/docs/examples/controller.toml).
 2. For three voters, preserve each node's name and local Ra directory,
    mount the common blob store, and use the same repository policy and
    role tokens. Start the first controller with an empty `seed`. Join
@@ -28,8 +45,10 @@ metadata:
    shared worker token and HTTP API access.
 4. Check `GET /health` on every origin for queue access, then run an
    uncached build in the new slot's pool and verify the worker and
-   artifact paths. Use `make e2e` for the local failover gate and
-   `docs/controller-load.md` for controller sizing measurements.
+   artifact paths. Use `make e2e` from a checkout for the local failover
+   gate. See the
+   [controller load measurements](https://github.com/Roasbeef/gantry/blob/main/docs/controller-load.md)
+   for sizing.
 
 ## Use the CLI
 

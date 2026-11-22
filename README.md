@@ -27,26 +27,25 @@ commit on the original PRs. [GitHub integration](docs/integrating.md#submit-an-o
 
 ## Get started
 
-Clone the repository and run the local end-to-end check. On Linux, install the
-pinned Gleam, Erlang/OTP, and rebar3 toolchain and the Docker worker
-prerequisites in the [runbook](docs/running.md#build-and-verify).
+On Linux, install the toolchain and Docker prerequisites, then build and
+install the bundled release. [Runbook](docs/running.md#build-and-verify)
 
 ```sh
 git clone https://github.com/Roasbeef/gantry.git
 cd gantry
-make e2e
+make install PREFIX="$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+gantry init --local
 ```
 
-The check starts three controllers and a Docker worker. It verifies that a run
-survives controller loss, that an action is reused when its inputs stay the
-same, and that a local Git branch advances to the tested commit. It also
-races a concurrent update against a pending merge to check that the newer
-branch tip is preserved.
+Init creates a private profile, runs a Docker smoke build, and reports its
+run ID and artifact digest. Use `gantry local start` to keep the local
+services running, and `gantry skill` to give an agent the CLI instructions.
+[Local and remote setup](docs/running.md#verify-a-local-installation)
 
-To install the controller, worker, and CLI from the checkout, run
-`make install PREFIX="$HOME/.local"` and put `$HOME/.local/bin` on your
-`PATH`. Follow the [runbook](docs/running.md#build-and-install-a-release)
-to configure and start the services.
+`make e2e` runs the contributor fixture with three controllers, a Docker
+worker, and a bare Git remote. It exercises controller loss, receipt
+replay, build reuse, and the guarded branch update.
 
 ## Run your first build
 

@@ -122,9 +122,20 @@ run() {
   post "$1/v1/runs" "$GANTRY_TOKEN" "$(jq -nc --arg id "$2" --arg rev "$3" '{id:$id,repo:"fixture/project",target:"check",revision:$rev}')"
 }
 worker_urls=$(IFS=,; echo "${endpoints[*]}")
+worker_environment=(
+  'ERL_FLAGS=+S 2:2' "GANTRY_ENDPOINT=$worker_urls" GANTRY_POOL=default
+  GANTRY_WORKER_ID=worker-one "GANTRY_WORKER_DIR=$tmp/journal" "GANTRY_WORKER_GUARD=$tmp"
+)
 start_worker() {
-  start "$1" env ERL_FLAGS="+S 2:2" GANTRY_ENDPOINT="$worker_urls" GANTRY_POOL=default \
-    GANTRY_WORKER_ID=worker-one GANTRY_WORKER_DIR="$tmp/worker" "${worker[@]}"
+  start "$1" env "${worker_environment[@]}" "${worker[@]}"
+}
+stop_worker() {
+  local signal=$1 index
+  kill "-$signal" -- "-$worker_pid"
+  wait "$worker_pid" 2>/dev/null || true
+  for index in "${!pids[@]}"; do
+    if [[ ${pids[index]} == "$worker_pid" ]]; then unset "pids[$index]"; fi
+  done
 }
 empty_poll "${endpoints[1]}"
 empty_poll "${endpoints[1]}"
@@ -224,33 +235,76 @@ JSON
 wait_for 'interruption fixture lease' matches "$GANTRY_URL" worker-crash '
   .work[0].step.kind == "active"'
 serial=$(jq -er '.work[0].step.lease.serial' "$tmp/current.json")
-name=$(jq -cn --arg dir "$tmp/worker" --argjson serial "$serial" \
+name=$(jq -cn --arg dir "$tmp/journal" --argjson serial "$serial" \
   '[$dir,"worker-one","worker-crash","interrupted",$serial]' | tr -d '\n' | sha256sum | cut -d ' ' -f 1)
 container_running() { [[ $(docker inspect --format '{{.State.Status}}' "$1" 2>/dev/null) == running ]]; }
 wait_for 'interruption fixture container' container_running "gantry-$name"
-kill -KILL -- "-$worker_pid"
-wait "$worker_pid" 2>/dev/null || true
-unset 'pids[3]'
+stop_worker KILL
 start_worker worker-restarted
+worker_pid=${pids[-1]}
 wait_for 'interruption receipt' matches "$GANTRY_URL" worker-crash '
   .phase == "failed" and .work[0].step.reason == "worker interrupted before recording outcome"'
 containers=$(docker container ls -a --format '{{.Names}}')
 volumes=$(docker volume ls --format '{{.Name}}')
 if grep -Fxq -e "gantry-$name" -e "gantry-$name-collector" <<< "$containers" ||
    grep -Fxq "gantry-$name" <<< "$volumes" ||
-   [[ -e "$tmp/worker/gantry-$name.staging" ]]; then
+   [[ -e "$tmp/journal/gantry-$name.staging" ]]; then
   echo "Interrupted attempt left resources behind: gantry-$name" >&2
   exit 1
 fi
 echo 'Passed worker restart, interrupted attempt fencing, and Docker resource cleanup'
+
+# Lose a committed result reply, then recover the same receipt from SQLite.
+stop_worker TERM
+proxy_port=$((base_port + 4))
+proxy_endpoint=http://127.0.0.1:$proxy_port
+start result-proxy node "$root/scripts/fixtures/e2e/drop-result-reply.mjs" \
+  "$proxy_port" "${endpoints[1]}" "$tmp"
+wait_for 'result fault proxy' healthy "$proxy_endpoint"
+worker_environment[1]="GANTRY_ENDPOINT=$proxy_endpoint"
+start_worker worker-result-proxy
+worker_pid=${pids[-1]}
+cat > "$tmp/lost-ack.json" <<'JSON'
+{"name":"lost-ack","argv":["sh","-ec","echo committed"],"inputs":[],"outputs":[]}
+JSON
+"$cli" run lost-ack fixture/project "$candidate" check "$tmp/lost-ack.json" > "$tmp/lost-ack-run.json"
+wait_for 'committed result with withheld reply' test -s "$tmp/committed-receipt.json"
+stop_worker KILL
+start_worker worker-result-replay
+worker_pid=${pids[-1]}
+wait_for 'worker custody acknowledged after replay' test -f "$tmp/poll-after-replay"
+cmp "$tmp/committed-receipt.json" "$tmp/replayed-receipt.json"
+wait_for 'completed run after result replay' matches "$GANTRY_URL" lost-ack '.phase == "passed"'
+echo 'Passed worker restart after losing an already committed result reply'
+
+# A managed slot keeps its custody witness outside the journal directory.
+stop_worker TERM
+test -f "$tmp/worker-established"
+mv "$tmp/journal" "$tmp/journal-recovery"
+code=0
+timeout 8 env "${worker_environment[@]}" "${worker[@]}" >"$tmp/missing-journal.log" 2>&1 || code=$?
+[[ $code == 1 && ! -e "$tmp/journal/custody.sqlite3" ]]
+grep -F 'managed worker journal is missing' "$tmp/missing-journal.log"
+: > "$tmp/journal/custody.sqlite3"
+code=0
+timeout 8 env "${worker_environment[@]}" "${worker[@]}" >"$tmp/empty-journal.log" 2>&1 || code=$?
+[[ $code == 1 && ! -s "$tmp/journal/custody.sqlite3" ]]
+grep -F 'managed worker journal has no readable identity' "$tmp/empty-journal.log"
 
 # A quiescent queue still needs a majority to return an empty poll.
 wait_for 'empty poll from the surviving quorum' empty_poll "${endpoints[2]}"
 ready_status() {
   curl -sS --max-time 8 -o "$tmp/ready.json" -w '%{http_code}' "$1/ready"
 }
+worker_ready_status() {
+  curl -sS --max-time 8 -H "Authorization: Bearer $2" \
+    -o "$tmp/worker-ready.json" -w '%{http_code}' "$1/v1/worker/ready"
+}
 [[ $(ready_status "${endpoints[2]}") == 200 ]]
 jq -e '.status == "ready"' "$tmp/ready.json" >/dev/null
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_TOKEN") == 401 ]]
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_WORKER_TOKEN") == 200 ]]
+jq -e '.status == "ready"' "$tmp/worker-ready.json" >/dev/null
 kill -KILL -- "-${pids[1]}"
 wait "${pids[1]}" 2>/dev/null || true
 unset 'pids[1]'
@@ -258,8 +312,23 @@ unset 'pids[1]'
 jq -e '.error | startswith("queue ")' "$tmp/poll.json" >/dev/null
 [[ $(ready_status "${endpoints[2]}") == 503 ]]
 jq -e '.error | startswith("queue ")' "$tmp/ready.json" >/dev/null
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_WORKER_TOKEN") == 503 ]]
 start node2-restarted env GANTRY_CONFIG="$tmp/node2.toml" \
   ERL_FLAGS="+S 2:2 -name ${node}2@127.0.0.1 -setcookie $cookie" "${controller[@]}"
 wait_for 'empty poll after quorum recovery' empty_poll "${endpoints[2]}"
 [[ $(ready_status "${endpoints[2]}") == 200 ]]
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_WORKER_TOKEN") == 200 ]]
 echo 'Passed empty poll and gateway readiness through quorum loss and recovery'
+
+if [[ -n ${GANTRY_RELEASE_BIN:-} ]]; then
+  export XDG_STATE_HOME="$tmp/onboarding"
+  export GANTRY_LOCAL_PORT=$((base_port + 3))
+  "$cli" skill > "$tmp/skill.md"
+  cmp "$tmp/skill.md" "$root/skills/gantry/SKILL.md"
+  "$cli" init --local > "$tmp/init.json"
+  "$cli" init --local > "$tmp/init-repeat.json"
+  jq -e '.status == "passed" and .services == "stopped" and (.artifact | length == 64)' \
+    "$tmp/init.json" >/dev/null
+  cmp "$tmp/init.json" "$tmp/init-repeat.json"
+  echo 'Passed packaged agent skill and repeatable local onboarding'
+fi

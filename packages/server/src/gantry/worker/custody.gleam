@@ -4,6 +4,7 @@
 //// the assignment and clears the spool.
 
 import gantry/blobs
+import gantry/internal/ffi_host
 import gantry/sql
 import gantry_core/graph
 import gantry_core/protocol
@@ -15,6 +16,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import gleam/uri
 import parrot/dev
 import simplifile
 import sqlight
@@ -47,6 +49,43 @@ pub fn open(
     }),
   )
   use Nil <- result.try(exec(db, "PRAGMA synchronous=FULL;" <> ddl))
+  use Nil <- result.try(migrate_attempts(db))
+  use identity <- result.try(query(db, sql.worker_identity()))
+
+  // Each slot directory is bound to exactly one worker identity.
+  case identity {
+    [] -> update(db, sql.register_worker(worker:)) |> result.replace(db)
+    [sql.WorkerIdentity(existing)] if existing == worker -> Ok(db)
+    _ -> Error("GANTRY_WORKER_DIR already belongs to a different worker ID")
+  }
+}
+
+/// Preserve an established slot's existing tables and identity on restart.
+fn reopen(path: String, worker: String) -> Result(sqlight.Connection, String) {
+  let db_uri = "file:" <> uri.percent_encode(path) <> "?mode=rw"
+  use db <- result.try(sqlight.open(db_uri) |> result.map_error(sql_fault))
+  use identity <- result.try(
+    query(db, sql.worker_identity())
+    |> result.replace_error("managed worker journal has no readable identity"),
+  )
+
+  // Only matching custody can advance to validation and migration.
+  case identity {
+    [sql.WorkerIdentity(existing)] if existing == worker -> {
+      use Nil <- result.try(exec(
+        db,
+        "PRAGMA synchronous=FULL;"
+          <> "SELECT name, assignment, receipt, acknowledged FROM attempts LIMIT 0;"
+          <> "SELECT sha, data FROM blobs LIMIT 0;",
+      ))
+      migrate_attempts(db) |> result.replace(db)
+    }
+    _ -> Error("managed worker journal does not contain the saved identity")
+  }
+}
+
+/// Upgrade old attempt rows conservatively before resuming custody.
+fn migrate_attempts(db: sqlight.Connection) -> Result(Nil, String) {
   use columns <- result.try(
     sqlight.query(
       "PRAGMA table_info(attempts)",
@@ -58,20 +97,82 @@ pub fn open(
   )
 
   // Old journals conservatively treat every unresolved attempt as started.
-  use Nil <- result.try(case list.contains(columns, "started") {
+  case list.contains(columns, "started") {
     True -> Ok(Nil)
     False ->
       exec(db, "ALTER TABLE attempts ADD COLUMN started INTEGER DEFAULT 1")
+  }
+}
+
+/// Bind managed custody to a durable marker outside the worker directory.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // custody.open_managed("/srv/gantry/slot", "/srv/gantry/slot/journal", "linux-1")
+/// ```
+pub fn open_managed(
+  profile: String,
+  directory: String,
+  worker: String,
+) -> Result(sqlight.Connection, String) {
+  let path = directory <> "/custody.sqlite3"
+  let marker = profile <> "/worker-established"
+  let identity = worker <> "\n" <> path <> "\n"
+
+  // The profile must survive deletion of its child journal directory.
+  use Nil <- result.try(case directory == profile <> "/journal" {
+    True -> Ok(Nil)
+    False ->
+      Error("managed worker journal directory does not match the profile")
   })
 
-  use identity <- result.try(query(db, sql.worker_identity()))
+  // The worker owns the slot lock before either opening or marking custody.
+  case simplifile.read(marker) {
+    Ok(saved) if saved == identity -> {
+      use exists <- result.try(
+        simplifile.is_file(path)
+        |> result.replace_error("cannot check the managed worker journal"),
+      )
 
-  // Each slot directory is bound to exactly one worker identity.
-  case identity {
-    [] -> update(db, sql.register_worker(worker:)) |> result.replace(db)
-    [sql.WorkerIdentity(existing)] if existing == worker -> Ok(db)
-    _ -> Error("GANTRY_WORKER_DIR already belongs to a different worker ID")
+      // An established slot may still have a lease or unpublished receipt.
+      case exists {
+        True -> reopen(path, worker)
+        False ->
+          Error(
+            "managed worker journal is missing; restore it before restarting",
+          )
+      }
+    }
+    Ok(_) -> Error("managed worker identity does not match its custody marker")
+    Error(simplifile.Enoent) -> {
+      use db <- result.try(open(path, worker))
+      use Nil <- result.try(ffi_host.sync_path(path))
+      use Nil <- result.try(ffi_host.sync_path(directory))
+      use Nil <- result.try(publish_marker(profile, marker, identity))
+      Ok(db)
+    }
+    Error(_) -> Error("cannot read the managed worker custody marker")
   }
+}
+
+/// Persist a recoverable startup boundary before the slot can claim work.
+fn publish_marker(
+  profile: String,
+  marker: String,
+  identity: String,
+) -> Result(Nil, String) {
+  let staged = marker <> ".next"
+  use Nil <- result.try(
+    simplifile.write(identity, to: staged)
+    |> result.replace_error("cannot stage the managed worker custody marker"),
+  )
+  use Nil <- result.try(ffi_host.sync_path(staged))
+  use Nil <- result.try(
+    simplifile.rename(staged, marker)
+    |> result.replace_error("cannot publish the managed worker custody marker"),
+  )
+  ffi_host.sync_path(profile)
 }
 
 /// Read and validate the recorded attempt before it can authorize an effect.

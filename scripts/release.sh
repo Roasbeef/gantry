@@ -63,6 +63,7 @@ BOOT
 done
 install -m 0755 scripts/gantry "$dist/bin/gantry"
 install -D -m 0644 scripts/gantry-schema.json "$dist/share/gantry/cli-schema.json"
+install -D -m 0644 scripts/gantry-onboarding "$dist/share/gantry/gantry-onboarding"
 install -D -m 0644 skills/gantry/SKILL.md "$dist/share/gantry/skill/SKILL.md"
 printf 'Gantry %s (%s)\n' "$version" "$commit" > "$dist/releases/gantry-version"
 chmod -R u+rwX,go+rX "$dist"
