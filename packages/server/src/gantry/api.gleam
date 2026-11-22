@@ -178,10 +178,8 @@ pub fn claim(body: String) -> Result(Option(json.Json), String) {
   let #(now, _) =
     timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
 
-  store.change(fn(state) {
-    let #(next, assignment) = queue.claim(state, worker, pool, now)
-    Ok(#(next, option.map(assignment, protocol.encode_assignment)))
-  })
+  store.claim(worker, pool, now)
+  |> result.map(option.map(_, protocol.encode_assignment))
 }
 
 /// Accept a result only after the worker staged its log and output bytes.

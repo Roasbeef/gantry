@@ -31,6 +31,26 @@ pub fn read() -> Result(String, String)
 @external(erlang, "gantry_khepri_ffi", "confirm")
 pub fn confirm(expected: String) -> Result(Bool, String)
 
+/// Confirm a previously identified quiet snapshot with the quorum.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.confirm_quiet()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "confirm_quiet")
+pub fn confirm_quiet() -> Result(Bool, String)
+
+/// Remember the bytes whose worker state is terminal.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.remember_quiet(bytes)
+/// ```
+@external(erlang, "gantry_khepri_ffi", "remember_quiet")
+pub fn remember_quiet(bytes: String) -> Nil
+
 /// Compare exact bytes. False means another proposal won.
 ///
 /// ## Examples

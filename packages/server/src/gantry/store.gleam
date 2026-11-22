@@ -9,6 +9,7 @@ import gantry/internal/ffi_khepri
 import gantry_core/protocol
 import gantry_core/queue
 import gleam/json
+import gleam/option.{type Option, None}
 import gleam/result
 import gleam/string
 
@@ -67,6 +68,27 @@ pub fn change(
   attempt(propose, 8)
 }
 
+/// Return a confirmed empty poll or run the full durable claim decision.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.claim("worker", "linux", 0)
+/// ```
+pub fn claim(
+  worker: String,
+  pool: String,
+  now: Int,
+) -> Result(Option(queue.Assignment), String) {
+  use confirmed <- result.try(ffi_khepri.confirm_quiet())
+
+  // A quiet snapshot cannot offer a lease to any worker.
+  case confirmed {
+    True -> Ok(None)
+    False -> change(fn(state) { Ok(queue.claim(state, worker, pool, now)) })
+  }
+}
+
 /// Recompute a pure transition from the latest snapshot after a competing write.
 fn attempt(
   propose: fn(queue.State) -> Result(#(queue.State, a), String),
@@ -77,7 +99,7 @@ fn attempt(
 
   // A quorum can confirm an unchanged receipt without appending a write.
   use accepted <- result.try(case next == state {
-    True -> ffi_khepri.confirm(prior)
+    True -> confirm(prior, state)
     False -> commit(prior, next)
   })
 
@@ -87,6 +109,19 @@ fn attempt(
     False, 1 -> Error("queue contention exceeded retry budget")
     False, _ -> attempt(propose, remaining - 1)
   }
+}
+
+/// Remember a quiet snapshot after it authorizes an unchanged receipt.
+fn confirm(prior: String, state: queue.State) -> Result(Bool, String) {
+  use accepted <- result.try(ffi_khepri.confirm(prior))
+
+  // Pending and active work require the full decision even on a snapshot hit.
+  case accepted && queue.quiescent(state) {
+    True -> ffi_khepri.remember_quiet(prior)
+    False -> Nil
+  }
+
+  Ok(accepted)
 }
 
 /// Replace the expected snapshot with a bounded mutation.

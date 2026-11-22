@@ -311,6 +311,10 @@ An unchanged proposal checks the same bytes through a Ra leader query
 that confirms the leader's authority with a majority. A conflict causes
 the store to rebuild the proposal, with up to eight total attempts.
 The queue snapshot has a 4 MiB ceiling.
+When every action in a snapshot is terminal, a controller can remember
+its exact bytes locally. A worker poll first checks those bytes through
+the same quorum read. A match proves there is no lease to issue or
+replay. A miss runs the normal claim decision.
 The controller allows up to 64 MiB per blob. It syncs object bytes
 before atomic rename and syncs the containing directory before
 returning a digest. Cache reuse takes the proof from a recorded

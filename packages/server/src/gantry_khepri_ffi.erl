@@ -1,12 +1,13 @@
 %% One Ra system per controller VM, with a fixed store and path. Elastic
 %% executors never join Erlang distribution or vote on this state.
 -module(gantry_khepri_ffi).
--export([boot/3, read/0, confirm/1, swap/2]).
+-export([boot/3, read/0, confirm/1, confirm_quiet/0, remember_quiet/1, swap/2]).
 
 -define(SYSTEM, gantry_queue_ra).
 -define(STORE, gantry_queue).
 -define(PATH, [queue_snapshot_v1]).
 -define(TIMEOUT, 5000).
+-define(QUIET, gantry_last_quiet_snapshot).
 
 boot(DataDir, Seed, Empty) ->
     try
@@ -23,11 +24,40 @@ boot(DataDir, Seed, Empty) ->
         Marker = filename:join(Dir, "member"),
         ok = open_replica(Marker, Seed),
         case khepri:create(?STORE, ?PATH, Empty, #{timeout => ?TIMEOUT}) of
-            ok -> {ok, nil};
-            {error, {khepri, mismatching_node, _}} -> {ok, nil};
+            ok -> open_hint();
+            {error, {khepri, mismatching_node, _}} -> open_hint();
             Other -> failure(Other)
         end
     catch Class:Why -> failure({Class, Why})
+    end.
+
+%% The controller owns one local hint. The quorum remains the authority.
+open_hint() ->
+    case ets:whereis(?QUIET) of
+        undefined -> ets:new(?QUIET, [named_table, public, {read_concurrency, true}]);
+        _ -> ok
+    end,
+    {ok, nil}.
+
+remember_quiet(Bytes) ->
+    try ets:insert(?QUIET, {quiet, Bytes}) of
+        true -> nil
+    catch error:badarg -> nil
+    end.
+
+confirm_quiet() ->
+    try
+        case ets:lookup(?QUIET, quiet) of
+            [{quiet, Expected} = Entry] ->
+                case confirm(Expected) of
+                    {ok, false} = Miss ->
+                        true = ets:delete_object(?QUIET, Entry),
+                        Miss;
+                    Other -> Other
+                end;
+            [] -> {ok, false}
+        end
+    catch error:badarg -> {ok, false}
     end.
 
 open_replica(Marker, Seed) ->
