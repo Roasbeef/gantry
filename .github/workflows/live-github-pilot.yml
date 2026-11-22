@@ -1,0 +1,27 @@
+name: Gantry live GitHub pilot
+on:
+  push:
+    branches: ['pilot/gantry-integration-runner']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  pilot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: '29.0.5'
+          gleam-version: '1.19.0'
+          rebar3-version: '3.27.0'
+          version-type: strict
+      - run: make install PREFIX="$RUNNER_TEMP/gantry"
+      - run: bash scripts/github-live-pilot.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
