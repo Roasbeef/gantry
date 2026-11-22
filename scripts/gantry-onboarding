@@ -1,0 +1,426 @@
+# Sourced by gantry for local deployment and slot setup.
+
+local_image=alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+fixture_repo=gantry/fixture
+
+onboard() {
+  umask 077
+  trap 'error 1 local_io "Onboarding could not finish. Check the private profile and its logs, then rerun the command."' ERR
+  local state=${XDG_STATE_HOME:-${HOME:?Set HOME or XDG_STATE_HOME}/.local/state}
+  [[ $state == /* && ! $state =~ [[:cntrl:]] ]] ||
+    invalid "Set XDG_STATE_HOME to an absolute path without control characters."
+  case $command in
+    init|local) profile=$state/gantry/local ;;
+    worker) profile=$state/gantry/worker ;;
+  esac
+  local dist_bin
+  dist_bin=$(cd -- "$cli_dir" && pwd -P)
+  controller_bin=$dist_bin/gantryd
+  worker_bin=$dist_bin/gantry-worker
+  cli=$dist_bin/gantry
+
+  case $command in
+    worker)
+      if [[ ${args[0]} == setup ]]; then
+        setup_worker "$@"
+      else
+        start_remote_worker
+      fi
+      ;;
+    init|local)
+      [[ -x $controller_bin && -x $worker_bin ]] ||
+        error 1 missing_release "Run this command with the installed Linux release."
+      [[ $command == init || -f $profile/profile.json ]] ||
+        error 4 missing_profile "Run gantry init --local first."
+      open_profile
+      prepare_local
+      start_local_controller
+      check_docker
+      ensure_image
+      if [[ $command == init ]]; then
+        smoke
+      else
+        start_local_worker
+        printf 'Local Gantry is listening at %s. Logs and client.env are under %s.\n' "$endpoint" "$profile" >&2
+        local status=0
+        wait -n "$controller_pid" "$worker_pid" || status=$?
+        error 1 service_exited "A local service exited (status $status). See the logs under $profile."
+      fi
+      ;;
+  esac
+}
+
+open_profile() {
+  if [[ -L $profile || -e $profile && ! -d $profile ]]; then
+    error 1 unsafe_profile "Expected a private directory at $profile."
+  fi
+  mkdir -p -- "$profile"
+  [[ -O $profile && $(stat -c '%a' -- "$profile") == 700 ]] ||
+    error 1 unsafe_profile "Set the profile directory to mode 0700 and owned by this user."
+  profile=$(cd -- "$profile" && pwd -P)
+  [[ ! $profile =~ [[:cntrl:]] ]] ||
+    invalid "Use a profile path without control characters."
+  exec 9>>"$profile/.setup.lock"
+  flock -n 9 || error 6 profile_busy "Another Gantry command is using this profile."
+  child_pids=()
+  trap stop_children EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
+
+stop_children() {
+  local pid
+  for pid in "${child_pids[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+  local deadline=$((SECONDS + 10))
+  for pid in "${child_pids[@]}"; do
+    while kill -0 -- "-$pid" 2>/dev/null && (( SECONDS < deadline )); do sleep 0.1; done
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
+# Publish intent files before any process can consume their values.
+save() {
+  local path=$1 staged
+  staged=$(mktemp -- "$path.tmp.XXXXXXXX")
+  cat > "$staged"
+  sync -d -- "$staged"
+  mv -fT -- "$staged" "$path"
+  sync -f -- "$profile"
+}
+
+read_profile() {
+  local kind=$1 file=$profile/profile.json
+  [[ -f $file && ! -L $file && -O $file && $(stat -c '%a' -- "$file") == 600 ]] ||
+    error 1 unsafe_profile "Expected a private profile file at $file."
+  jq -e --arg kind "$kind" '
+    def identity: type == "string" and test("^[A-Za-z0-9._-]{1,240}$") and . != "." and . != ".." and . != ".git";
+    def token: type == "string" and length >= 32 and test("^[!-~]+$");
+    .version == 1 and .kind == $kind and (.worker_id | identity) and (.worker_token | token)
+    and (if $kind == "local" then
+      (.agent_token | token) and (.submit_token | token) and (.cookie | token)
+      and (.directory | type == "string")
+      and (.node | type == "string" and test("^gantry_[a-f0-9]{16}@127[.]0[.]0[.]1$"))
+      and (.port | type == "number" and . == floor and . >= 1 and . <= 65535)
+    else (.endpoint | type == "string") and (.pool | identity) and (.journal | type == "string") end)
+  ' "$file" >/dev/null || error 1 invalid_profile "Could not validate $file."
+  worker_id=$(jq -r .worker_id "$file")
+  worker_token=$(jq -r .worker_token "$file")
+  if [[ $kind == worker && $(jq -r .journal "$file") != "$profile/journal" ]]; then
+    error 6 profile_conflict "The saved slot belongs with its original journal directory."
+  fi
+  if [[ $kind == local && $(jq -r .directory "$file") != "$profile" ]]; then
+    error 6 profile_conflict "The local profile belongs in its original state directory."
+  fi
+}
+
+prepare_local() {
+  local file=$profile/profile.json port=${GANTRY_LOCAL_PORT:-4737}
+  if [[ ! -e $file ]]; then
+    [[ ! -e $profile/controller && ! -e $profile/journal ]] ||
+      error 6 missing_profile "Recover the profile that belongs to the existing controller and journal."
+    [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) ||
+      invalid "Set GANTRY_LOCAL_PORT to a port between 1 and 65535." GANTRY_LOCAL_PORT
+    local identity cookie
+    identity=$(openssl rand -hex 8)
+    agent_token=$(openssl rand -hex 32)
+    worker_token=$(openssl rand -hex 32)
+    submit_token=$(openssl rand -hex 32)
+    cookie=$(openssl rand -hex 20)
+    printf '%s\n' "$agent_token" "$worker_token" "$submit_token" "$cookie" |
+      jq -Rn --arg id "$identity" --argjson port "$port" --arg directory "$profile" '
+      {version:1,kind:"local",node:("gantry_" + $id + "@127.0.0.1"),worker_id:("local-" + $id),
+       $directory,port:$port,agent_token:input,worker_token:input,submit_token:input,cookie:input}
+    ' | save "$file"
+  fi
+  read_profile local
+  local stored_port
+  stored_port=$(jq -r .port "$file")
+  [[ ! ${GANTRY_LOCAL_PORT+x} || $port == "$stored_port" ]] ||
+    error 6 profile_conflict "The local profile already uses TCP port $stored_port."
+  endpoint=http://127.0.0.1:$stored_port
+  node=$(jq -r .node "$file")
+  agent_token=$(jq -r .agent_token "$file")
+  submit_token=$(jq -r .submit_token "$file")
+  worker_pool=local
+  if [[ -e $profile/controller-established && ! -f $profile/controller/queue-ra/member ]]; then
+    error 6 missing_controller "The established controller's Ra state is missing. Restore it before restarting."
+  fi
+  ensure_fixture
+  if [[ ! -e $profile/controller.toml ]]; then
+    jq -nr --arg profile "$profile" --arg image "$local_image" --argjson port "$stored_port" '
+      "data_dir = " + ($profile + "/controller" | tojson),
+      "blob_dir = " + ($profile + "/blobs" | tojson),
+      "port = " + ($port | tostring),
+      "", "[[repository]]",
+      "name = \"gantry/fixture\"", "branch = \"main\"", "target = \"check\"", "pool = \"local\"",
+      "image = " + ($image | tojson),
+      "local_remote = " + ($profile + "/fixture.git" | tojson)
+    ' | save "$profile/controller.toml"
+  fi
+  mkdir -p -- "$profile/home"
+  if [[ ! -e $profile/home/.erlang.cookie ]]; then
+    jq -r .cookie "$file" | save "$profile/home/.erlang.cookie"
+  fi
+  chmod 0400 -- "$profile/home/.erlang.cookie"
+  # Only the client role is included in this opt-in shell environment.
+  printf 'export GANTRY_URL=%q\nexport GANTRY_TOKEN=%q\n' "$endpoint" "$agent_token" |
+    save "$profile/client.env"
+}
+
+fixture_git() {
+  env -i PATH="$PATH" HOME="$profile/home" GIT_CONFIG_NOSYSTEM=1 git "$@"
+}
+
+ensure_fixture() {
+  if [[ -d $profile/fixture.git ]]; then
+    revision=$(fixture_git -C "$profile/fixture.git" rev-parse --verify 'refs/heads/main^{commit}')
+    return
+  fi
+  local staging
+  staging=$(mktemp -d -- "$profile/.fixture.XXXXXXXX")
+  fixture_git init -q --bare --initial-branch=main "$staging/remote"
+  fixture_git init -q --initial-branch=main "$staging/work"
+  cat > "$staging/work/gantry.json" <<'JSON'
+{
+  "targets": {"check": ["check"]},
+  "actions": [
+    {"name":"check","argv":["sh","-ec","printf 'gantry smoke passed\\n' > result.txt"],
+     "inputs":[],"outputs":["result.txt"],"timeout":30}
+  ]
+}
+JSON
+  fixture_git -C "$staging/work" add -- gantry.json
+  fixture_git -C "$staging/work" -c user.name=Gantry -c user.email=gantry@example.invalid \
+    -c commit.gpgsign=false commit -qm 'Add Gantry smoke fixture'
+  fixture_git -C "$staging/work" push -q "$staging/remote" HEAD:refs/heads/main
+  revision=$(fixture_git -C "$staging/remote" rev-parse --verify 'refs/heads/main^{commit}')
+  mv -T -- "$staging/remote" "$profile/fixture.git"
+  sync -f -- "$profile"
+  rm -rf -- "$staging"
+}
+
+check_docker() {
+  command -v docker >/dev/null &&
+    timeout 10 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 ||
+    error 1 docker_unavailable "Install Docker and verify this user can run docker info. Then rerun the command."
+}
+
+ensure_image() {
+  if ! timeout 10 docker image inspect "$local_image" >/dev/null 2>&1; then
+    timeout 120 docker pull "$local_image" >"$profile/docker.log" 2>&1 ||
+      error 1 image_unavailable "Could not pull the pinned fixture image. See $profile/docker.log."
+  fi
+}
+
+start_local_controller() {
+  local deadline=$((SECONDS + 45))
+  if timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/"$1"' _ "${endpoint##*:}" 2>/dev/null; then
+    error 6 port_in_use "Another process is listening at $endpoint."
+  fi
+  (
+    cd -- "$profile"
+    for key in ${!GIT_@}; do unset "$key"; done
+    unset GH_TOKEN ERL_AFLAGS ERL_ZFLAGS
+    export HOME="$profile/home" ERL_EPMD_ADDRESS=127.0.0.1
+    export ERL_FLAGS="+S 2:2 -name $node -start_epmd false -erl_epmd_port 0 -kernel inet_dist_use_interface '{127,0,0,1}'"
+    export GANTRY_CONFIG="$profile/controller.toml" GANTRY_TOKEN="$agent_token"
+    export GANTRY_WORKER_TOKEN="$worker_token" GANTRY_SUBMIT_TOKEN="$submit_token"
+    exec setsid setpriv --pdeathsig TERM "$controller_bin"
+  ) >"$profile/controller.log" 2>&1 9>&- &
+  controller_pid=$!
+  child_pids+=("$controller_pid")
+  until curl --disable --noproxy '*' -fs --max-time 6 "$endpoint/ready" |
+      jq -e '.status == "ready"' >/dev/null; do
+    if ! kill -0 "$controller_pid" 2>/dev/null || (( SECONDS >= deadline )); then
+      error 1 controller_unavailable "Controller did not become ready. See $profile/controller.log."
+    fi
+    sleep 0.25
+  done
+  [[ -f $profile/controller/queue-ra/member &&
+    $(cat -- "$profile/controller/queue-ra/member") == "$node" ]] ||
+    error 1 controller_unavailable "The ready controller does not match the local profile."
+  if [[ ! -e $profile/controller-established ]]; then
+    printf '%s\n' "$node" | save "$profile/controller-established"
+  fi
+}
+
+start_local_worker() {
+  (
+    cd -- "$profile"
+    unset GANTRY_TOKEN GANTRY_SUBMIT_TOKEN GH_TOKEN ERL_AFLAGS ERL_ZFLAGS
+    export ERL_FLAGS="+S 2:2" GANTRY_ENDPOINT="$endpoint" GANTRY_POOL="$worker_pool"
+    export GANTRY_WORKER_ID="$worker_id" GANTRY_WORKER_TOKEN="$worker_token"
+    export GANTRY_WORKER_DIR="$profile/journal" GANTRY_WORKER_GUARD="$profile"
+    exec setsid setpriv --pdeathsig TERM "$worker_bin"
+  ) >"$profile/worker.log" 2>&1 9>&- &
+  worker_pid=$!
+  child_pids+=("$worker_pid")
+}
+
+local_cli() (
+  unset GANTRY_SUBMIT_TOKEN GANTRY_WORKER_TOKEN
+  export NO_PROXY=127.0.0.1 no_proxy=127.0.0.1
+  export GANTRY_URL="$endpoint" GANTRY_TOKEN="$agent_token" GANTRY_WATCH_SECONDS=90
+  exec "$cli" "$@"
+)
+
+smoke() {
+  local run= result= status=0 digest resumed=false attempt
+  if [[ -f $profile/smoke-run ]]; then
+    run=$(cat -- "$profile/smoke-run")
+    result=$(local_cli status "$run" 2>"$profile/smoke.log") || status=$?
+    case $status in
+      0)
+        if jq -e '.phase == "failed" or .phase == "blocked"' <<<"$result" >/dev/null; then
+          run=
+        else
+          resumed=true
+        fi
+        ;;
+      4) ;;
+      *) error 1 smoke_status "Could not look up the smoke run. See $profile/smoke.log." ;;
+    esac
+  fi
+  if ! jq -e '.phase == "passed"' <<<"$result" >/dev/null || [[ $status != 0 ]]; then
+    # The normal ad hoc path scopes cache keys to the run ID.
+    cat > "$profile/smoke-action.json" <<'JSON'
+{"name":"check","argv":["sh","-ec","printf 'gantry smoke passed\\n' > result.txt"],"inputs":[],"outputs":["result.txt"],"timeout":30}
+JSON
+    start_local_worker
+    for attempt in 1 2; do
+      if [[ -z $run ]]; then
+        run=smoke-$(openssl rand -hex 8)
+        printf '%s\n' "$run" | save "$profile/smoke-run"
+      fi
+      local_cli run "$run" "$fixture_repo" "$revision" check "$profile/smoke-action.json" \
+        >"$profile/smoke-admission.json" 2>"$profile/smoke.log" ||
+        error 1 smoke_admission "Could not admit the smoke run. See $profile/smoke.log."
+      if local_cli watch "$run" >"$profile/smoke-watch.jsonl" 2>"$profile/smoke.log"; then break; fi
+      # Recovery can terminate an old attempt after cleaning up its
+      # container. Verify a new run with the recovered slot in that case.
+      if [[ $resumed == true && $attempt == 1 ]] &&
+        jq -se 'last | .phase == "failed" and any(.work[];
+          .step.reason == "worker interrupted before recording outcome")' "$profile/smoke-watch.jsonl" >/dev/null; then
+        run=
+      else
+        error 1 smoke_failed "Smoke run $run did not pass. See $profile/smoke-watch.jsonl and $profile/worker.log."
+      fi
+    done
+    result=$(jq -cs 'last' "$profile/smoke-watch.jsonl")
+  fi
+  digest=$(jq -er '
+    select(.phase == "passed") | .work[0].step | select(.kind == "passed") |
+    .proof.files[] | select(.path == "result.txt") | .digest
+  ' <<<"$result") ||
+    error 1 smoke_failed "Smoke run $run did not produce a fresh Docker result."
+  local_cli blob "$digest" > "$profile/smoke-result.txt" 2>"$profile/smoke.log" ||
+    error 1 smoke_failed "Could not retrieve the smoke artifact. See $profile/smoke.log."
+  cmp -s "$profile/smoke-result.txt" <(printf 'gantry smoke passed\n') ||
+    error 1 smoke_failed "Smoke artifact bytes did not match."
+  emit "$(jq -nc --arg endpoint "$endpoint" --arg node "$node" --arg worker "$worker_id" \
+    --arg pool "$worker_pool" --arg run "$run" --arg artifact "$digest" --arg profile "$profile" '
+    {status:"passed", endpoint:$endpoint, node:$node, worker_id:$worker, pool:$pool, run_id:$run,
+     artifact:$artifact, profile:$profile, services:"stopped", start:"gantry local start",
+     client_env:($profile + "/client.env")}
+  ')"
+}
+
+remote_origin() {
+  local origin='^https://([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:([0-9]{1,5}))?$'
+  [[ $1 =~ $origin ]] || invalid "Use an HTTPS gateway origin without a path, query, or credentials." endpoint
+  if [[ -n ${BASH_REMATCH[3]} ]]; then
+    (( 10#${BASH_REMATCH[3]} >= 1 && 10#${BASH_REMATCH[3]} <= 65535 )) ||
+      invalid "Use a gateway port between 1 and 65535." endpoint
+  fi
+}
+
+setup_worker() {
+  endpoint=${1%/}
+  worker_pool=$2
+  remote_origin "$endpoint"
+  [[ $worker_pool =~ ^[A-Za-z0-9._-]{1,240}$ &&
+    $worker_pool != . && $worker_pool != .. && $worker_pool != .git ]] ||
+    invalid "Use a valid Gantry pool name." pool
+  local supplied=${GANTRY_WORKER_TOKEN:-}
+  if [[ $token_stdin == true ]]; then
+    if [[ -t 0 ]]; then
+      IFS= read -rs supplied || true
+    else
+      IFS= read -r supplied || true
+      local extra=
+      if IFS= read -r extra || [[ -n $extra ]]; then
+        error 3 invalid_credentials "Provide one worker token on stdin."
+      fi
+    fi
+    [[ -n $supplied ]] || error 3 missing_credentials "Provide a worker token on stdin."
+  fi
+  open_profile
+  local file=$profile/profile.json
+  if [[ -e $file ]]; then
+    read_profile worker
+    [[ $endpoint == "$(jq -r .endpoint "$file")" && $worker_pool == "$(jq -r .pool "$file")" ]] ||
+      error 6 profile_conflict "The saved slot is bound to its original gateway and pool."
+    [[ -z $supplied || $supplied == "$worker_token" ]] ||
+      error 6 profile_conflict "The supplied worker token differs from the saved token."
+  else
+    [[ ! -e $profile/journal ]] ||
+      error 6 missing_profile "Recover the profile that belongs to the existing worker journal."
+    [[ -n $supplied ]] ||
+      error 3 missing_credentials "Set GANTRY_WORKER_TOKEN or supply it with --token-stdin."
+    worker_token=$supplied
+    worker_id=worker-$(openssl rand -hex 16)
+  fi
+  [[ ${#worker_token} -ge 32 && $worker_token =~ ^[!-~]+$ ]] ||
+    error 3 invalid_credentials "Use a worker token of at least 32 printable ASCII characters without spaces."
+  check_docker
+  check_remote
+  if [[ ! -e $file ]]; then
+    jq -n --arg endpoint "$endpoint" --arg pool "$worker_pool" --arg worker_id "$worker_id" \
+      --arg journal "$profile/journal" \
+      --rawfile worker_token <(printf '%s' "$worker_token") '
+      {version:1,kind:"worker",$endpoint,$pool,$worker_id,$worker_token,$journal}
+    ' | save "$file"
+  fi
+  emit "$(jq -nc --arg endpoint "$endpoint" --arg pool "$worker_pool" \
+    --arg worker "$worker_id" --arg profile "$profile" '
+    {status:"ready",endpoint:$endpoint,pool:$pool,worker_id:$worker,profile:$profile,
+     journal:($profile + "/journal"),worker:"stopped",start:"gantry worker start"}
+  ')"
+}
+
+check_remote() {
+  local response code
+  response=$(mktemp -- "$profile/.readiness.XXXXXXXX")
+  code=$(printf 'Authorization: Bearer %s\n' "$worker_token" |
+    curl --disable --globoff --proto '=https' -s --max-time 10 --connect-timeout 3 \
+      -H @- -o "$response" -w '%{http_code}' -- "$endpoint/v1/worker/ready") ||
+    code=transport
+  if [[ $code == 200 ]] && ! jq -e '.status == "ready"' "$response" >/dev/null 2>&1; then
+    code=invalid
+  fi
+  rm -f -- "$response"
+  case $code in
+    200) ;;
+    401|403) error 3 auth_failed "The gateway rejected the worker token." ;;
+    404) error 4 worker_readiness_missing "The gateway must forward the worker readiness route to a current controller." ;;
+    *) error 1 worker_readiness_failed "The gateway did not confirm worker readiness (result: $code)." ;;
+  esac
+}
+
+start_remote_worker() {
+  [[ -x $worker_bin ]] || error 1 missing_release "Run this command with the installed Linux release."
+  [[ -f $profile/profile.json ]] || error 4 missing_profile "Run gantry worker setup first."
+  open_profile
+  read_profile worker
+  endpoint=$(jq -r .endpoint "$profile/profile.json")
+  worker_pool=$(jq -r .pool "$profile/profile.json")
+  remote_origin "$endpoint"
+  check_docker
+  check_remote
+  unset GANTRY_TOKEN GANTRY_SUBMIT_TOKEN GH_TOKEN
+  export GANTRY_ENDPOINT="$endpoint" GANTRY_POOL="$worker_pool" GANTRY_WORKER_ID="$worker_id"
+  export GANTRY_WORKER_DIR="$profile/journal" GANTRY_WORKER_GUARD="$profile" GANTRY_WORKER_TOKEN="$worker_token"
+  exec "$worker_bin"
+}

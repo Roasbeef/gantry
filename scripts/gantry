@@ -104,6 +104,24 @@ help_text() {
   ' "$schema"
 }
 
+emit() {
+  if [[ -z $fields ]]; then
+    printf '%s\n' "$1"
+    return
+  fi
+  jq -c --arg fields "$fields" '
+    def present($path):
+      if $path == [] then true
+      elif type != "object" or (has($path[0]) | not) then false
+      else .[$path[0]] | present($path[1:])
+      end;
+
+    . as $result |
+    reduce ($fields | split(",") | map(split(".")) | sort_by(length)[]) as $path
+      ({}; if $result | present($path) then setpath($path; $result | getpath($path)) else . end)
+  ' <<<"$1"
+}
+
 # Parse options in any position. A literal -- ends option processing.
 command=
 output=
@@ -114,6 +132,8 @@ dry_run=false
 help=false
 json_help=false
 version_requested=false
+init_local=false
+token_stdin=false
 args=()
 while (( $# )); do
   case $1 in
@@ -135,6 +155,8 @@ while (( $# )); do
       shift 2
       ;;
     --dry-run) dry_run=true; shift ;;
+    --local) [[ $init_local == false ]] || invalid "Duplicate option." --local; init_local=true; shift ;;
+    --token-stdin) [[ $token_stdin == false ]] || invalid "Duplicate option." --token-stdin; token_stdin=true; shift ;;
     -h|--help) help=true; shift ;;
     --version) version_requested=true; shift ;;
     --) shift; args+=("$@"); break ;;
@@ -148,7 +170,8 @@ done
 
 if [[ $version_requested == true ]]; then
   [[ -z $command && ${#args[@]} == 0 && $help == false && $payload_set == false &&
-    $dry_run == false && -z $fields && ( -z $output || $output == json ) ]] ||
+    $dry_run == false && $init_local == false && $token_stdin == false &&
+    -z $fields && ( -z $output || $output == json ) ]] ||
     invalid "Use gantry --version [--output json]."
   version
   exit 0
@@ -156,12 +179,13 @@ fi
 
 [[ -r $schema ]] || error 1 missing_schema "Could not read the Gantry CLI schema."
 case $command in
-  plan|run|submit|status|watch|blob|describe|'') ;;
+  plan|run|submit|status|watch|blob|skill|describe|init|local|worker|'') ;;
   *) invalid "Unknown command. Run gantry describe to see available commands." command ;;
 esac
 
 if [[ $help == true ]]; then
   [[ ${#args[@]} == 0 && $payload_set == false && $dry_run == false && -z $fields &&
+    $init_local == false && $token_stdin == false &&
     ( -z $output || $output == json ) ]] || invalid "Use --help or --help --json."
   if [[ $json_help == true || $output == json ]]; then describe "$command"; else help_text "$command"; fi
   exit 0
@@ -170,13 +194,58 @@ fi
 case $command in
   '') invalid "A command is required. Run gantry --help." command ;;
   blob) [[ -z $output || $output == raw ]] || invalid "Blob emits bytes. Use --output raw." --output ;;
+  skill) [[ -z $output || $output == raw ]] || invalid "Skill emits Markdown. Use --output raw." --output ;;
   *) [[ -z $output || $output == json ]] || invalid "Use --output json." --output ;;
 esac
 
+[[ $init_local == false || $command == init ]] || invalid "Use --local with init." --local
+[[ $token_stdin == false || $command == worker ]] ||
+  invalid "Use --token-stdin with worker setup." --token-stdin
 if [[ $command == describe ]]; then
   [[ ${#args[@]} -le 1 && $payload_set == false && $dry_run == false && -z $fields ]] ||
     invalid "Use gantry describe [COMMAND]."
   describe "${args[0]:-}"
+  exit 0
+fi
+
+if [[ $command == skill ]]; then
+  [[ ${#args[@]} == 0 && $payload_set == false && $dry_run == false && -z $fields ]] ||
+    invalid "Use gantry skill [--output raw]."
+  skill_file=$cli_dir/../skills/gantry/SKILL.md
+  [[ -r $skill_file ]] || skill_file=$cli_dir/../share/gantry/skill/SKILL.md
+  [[ -r $skill_file ]] || error 1 missing_skill "Could not read the Gantry agent skill."
+  cat -- "$skill_file"
+  exit 0
+fi
+
+# Validate projection paths for both local and HTTP JSON commands.
+if [[ -n $fields ]]; then
+  path_pattern='[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*'
+  [[ $command != blob && $dry_run == false && $fields =~ ^$path_pattern(,$path_pattern)*$ ]] ||
+    invalid "Use comma-separated object paths on live JSON results." --fields
+fi
+
+if [[ $command == init || $command == local || $command == worker ]]; then
+  [[ $payload_set == false && $dry_run == false ]] ||
+    invalid "Run gantry describe $command for usage."
+  helper=$cli_dir/gantry-onboarding
+  [[ -r $helper ]] || helper=$cli_dir/../share/gantry/gantry-onboarding
+  [[ -r $helper ]] || error 1 missing_helper "Could not find the Gantry onboarding helper."
+  case "$command:${args[0]:-}" in
+    init:)
+      [[ $init_local == true && ${#args[@]} == 0 ]] || invalid "Use gantry init --local."
+      ;;
+    local:start|worker:start)
+      [[ ${#args[@]} == 1 && -z $fields && -z $output && $token_stdin == false ]] ||
+        invalid "Use gantry $command start."
+      ;;
+    worker:setup)
+      [[ ${#args[@]} == 3 ]] || invalid "Use gantry worker setup HTTPS_URL POOL [--token-stdin]."
+      ;;
+    *) invalid "Run gantry describe $command for usage." ;;
+  esac
+  source "$helper"
+  onboard "${args[@]:1}"
   exit 0
 fi
 
@@ -186,12 +255,6 @@ url_pattern='^https?://([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:([0-9]{1,5}))?(/[A-
 if [[ -n ${BASH_REMATCH[3]} ]] && (( 10#${BASH_REMATCH[3]} > 65535 )); then
   invalid "Controller port must be at most 65535." GANTRY_URL
 fi
-if [[ -n $fields ]]; then
-  path_pattern='[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*'
-  [[ $command != blob && $dry_run == false && $fields =~ ^$path_pattern(,$path_pattern)*$ ]] ||
-    invalid "Use comma-separated object paths on live JSON results." --fields
-fi
-
 case $command in
   plan|run|submit)
     route=$(jq -er --arg command "$command" '.commands[$command].route' "$schema")
@@ -326,24 +389,6 @@ request_error() {
 response_json() {
   jq -cse 'select(length == 1 and (.[0] | type == "object")) | .[0]' \
     "$tmp/response" 2>/dev/null || error 1 invalid_response "Expected a JSON object from the controller."
-}
-
-emit() {
-  if [[ -z $fields ]]; then
-    printf '%s\n' "$1"
-    return
-  fi
-  jq -c --arg fields "$fields" '
-    def present($path):
-      if $path == [] then true
-      elif type != "object" or (has($path[0]) | not) then false
-      else .[$path[0]] | present($path[1:])
-      end;
-
-    . as $result |
-    reduce ($fields | split(",") | map(split(".")) | sort_by(length)[]) as $path
-      ({}; if $result | present($path) then setpath($path; $result | getpath($path)) else . end)
-  ' <<<"$1"
 }
 
 if [[ $command != watch ]]; then

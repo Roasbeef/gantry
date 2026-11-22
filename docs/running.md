@@ -77,6 +77,73 @@ checked in alongside the schema and queries.
 
 ## Choose a deployment
 
+### Verify a local installation
+
+Run this command on Linux with the installed release.
+
+```sh
+gantry init --local
+```
+
+Init saves a loopback profile, boots the controller, and runs a fixture
+with the installed worker and Docker. It pulls the digest-pinned fixture
+image if needed. The JSON result includes the endpoint, BEAM node,
+worker ID, pool, run ID, and the verified artifact digest. Init stops its
+services on exit. If Docker is unavailable, it verifies controller
+readiness, reports the missing prerequisite, and stops. Retry init after
+the user running Gantry can reach the Docker daemon.
+
+The profile lives in `${XDG_STATE_HOME:-$HOME/.local/state}/gantry/local`
+with private permissions. It holds the fixture's own Git repository,
+controller configuration and queue, worker journal, logs, and role
+credentials. Init reopens the same identity, credentials, and journal on
+rerun and verifies the existing artifact if the smoke already passed.
+Set `GANTRY_LOCAL_PORT` on first init to choose a port other than 4737.
+Recover the voter from backup if an established profile loses its Ra
+state.
+
+Use `gantry local start` to run both services in the foreground or as
+one supervisor-managed process. Load the agent credential and endpoint
+in the shell that will use the CLI.
+
+```sh
+. "${XDG_STATE_HOME:-$HOME/.local/state}/gantry/local/client.env"
+gantry status RUN_ID
+```
+
+The generated controller configuration registers only the smoke fixture.
+Add other repositories explicitly in `controller.toml` while the
+controller is stopped.
+
+### Prepare a remote worker
+
+Install the release on a Linux Docker host. Use a stable HTTPS gateway
+origin and the existing deployment's worker role token. The gateway
+must pass `GET /v1/worker/ready` and its authorization header to a current
+controller. Readiness checks the token and queue quorum without
+acquiring a lease.
+
+```sh
+gantry worker setup https://gantry.example linux --token-stdin < /private/path/worker-token
+gantry worker start
+```
+
+You can also supply the token through `GANTRY_WORKER_TOKEN`. Setup checks
+Docker and authenticated gateway readiness, saves one slot, and exits.
+Use the explicit start command as the foreground command for your
+supervisor. Install a gateway's private CA in the system trust store on
+the worker when needed. Pre-pull the images required by the pool before
+admitting a build.
+
+Keep the profile at
+`${XDG_STATE_HOME:-$HOME/.local/state}/gantry/worker` with its journal.
+Rerunning setup reuses the slot's identity and saved token and requires
+the original gateway and pool. Keep the gateway routed to the same
+deployment for the lifetime of the journal. Use a fresh profile and slot
+to connect to a different deployment.
+
+### Size the controller fleet
+
 Run one controller for a single-host deployment. For controller failover,
 run three controllers as voters on separate hosts. Two of three voters
 can serve the queue. All controllers in the quorum serve the same queue
