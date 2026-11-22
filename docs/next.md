@@ -48,7 +48,10 @@ The verification suite includes generated graph and receipt properties,
 mutational JSON tests, and a replayable queue simulation with nightly swarm
 and coverage-guided campaigns. Pickglass identified Ra writes during
 unchanged polls. A majority-confirmed snapshot check now validates those
-receipts. Three-voter empty-poll throughput tripled in both benchmark
-configurations, with lower controller CPU, latency and peak RSS.
+receipts. Worker polls can reuse the same check to confirm a remembered
+terminal snapshot before decoding it. In the 64-build workload, the
+combined changes used about one seventeenth of the original CPU per
+empty poll. The deployment runbook and performance skill cover adding
+capacity and repeating the benchmark.
 [Queue verification](queue-verification.md) ·
 [Controller benchmark](controller-load.md)

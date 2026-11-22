@@ -201,6 +201,24 @@ pub fn find(state: State, id: String) -> Result(Run, Nil) {
   list.find(state.runs, fn(run) { run.id == id })
 }
 
+/// Determine whether a worker could receive a lease from this snapshot.
+///
+/// ## Examples
+///
+/// ```gleam
+/// queue.quiescent(queue.empty())
+/// ```
+pub fn quiescent(state: State) -> Bool {
+  list.all(state.runs, fn(run) {
+    list.all(run.work, fn(work) {
+      case work.step {
+        Pending(_) | Active(_) -> False
+        Passed(_) | Reused(_) | Failed(_, _) -> True
+      }
+    })
+  })
+}
+
 /// Resolve a pending action, reuse a proof, or reserve a free worker.
 ///
 /// ## Examples

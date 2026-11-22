@@ -112,6 +112,12 @@ done
 post() {
   curl -fsS --max-time 60 -H "Authorization: Bearer $2" -H 'Content-Type: application/json' --data "$3" "$1" > "$tmp/post.json"
 }
+poll_status() {
+  curl -sS --connect-timeout 1 --max-time 8 -o "$tmp/poll.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $GANTRY_WORKER_TOKEN" -H 'Content-Type: application/json' \
+    --data '{"worker":"probe","pool":"default"}' "$1/v1/claims"
+}
+empty_poll() { [[ $(poll_status "$1") == 204 ]]; }
 run() {
   post "$1/v1/runs" "$GANTRY_TOKEN" "$(jq -nc --arg id "$2" --arg rev "$3" '{id:$id,repo:"fixture/project",target:"check",revision:$rev}')"
 }
@@ -120,9 +126,13 @@ start_worker() {
   start "$1" env ERL_FLAGS="+S 2:2" GANTRY_ENDPOINT="$worker_urls" GANTRY_POOL=default \
     GANTRY_WORKER_ID=worker-one GANTRY_WORKER_DIR="$tmp/worker" "${worker[@]}"
 }
+empty_poll "${endpoints[1]}"
+empty_poll "${endpoints[1]}"
+run "${endpoints[0]}" initial "$base"
+post "${endpoints[1]}/v1/claims" "$GANTRY_WORKER_TOKEN" '{"worker":"worker-one","pool":"default"}'
+original_serial=$(jq -er 'select(.run == "initial" and .task.action.name == "normalize") | .lease.serial' "$tmp/post.json")
 start_worker worker
 worker_pid=${pids[3]}
-run "${endpoints[0]}" initial "$base"
 matches() {
   get "$1/v1/runs/$2" > "$tmp/current.json" || return 1
   if jq -e "$3" "$tmp/current.json" >/dev/null; then return 0; fi
@@ -134,7 +144,7 @@ matches() {
 }
 wait_for 'active producer with waiting consumer' matches "${endpoints[1]}" initial '
   [.work[] | {(.task.action.name):.step.kind}] | add == {normalize:"active",collect:"pending"}'
-original_serial=$(jq -er '.work[] | select(.task.action.name == "normalize") | .step.lease.serial' "$tmp/current.json")
+[[ $(jq -er '.work[] | select(.task.action.name == "normalize") | .step.lease.serial' "$tmp/current.json") == "$original_serial" ]]
 for voter in 1 2; do
   post "${endpoints[voter]}/v1/claims" "$GANTRY_WORKER_TOKEN" '{"worker":"worker-one","pool":"default"}'
   jq -e --argjson serial "$original_serial" '
@@ -235,12 +245,6 @@ fi
 echo 'Passed worker restart, interrupted attempt fencing, and Docker resource cleanup'
 
 # A quiescent queue still needs a majority to return an empty poll.
-poll_status() {
-  curl -sS --connect-timeout 1 --max-time 8 -o "$tmp/poll.json" -w '%{http_code}' \
-    -H "Authorization: Bearer $GANTRY_WORKER_TOKEN" -H 'Content-Type: application/json' \
-    --data '{"worker":"probe","pool":"default"}' "$1/v1/claims"
-}
-empty_poll() { [[ $(poll_status "$1") == 204 ]]; }
 wait_for 'empty poll from the surviving quorum' empty_poll "${endpoints[2]}"
 kill -KILL -- "-${pids[1]}"
 wait "${pids[1]}" 2>/dev/null || true

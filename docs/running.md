@@ -211,12 +211,16 @@ ordinary DNS and HTTPS. They need neither EPMD nor distribution access.
 Start A and wait for its local health probe, then start and probe B,
 then C. Enable normal traffic after all three are healthy. Keep each
 controller's node name and Ra directory together on restart. The seed
-is used when joining with a fresh directory. To grow a single-controller
-deployment to three voters, mount its blob store on all three hosts and
-join the two fresh controllers using the existing trusted voter as seed.
-Add the new HTTPS origins to worker configurations once they are healthy.
-For a same-host rehearsal,
-use the loopback configuration in the [end-to-end harness](../scripts/e2e.sh).
+is used when joining with a fresh directory. If you plan to grow from
+one controller to three, give the first controller its final Erlang
+name at initial startup. Its Ra directory is tied to that name.
+Mount the blob store on all three hosts and join the two fresh
+controllers using the existing trusted voter as seed. While the cluster
+has two voters, both are required for a majority.
+Once the new origins are healthy, add them to worker configurations and
+restart each worker with its existing ID and journal directory.
+For a same-host rehearsal, use the loopback configuration in the
+[end-to-end harness](../scripts/e2e.sh).
 
 <a id="start-an-executor"></a>
 
@@ -261,6 +265,10 @@ the host. No controller registration step is needed. Retain each
 directory and reuse the same worker ID on restart. The journal records
 whether a container could have started and keeps unpublished outcomes
 until a controller acknowledges them.
+
+To move a repository to a new pool, configure the new slots and roll the
+repository's pool setting across the controllers. Already enrolled actions
+carry their original pool. Keep capacity in that pool until they finish.
 
 Run an uncached action on a registered repository in the new slot's pool.
 Use `gantry watch RUN_ID --output json` to see the active assignment at
