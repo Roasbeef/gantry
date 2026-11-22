@@ -1,6 +1,8 @@
 #!/usr/bin/env escript
 -mode(compile).
 
+-define(CORPUS_LIMIT, 1024).
+
 main(Args) ->
     ok = code:add_pathsa(filelib:wildcard("build/dev/erlang/*/ebin")),
     run(Args).
@@ -24,7 +26,10 @@ run(["guided", S, C]) ->
     Path = os:getenv("GANTRY_DST_CORPUS"),
     Initial = load_corpus(Path),
     {Micros, {Corpus, Seen}} = timer:tc(fun() ->
-        guided(Seed, 1, Count, Modules, Initial, [])
+        Seen0 = lists:foldl(fun({Index, Input}, Acc) ->
+            ordsets:union(coverage(Input, "corpus", Index, Modules), Acc)
+        end, [], lists:enumerate(Initial)),
+        guided(Seed, 1, Count, Modules, Initial, Seen0)
     end),
     save_corpus(Path, Corpus),
     io:format("guided seed=~B inputs=~B corpus=~B covered_lines=~B seconds=~.3f~n",
@@ -63,22 +68,26 @@ guided(Seed, Index, Count, Modules, Corpus, Seen) ->
     Choice = next(Seed),
     Parent = lists:nth(Choice rem length(Corpus) + 1, Corpus),
     Input = mutate(Parent, next(Choice)),
-    [ok = cover:reset(Mod) || Mod <- Modules],
-    evaluate(Input, Index),
-    Hit = ordsets:from_list(lists:append([covered(Mod) || Mod <- Modules])),
-    case ordsets:subtract(Hit, Seen) of
-        [] -> guided(next(Choice), Index + 1, Count, Modules, Corpus, Seen);
-        _ -> guided(next(Choice), Index + 1, Count, Modules, lists:usort([Input | Corpus]), ordsets:union(Hit, Seen))
+    Hit = coverage(Input, "mutation", Index, Modules),
+    %% Seen is exactly the coverage a later campaign can recover from Corpus.
+    case length(Corpus) < ?CORPUS_LIMIT andalso not ordsets:is_subset(Hit, Seen) of
+        true -> guided(next(Choice), Index + 1, Count, Modules, lists:usort([Input | Corpus]), ordsets:union(Hit, Seen));
+        false -> guided(next(Choice), Index + 1, Count, Modules, Corpus, Seen)
     end.
 
-evaluate({Mask, Ops}, Index) ->
+coverage(Input, Phase, Index, Modules) ->
+    [ok = cover:reset(Mod) || Mod <- Modules],
+    evaluate(Input, Phase, Index),
+    ordsets:from_list(lists:append([covered(Mod) || Mod <- Modules])).
+
+evaluate({Mask, Ops}, Phase, Index) ->
     try
         First = queue_dst:run(Mask, Ops),
         First = queue_dst:run(Mask, Ops),
         ok
     catch Class:Reason:Stack ->
-        io:format(standard_error, "guided failed at index ~B. Replay: scripts/queue-dst.sh ops ~B~s~n",
-            [Index, Mask, [io_lib:format(" ~B", [Op]) || Op <- Ops]]),
+        io:format(standard_error, "guided failed at ~s index ~B. Replay: scripts/queue-dst.sh ops ~B~s~n",
+            [Phase, Index, Mask, [io_lib:format(" ~B", [Op]) || Op <- Ops]]),
         erlang:raise(Class, Reason, Stack)
     end.
 
@@ -105,9 +114,10 @@ load_corpus(Path) ->
         {error, enoent} -> default_corpus();
         {ok, Data} when byte_size(Data) =< 1048576 ->
             {gantry_dst_v1, Cases} = binary_to_term(Data, [safe]),
-            true = is_list(Cases) andalso length(Cases) =< 1024 andalso Cases =/= [],
+            true = is_list(Cases) andalso Cases =/= [],
             true = lists:all(fun valid_input/1, Cases),
-            Cases;
+            %% Older campaigns could persist more cases than their loader accepted.
+            lists:sublist(lists:usort(Cases), ?CORPUS_LIMIT);
         Error -> error({cannot_load_corpus, Error})
     end.
 

@@ -110,6 +110,10 @@ journal so they can recover assignments and replay results after a restart.
 [Runtime architecture](docs/architecture/runtime.md) ·
 [State machines](docs/architecture/state-machines.md)
 
+Run more workers by adding slots to a named pool. Each slot can reach
+every controller in its queue's quorum through the HTTPS API.
+[Controller and worker setup](docs/running.md#choose-a-deployment)
+
 ## Project status
 
 The current release scope covers pinned Git commits, declared and ad hoc
@@ -123,4 +127,5 @@ simulation to exercise retries, controller loss, and delayed effects. See the
 runbook for the model, unit, and live end-to-end commands.
 [Verification model](protocol/models/queue/README.md) ·
 [Build and submit design](docs/architecture/build-and-submit.md) ·
-[Contributor handoff](docs/next.md)
+[Contributor handoff](docs/next.md) ·
+[Performance workflow](skills/gantry-perf/SKILL.md)

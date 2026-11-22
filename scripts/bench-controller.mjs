@@ -138,10 +138,17 @@ async function measure(id, parallel, workload) {
   const before = usage()
   const retriesBefore = contentionRetries
   let peakRssKiB = before.rssKiB
-  const timer = setInterval(() => { peakRssKiB = Math.max(peakRssKiB, usage().rssKiB) }, 25)
+  const samplingFailure = Promise.withResolvers()
+  const timer = setInterval(() => {
+    try {
+      peakRssKiB = Math.max(peakRssKiB, usage().rssKiB)
+    } catch (error) {
+      samplingFailure.reject(error)
+    }
+  }, 25)
   const start = performance.now()
   try {
-    const latencies = (await workload()).sort((a, b) => a - b)
+    const latencies = (await Promise.race([workload(), samplingFailure.promise])).sort((a, b) => a - b)
     const wallMs = performance.now() - start
     const after = usage()
     const cpuMs = (after.ticks - before.ticks) * 1000 / clockTicks
