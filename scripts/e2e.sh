@@ -246,12 +246,20 @@ echo 'Passed worker restart, interrupted attempt fencing, and Docker resource cl
 
 # A quiescent queue still needs a majority to return an empty poll.
 wait_for 'empty poll from the surviving quorum' empty_poll "${endpoints[2]}"
+ready_status() {
+  curl -sS --max-time 8 -o "$tmp/ready.json" -w '%{http_code}' "$1/ready"
+}
+[[ $(ready_status "${endpoints[2]}") == 200 ]]
+jq -e '.status == "ready"' "$tmp/ready.json" >/dev/null
 kill -KILL -- "-${pids[1]}"
 wait "${pids[1]}" 2>/dev/null || true
 unset 'pids[1]'
 [[ $(poll_status "${endpoints[2]}") == 503 ]]
 jq -e '.error | startswith("queue ")' "$tmp/poll.json" >/dev/null
+[[ $(ready_status "${endpoints[2]}") == 503 ]]
+jq -e '.error | startswith("queue ")' "$tmp/ready.json" >/dev/null
 start node2-restarted env GANTRY_CONFIG="$tmp/node2.toml" \
   ERL_FLAGS="+S 2:2 -name ${node}2@127.0.0.1 -setcookie $cookie" "${controller[@]}"
 wait_for 'empty poll after quorum recovery' empty_poll "${endpoints[2]}"
-echo 'Passed empty poll quorum loss and recovery'
+[[ $(ready_status "${endpoints[2]}") == 200 ]]
+echo 'Passed empty poll and gateway readiness through quorum loss and recovery'

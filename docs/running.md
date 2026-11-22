@@ -90,6 +90,55 @@ different workers different first origins to spread the initial requests.
 List origins from the same quorum. The configured worker pool determines
 which actions the slot can claim.
 
+### Give clients one stable origin
+
+Put an HTTPS gateway in front of the controller proxies and point every
+worker and agent at its DNS name.
+
+```sh
+export GANTRY_ENDPOINT=https://gantry.example
+export GANTRY_URL=https://gantry.example
+curl -fsS --max-time 10 "$GANTRY_URL/ready"
+```
+
+Configure the gateway with the members of one quorum, or supply those
+backends through the platform's service registry. Probe `GET /ready` with
+a timeout of at least six seconds. It returns HTTP 200 after Ra confirms
+a majority and 503 when the check fails. The endpoint is available
+without a role token. Keep each backend's Git and blob access configured
+as usual. Pass the authorization header through and allow the same 64 MiB
+uploads as the controller proxies. Let clients reconcile ambiguous
+requests using their original run ID or lease serial. The gateway should
+send each request once.
+
+The [HAProxy example](examples/haproxy.cfg) uses verified TLS to each
+controller proxy. Configure the public gateway hostname as a virtual-host
+alias on each controller proxy, because HAProxy forwards that Host header
+on requests and health checks. During a rolling upgrade, enable the new
+gateway check once the backend controllers serve `/ready`. Replace the
+example's hostnames and certificate paths, then check it with
+`haproxy -c -f haproxy.cfg`. Use a shared DNS name in front of a
+redundant gateway if the front door also needs failover. To add or remove
+controller origins, change the gateway backend list or registry. Worker
+endpoint settings stay the same.
+
+Workers initiate every HTTP request. For controllers behind NAT, an
+outbound tunnel connector can publish each controller's loopback API
+to the gateway. Give the gateway a distinct origin per controller and
+probe `/ready` through the same route as client traffic. Controllers
+still need a private network path to each other for Ra replication.
+Use the private mesh or overlay addresses for their Erlang node names.
+
+For the controller network, DNSCluster can discover BEAM nodes from a
+DNS query. Libcluster supports multiple discovery backends. These tools
+find and connect nodes. Gantry's configured `seed` and Khepri join still
+control admission as a Ra voter. OTP's `pg` can publish process groups
+after nodes connect. A gateway publishes the HTTP service independently
+of those BEAM mechanisms.
+[DNSCluster](https://github.com/phoenixframework/dns_cluster) ·
+[Libcluster](https://github.com/bitwalker/libcluster) ·
+[OTP `pg`](https://www.erlang.org/doc/apps/kernel/pg.html)
+
 ## Start a controller
 
 Copy the [controller example](examples/controller.toml) and register
@@ -127,7 +176,7 @@ own hostname and API certificate on the other hosts.
 ```nginx
 server {
     listen 443 ssl;
-    server_name controller-a.example;
+    server_name controller-a.example gantry.example;
     ssl_certificate /etc/nginx/tls/gantry-api-chain.pem;
     ssl_certificate_key /etc/nginx/tls/gantry-api-key.pem;
     client_max_body_size 64m;

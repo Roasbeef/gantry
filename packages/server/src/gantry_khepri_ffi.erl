@@ -1,7 +1,7 @@
 %% One Ra system per controller VM, with a fixed store and path. Elastic
 %% executors never join Erlang distribution or vote on this state.
 -module(gantry_khepri_ffi).
--export([boot/3, read/0, confirm/1, confirm_quiet/0, remember_quiet/1, swap/2]).
+-export([boot/3, ready/0, read/0, confirm/1, confirm_quiet/0, remember_quiet/1, swap/2]).
 
 -define(SYSTEM, gantry_queue_ra).
 -define(STORE, gantry_queue).
@@ -92,6 +92,18 @@ open_replica(Marker, Seed) ->
 start_store() ->
     {ok, ?STORE} = khepri:start(?SYSTEM, ?STORE, ?TIMEOUT),
     ok.
+
+%% A gateway can probe a majority without transferring the queue snapshot.
+%% This OTP function is also available on voters running an older release.
+ready() ->
+    with_deadline(fun() ->
+        try ra:consistent_query({?STORE, node()}, {erlang, is_tuple, []}, ?TIMEOUT) of
+            {ok, true, _Leader} -> {ok, nil};
+            {timeout, _} -> {error, <<"queue readiness timed out">>};
+            Other -> failure(Other)
+        catch Class:Why -> failure({Class, Why})
+        end
+    end).
 
 read() ->
     with_deadline(fun fenced_read/0).

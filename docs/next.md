@@ -53,5 +53,6 @@ terminal snapshot before decoding it. In the 64-build workload, the
 combined changes used about one seventeenth of the original CPU per
 empty poll. The deployment runbook and performance skill cover adding
 capacity and repeating the benchmark.
+[Stable gateway origin and readiness](running.md#give-clients-one-stable-origin)
 [Queue verification](queue-verification.md) ·
 [Controller benchmark](controller-load.md)
