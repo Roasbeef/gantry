@@ -10,7 +10,7 @@ the Gleam worker and the controller and worker OTP entry points.
 ## Components
 
 Each controller serves HTTP and runs a submit reconciler. Both use the
-same compare-and-swap boundary. The worker keeps its own record of
+same quorum queue store. The worker keeps its own record of
 whether Docker may have started an assignment.
 
 ```mermaid
@@ -305,9 +305,12 @@ receipt and clears the upload spool in one transaction. Both the queue
 and the journaled receipt refer to uploaded bytes by digest.
 [Worker journal schema](../../packages/server/priv/worker-schema.sql)
 
-`store.change` compares the exact encoded bytes from a quorum-fenced
-read. It rebuilds the pure proposal after a conflicting write, with
-up to eight total attempts. The queue snapshot has a 4 MiB ceiling.
+`store.change` computes a pure proposal from a fenced local snapshot.
+A mutation compares and swaps the exact snapshot bytes through Khepri.
+An unchanged proposal checks the same bytes through a Ra leader query
+that confirms the leader's authority with a majority. A conflict causes
+the store to rebuild the proposal, with up to eight total attempts.
+The queue snapshot has a 4 MiB ceiling.
 The controller allows up to 64 MiB per blob. It syncs object bytes
 before atomic rename and syncs the containing directory before
 returning a digest. Cache reuse takes the proof from a recorded

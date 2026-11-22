@@ -1,0 +1,38 @@
+name: Queue campaigns
+on:
+  schedule:
+    - cron: '19 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: '29.0.5'
+          gleam-version: '1.19.0'
+          version-type: strict
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: .gantry-dst-corpus
+          key: queue-corpus-v1-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: queue-corpus-v1-${{ matrix.shard }}-
+      - name: Run reproducible simulation campaigns
+        env:
+          SHARD: ${{ matrix.shard }}
+          GANTRY_DST_CORPUS: ${{ github.workspace }}/.gantry-dst-corpus/corpus.term
+        shell: bash
+        run: |
+          seed=$(((GITHUB_RUN_NUMBER * 3 + SHARD) % 2147483646 + 1))
+          timeout 180s scripts/queue-dst.sh swarm "$seed" 10000 128
+          timeout 90s scripts/queue-dst.sh guided "$seed" 1000

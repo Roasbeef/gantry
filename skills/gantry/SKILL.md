@@ -1,6 +1,6 @@
 ---
 name: gantry
-description: Plan, run, watch, and inspect builds or request guarded PR group landing through the Gantry CLI. Use for Gantry build, artifact, or submission work.
+description: Run and inspect Gantry builds, request guarded PR group landing, or deploy and verify Gantry controllers and worker slots.
 metadata:
   openclaw:
     requires:
@@ -8,6 +8,30 @@ metadata:
 ---
 
 # Gantry
+
+## Deploy controllers and workers
+
+1. Follow the [deployment runbook](https://github.com/Roasbeef/gantry/blob/main/docs/running.md)
+   in the checkout at `docs/running.md`. Start with one controller for a
+   local installation or three voters for failover. Use the controller
+   example in `docs/examples/controller.toml`.
+2. For three voters, preserve each node's name and local Ra directory,
+   mount the common blob store, and use the same repository policy and
+   role tokens. Start the first controller with an empty `seed`. Join
+   each remaining controller using the first node's full Erlang name.
+   Keep EPMD and OTP TLS distribution on the controller network.
+3. Run one `gantry-worker` per build slot with a unique
+   `GANTRY_WORKER_ID`, a persistent local `GANTRY_WORKER_DIR`, and a
+   `GANTRY_POOL` matching the repository. Set `GANTRY_ENDPOINT` to the
+   comma-separated HTTP(S) origins for its quorum. Use HTTPS between
+   hosts. Workers can fail over between origins and need only the
+   shared worker token and HTTP API access.
+4. Check `GET /health` on every origin for queue access, then run an
+   uncached build in the new slot's pool and verify the worker and
+   artifact paths. Use `make e2e` for the local failover gate and
+   `docs/controller-load.md` for controller sizing measurements.
+
+## Use the CLI
 
 1. Run `gantry --help --json` to discover commands and exit codes. Inspect
    `gantry describe COMMAND` for the invocation and request schema.

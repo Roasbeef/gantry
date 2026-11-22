@@ -1,7 +1,7 @@
 %% One Ra system per controller VM, with a fixed store and path. Elastic
 %% executors never join Erlang distribution or vote on this state.
 -module(gantry_khepri_ffi).
--export([boot/3, read/0, swap/2]).
+-export([boot/3, read/0, confirm/1, swap/2]).
 
 -define(SYSTEM, gantry_queue_ra).
 -define(STORE, gantry_queue).
@@ -63,10 +63,16 @@ start_store() ->
     {ok, ?STORE} = khepri:start(?SYSTEM, ?STORE, ?TIMEOUT),
     ok.
 
-%% Khepri 0.19.3's consistency fence can exceed its own timeout without a
-%% leader. A monitored helper keeps that wait out of the request process.
 read() ->
-    {Pid, Ref} = spawn_monitor(fun() -> exit({snapshot, fenced_read()}) end),
+    with_deadline(fun fenced_read/0).
+
+confirm(Expected) ->
+    with_deadline(fun() -> confirm_snapshot(Expected) end).
+
+%% Khepri's preliminary query and Ra leader redirects can exceed their own
+%% timeouts. Bound the total request wait.
+with_deadline(Read) ->
+    {Pid, Ref} = spawn_monitor(fun() -> exit({snapshot, Read()}) end),
     receive
         {'DOWN', Ref, process, Pid, {snapshot, Reply}} -> Reply;
         {'DOWN', Ref, process, Pid, _} -> {error, <<"queue read failed">>}
@@ -85,6 +91,26 @@ fenced_read() ->
                 Other -> failure(Other)
             end;
         Other -> failure(Other)
+    end.
+
+%% Fetch the one-path tree after the leader confirms its authority with a
+%% quorum. Use Khepri's accessor on the leader so an older Gantry voter can
+%% answer during a rolling update. This adapter owns the dependency on
+%% Khepri 0.19.3's tree interface.
+confirm_snapshot(Expected) ->
+    Path = ?PATH,
+    try ra:consistent_query(
+          {?STORE, node()}, {khepri_machine, get_tree, []}, ?TIMEOUT) of
+        {ok, Tree, _Leader} ->
+            case khepri_tree:find_matching_nodes(Tree, Path, #{props_to_return => [payload]}) of
+                {ok, #{Path := #{data := Bytes}}}
+                  when is_binary(Bytes), byte_size(Bytes) =< 4194304 ->
+                    {ok, Bytes =:= Expected};
+                _ -> {error, <<"invalid durable queue snapshot">>}
+            end;
+        {timeout, _} -> {error, <<"queue quorum read timed out">>};
+        Other -> failure(Other)
+    catch Class:Why -> failure({Class, Why})
     end.
 
 swap(Expected, Proposed) ->

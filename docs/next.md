@@ -38,6 +38,17 @@ Live GitHub provider validation remains open. Use the integration guide
 to verify branch rules, exact landing, PR reconciliation, and workflow
 comments on a GitHub pilot repository. Loom executor interop and indexed
 queue metadata with retention also remain open.
-Obtain a measured short-action workload before selecting a different
-storage or dispatch architecture. The [verification proposal](design-notes/depth-signoff.md)
-defines the load and fault traces.
+The [controller load benchmark](controller-load.md) measures short-action
+admission and drain under concurrent clients, alongside idle polling with
+retained runs. The [verification proposal](design-notes/depth-signoff.md)
+defines additional load and fault traces for evaluating a change in storage
+or dispatch architecture.
+
+The verification suite includes generated graph and receipt properties,
+mutational JSON tests, and a replayable queue simulation with nightly swarm
+and coverage-guided campaigns. Pickglass identified Ra writes during
+unchanged polls. A majority-confirmed snapshot check now validates those
+receipts. Three-voter empty-poll throughput tripled in both benchmark
+configurations, with lower controller CPU, latency and peak RSS.
+[Queue verification](queue-verification.md) ·
+[Controller benchmark](controller-load.md)
