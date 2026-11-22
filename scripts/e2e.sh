@@ -30,8 +30,8 @@ node="gantry_e2e_$$"
 base_port=${GANTRY_E2E_PORT:-18080}
 endpoints=()
 for i in 1 2 3; do endpoints+=("http://127.0.0.1:$((base_port+i-1))"); done
-docker image inspect alpine:3.22 >/dev/null 2>&1 || docker pull alpine:3.22
-image=$(docker image inspect alpine:3.22 | jq -er '.[0].RepoDigests | map(select(test("(^|/)alpine@sha256:[a-f0-9]{64}$"))) | first')
+image=alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
 echo "Worker image $image"
 remote="$tmp/remote.git"
 source_dir="$tmp/source"
@@ -79,7 +79,16 @@ wait_for() {
 }
 get() { curl -fsS --connect-timeout 1 --max-time 5 -H "Authorization: Bearer $GANTRY_TOKEN" "$1"; }
 healthy() { get "$1/health" >/dev/null 2>&1; }
-gleam build
+controller=(gleam run)
+worker=(gleam run -m gantry/worker)
+cli="$root/scripts/gantry"
+if [[ -n ${GANTRY_RELEASE_BIN:-} ]]; then
+  controller=("$GANTRY_RELEASE_BIN/gantryd")
+  worker=("$GANTRY_RELEASE_BIN/gantry-worker")
+  cli="$GANTRY_RELEASE_BIN/gantry"
+else
+  gleam build
+fi
 for i in 1 2 3; do
   seed=""
   if (( i > 1 )); then seed="${node}1@127.0.0.1"; fi
@@ -97,7 +106,7 @@ target = "check"
 pool = "default"
 image = "$image"
 TOML
-  start "node$i" env GANTRY_CONFIG="$tmp/node$i.toml" ERL_FLAGS="+S 2:2 -name ${node}$i@127.0.0.1 -setcookie $cookie" gleam run
+  start "node$i" env GANTRY_CONFIG="$tmp/node$i.toml" ERL_FLAGS="+S 2:2 -name ${node}$i@127.0.0.1 -setcookie $cookie" "${controller[@]}"
   wait_for "voter $i" healthy "${endpoints[i-1]}"
 done
 post() {
@@ -107,7 +116,12 @@ run() {
   post "$1/v1/runs" "$GANTRY_TOKEN" "$(jq -nc --arg id "$2" --arg rev "$3" '{id:$id,repo:"fixture/project",target:"check",revision:$rev}')"
 }
 worker_urls=$(IFS=,; echo "${endpoints[*]}")
-start worker env ERL_FLAGS="+S 2:2" GANTRY_ENDPOINT="$worker_urls" GANTRY_POOL=default GANTRY_WORKER_ID=worker-one GANTRY_WORKER_DIR="$tmp/worker" gleam run -m gantry/worker
+start_worker() {
+  start "$1" env ERL_FLAGS="+S 2:2" GANTRY_ENDPOINT="$worker_urls" GANTRY_POOL=default \
+    GANTRY_WORKER_ID=worker-one GANTRY_WORKER_DIR="$tmp/worker" "${worker[@]}"
+}
+start_worker worker
+worker_pid=${pids[3]}
 run "${endpoints[0]}" initial "$base"
 matches() {
   get "$1/v1/runs/$2" > "$tmp/current.json" || return 1
@@ -162,7 +176,6 @@ echo "Passed DAG, seed loss during active lease, early cutoff, grouped landing a
 
 # Check an agent-only failure through the normal CLI and read its persisted log.
 export GANTRY_URL="${endpoints[1]}"
-cli="$root/scripts/gantry"
 "$cli" plan agent-plan fixture/project "$candidate" check > "$tmp/agent-plan.json"
 jq -e '[.actions[].name] == ["normalize", "collect"]' "$tmp/agent-plan.json" >/dev/null
 code=$(curl -sS -o "$tmp/unauthorized.json" -w '%{http_code}' \
@@ -184,3 +197,32 @@ failed_log=$(jq -ser 'last | select(.phase == "failed") | .work[0].step | select
 "$cli" blob "$failed_log" > "$tmp/adhoc-result.log"
 grep -Fx 'fixture-error' "$tmp/adhoc-result.log"
 echo 'Passed agent plan, ad hoc admission replay, failure diagnostics, and submit authorization'
+
+# Kill the executor after Docker has acknowledged its start. The restarted
+# slot must clean up the original resources and publish a single rejection.
+cat > "$tmp/interrupted.json" <<'JSON'
+{"name":"interrupted","argv":["sleep","60"],"inputs":[],"outputs":[],"timeout":90}
+JSON
+"$cli" run worker-crash fixture/project "$candidate" check "$tmp/interrupted.json" > "$tmp/crash.json"
+wait_for 'interruption fixture lease' matches "$GANTRY_URL" worker-crash '
+  .work[0].step.kind == "active"'
+serial=$(jq -er '.work[0].step.lease.serial' "$tmp/current.json")
+name=$(jq -cn --arg dir "$tmp/worker" --argjson serial "$serial" \
+  '[$dir,"worker-one","worker-crash","interrupted",$serial]' | tr -d '\n' | sha256sum | cut -d ' ' -f 1)
+container_running() { [[ $(docker inspect --format '{{.State.Status}}' "$1" 2>/dev/null) == running ]]; }
+wait_for 'interruption fixture container' container_running "gantry-$name"
+kill -KILL -- "-$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+unset 'pids[3]'
+start_worker worker-restarted
+wait_for 'interruption receipt' matches "$GANTRY_URL" worker-crash '
+  .phase == "failed" and .work[0].step.reason == "worker interrupted before recording outcome"'
+containers=$(docker container ls -a --format '{{.Names}}')
+volumes=$(docker volume ls --format '{{.Name}}')
+if grep -Fxq -e "gantry-$name" -e "gantry-$name-collector" <<< "$containers" ||
+   grep -Fxq "gantry-$name" <<< "$volumes" ||
+   [[ -e "$tmp/worker/gantry-$name.staging" ]]; then
+  echo "Interrupted attempt left resources behind: gantry-$name" >&2
+  exit 1
+fi
+echo 'Passed worker restart, interrupted attempt fencing, and Docker resource cleanup'

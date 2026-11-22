@@ -7,7 +7,11 @@
 # You should check this file into your source control repository.
 
 packages = [
+  { name = "argv", version = "1.1.0", build_tools = ["gleam"], requirements = [], otp_app = "argv", source = "hex", outer_checksum = "3277D100448BDB4A29B6D58C0F36F631CBC349E8BDD09766C6309DF202831140" },
   { name = "aten", version = "0.6.0", build_tools = ["rebar3"], requirements = [], otp_app = "aten", source = "hex", outer_checksum = "5F39A164206AE3F211EF5880B1F7819415686436E3229D30B6A058564FBAA168" },
+  { name = "cowlib", version = "2.22.0", build_tools = ["make", "rebar3"], requirements = [], otp_app = "cowlib", source = "hex", outer_checksum = "B1EA5995D8F1AB5086AE7AFE710C2075C7872C7E1ACAF45DD0DB7595E900C0FC" },
+  { name = "envoy", version = "1.2.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "envoy", source = "hex", outer_checksum = "9C6FBB6BFA02A52798BEEC5977A738CAD6E4A057F4B67FD0C8061AD2502C191A" },
+  { name = "esqlite_loom", version = "0.9.1", build_tools = ["rebar3"], requirements = [], otp_app = "esqlite", source = "hex", outer_checksum = "85BBB5309D97C0BD412D47486A91509222C5C729A7DE5EA4FCE9978D5688BBC1" },
   { name = "exception", version = "2.1.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "exception", source = "hex", outer_checksum = "6BDEA95248093599391C3B5DF1835C5C6A86C353C2F99CE539B450E3432FE117" },
   { name = "filepath", version = "1.1.2", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "filepath", source = "hex", outer_checksum = "B06A9AF0BF10E51401D64B98E4B627F1D2E48C154967DA7AF4D0914780A6D40A" },
   { name = "gantry_core", version = "0.1.0", build_tools = ["gleam"], requirements = ["gleam_json", "gleam_stdlib"], source = "local", path = "../core" },
@@ -20,18 +24,23 @@ packages = [
   { name = "gleam_otp", version = "1.3.0", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_stdlib"], otp_app = "gleam_otp", source = "hex", outer_checksum = "DE4CA6850842F0266EE95317A25DD6A0A0F20CDFAB7C0ADC2E63251D7C3C72EC" },
   { name = "gleam_stdlib", version = "1.2.0", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "93D27B978967D61211E06BB1F1062BCF36B6E546F67A575EFA928605F467AF65" },
   { name = "gleam_time", version = "1.11.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_time", source = "hex", outer_checksum = "3AB789C3ED4EB9DDA7283F46C3CF83A5487C9CFB790DC3FF8F8ACB5BF7B7A6C1" },
+  { name = "glearray", version = "2.1.2", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "glearray", source = "hex", outer_checksum = "1554E48DD40114D7602F5BFF4D7278B6B3B735F137C7FDEEADFB2FE7951C94BE" },
   { name = "gleeunit", version = "1.11.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleeunit", source = "hex", outer_checksum = "EC31ABA74256AEA531EDF8169931D775BBB384FED0A8A1BDC4DD9354E3E21826" },
   { name = "glisten", version = "9.0.1", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_otp", "gleam_stdlib", "logging"], source = "git", repo = "https://github.com/Roasbeef/glisten.git", commit = "3eb785919be0736da0a20732a56275dce0132327" },
   { name = "gramps", version = "6.0.1", build_tools = ["gleam"], requirements = ["gleam_crypto", "gleam_erlang", "gleam_http", "gleam_stdlib"], source = "git", repo = "https://github.com/Roasbeef/gramps.git", commit = "a37a8ae3fe2531375b49b865c155eb2987d4d22a" },
+  { name = "gun", version = "2.6.0", build_tools = ["make", "rebar3"], requirements = ["cowlib"], otp_app = "gun", source = "hex", outer_checksum = "69BB957F4BD6C475B5714460FD65C26FC7EB85760AA64B74754DE36CE5CCED7D" },
   { name = "horus", version = "0.5.1", build_tools = ["rebar3", "mix"], requirements = [], otp_app = "horus", source = "hex", outer_checksum = "A19C89D2580796FF38D4BA9A47A3DBE0E83E0464814B2A621FD8114C1077E8A7" },
   { name = "hpack_erl", version = "0.3.0", build_tools = ["rebar3"], requirements = [], otp_app = "hpack", source = "hex", outer_checksum = "D6137D7079169D8C485C6962DFE261AF5B9EF60FBC557344511C1E65E3D95FB0" },
   { name = "khepri", version = "0.19.3", build_tools = ["rebar3", "mix"], requirements = ["horus", "ra"], otp_app = "khepri", source = "hex", outer_checksum = "A969A53FB91934130223A5E7DB2A46DD200B5FAB5C617DB154857D0FB1F96B14" },
   { name = "logging", version = "1.5.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "logging", source = "hex", outer_checksum = "BC5F18CE5DD9686100229FE5409BDC3DD5C46D5A7DF2F804AD2D8F0DD6C5060E" },
   { name = "mist", version = "6.0.3", build_tools = ["gleam"], requirements = ["exception", "gleam_erlang", "gleam_http", "gleam_otp", "gleam_stdlib", "glisten", "gramps", "hpack_erl", "logging"], source = "git", repo = "https://github.com/Roasbeef/mist.git", commit = "28b43178ff57bfb619c64b8c3544831646d5fdb9" },
+  { name = "parrot", version = "2.3.0", build_tools = ["gleam"], requirements = ["argv", "envoy", "filepath", "gleam_crypto", "gleam_httpc", "gleam_json", "gleam_stdlib", "gleam_time", "glearray", "repeatedly", "simplifile", "tom"], otp_app = "parrot", source = "hex", outer_checksum = "236C3B20EF03468AFD665C3107C5E7D9128344D06A5950F55822FC5B3B35FBC3" },
   { name = "ra", version = "3.2.0", build_tools = ["rebar3"], requirements = ["aten", "gen_batch_server", "seshat"], otp_app = "ra", source = "hex", outer_checksum = "8542B71AF2FAD6B4E92B98C2092BEEBB6E51E1CADA9D51D6D4BB1CDCA3DBCD06" },
+  { name = "repeatedly", version = "2.1.2", build_tools = ["gleam"], requirements = [], otp_app = "repeatedly", source = "hex", outer_checksum = "93AE1938DDE0DC0F7034F32C1BF0D4E89ACEBA82198A1FE21F604E849DA5F589" },
   { name = "seshat", version = "1.0.1", build_tools = ["rebar3"], requirements = [], otp_app = "seshat", source = "hex", outer_checksum = "38324FE8C5782C69D73B334DD00B20E16C0D99EEF3E7B4005C519FE9BC0E34FC" },
   { name = "simplifile", version = "2.7.0", build_tools = ["gleam"], requirements = ["filepath", "gleam_stdlib"], otp_app = "simplifile", source = "hex", outer_checksum = "A2727627B063E87351934C7F7F008F2D1FDB16F6DE0B8C79F9E46459CFC9C164" },
   { name = "splitter", version = "1.3.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "splitter", source = "hex", outer_checksum = "8F1485306E0D59168A39E12ED8844F9F616EC59C3C63AFCFDAE04DBD68690CBC" },
+  { name = "sqlight_loom", version = "1.2.1", build_tools = ["gleam"], requirements = ["esqlite_loom", "gleam_stdlib"], otp_app = "sqlight_loom", source = "hex", outer_checksum = "C8EBD3E8E8C4B67878C28777FD98C823EBFBEE53BE3EB86FDA35C70CD783E049" },
   { name = "tom", version = "2.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "gleam_time"], otp_app = "tom", source = "hex", outer_checksum = "DCF04CB7AB35D58CFC598C66EA2E1816D160759802C89B2BA6238780D59BC256" },
   { name = "weft", version = "0.4.6", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_otp", "gleam_stdlib"], otp_app = "weft", source = "hex", outer_checksum = "836E64B55CC6C0527F6AEC70AE1C412C5B60F641824919F38BA229FA3524552D" },
 ]
@@ -46,8 +55,11 @@ gleam_json = { version = ">= 3.0.0 and < 4.0.0" }
 gleam_stdlib = { version = ">= 1.0.0 and < 2.0.0" }
 gleam_time = { version = ">= 1.0.0 and < 2.0.0" }
 gleeunit = { version = ">= 1.0.0 and < 2.0.0" }
+gun = { version = "== 2.6.0" }
 khepri = { version = "== 0.19.3" }
 mist = { git = "https://github.com/Roasbeef/mist.git", ref = "28b43178ff57bfb619c64b8c3544831646d5fdb9" }
+parrot = { version = "== 2.3.0" }
 simplifile = { version = ">= 2.0.0 and < 3.0.0" }
+sqlight_loom = { version = "== 1.2.1" }
 tom = { version = ">= 2.1.0 and < 3.0.0" }
 weft = { version = "== 0.4.6" }

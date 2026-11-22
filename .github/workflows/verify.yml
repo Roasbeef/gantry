@@ -19,10 +19,21 @@ jobs:
           rebar3-version: '3.27.0'
           version-type: strict
       - run: make check
+      - name: Check generated worker journal bindings
+        run: |
+          if ! command -v sqlite3 >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes sqlite3
+          fi
+          make gen-sql
+          git diff --exit-code -- packages/server/src/gantry/sql.gleam
       - name: Check the queue model
         run: |
           curl --fail --location --silent --show-error \
             https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
             --output "$RUNNER_TEMP/tla2tools.jar"
           make model-check TLA2TOOLS="$RUNNER_TEMP/tla2tools.jar"
-      - run: make e2e
+      - name: Install the bundled release
+        run: make install PREFIX="$RUNNER_TEMP/gantry"
+      - name: Verify the installed controller and worker
+        run: GANTRY_RELEASE_BIN="$RUNNER_TEMP/gantry/bin" make e2e

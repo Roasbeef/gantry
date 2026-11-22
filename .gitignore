@@ -1,6 +1,6 @@
 /packages/*/build/
 /vendor/loom/lint/build/
 /data/
+/build/
 .env
-__pycache__/
 erl_crash.dump

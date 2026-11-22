@@ -30,6 +30,38 @@ A first diagnostic API should answer three different questions directly.
   can be reused, and a scoped replay request for the same inputs and
   policy. An agent can also supply a repaired snapshot.
 
+## Affected targets and cold builds
+
+Loom's `make affected` takes changed paths, maps them to package owners, and
+follows reverse dependencies to select checks. It widens the selection when a
+change can affect shared build infrastructure. Its nightly workflow runs a
+cold full gate and a larger deterministic simulation.
+[Loom selector](https://github.com/Roasbeef/loom/blob/9aa1383e620aff97aad4acfa3f1d91ce53642b50/scripts/check_affected.sh) ·
+[Loom nightly workflow](https://github.com/Roasbeef/loom/blob/9aa1383e620aff97aad4acfa3f1d91ce53642b50/.github/workflows/nightly.yml)
+
+A proposed Gantry `affected --base <sha> --head <sha>` command would compute
+the diff while the Git objects are available on the controller. Treat renamed
+files as a deletion and addition. Match paths against inputs and optional
+test ownership declarations from both revisions, then follow reverse artifact
+dependencies and report the public targets that reach those actions. Include a
+reason for each target, such as a changed file, a dependency path, or fallback
+to the full gate. Order-only edges impose scheduling constraints. They do
+not establish which actions consume a changed artifact.
+
+Use repository adapters for build tools whose graph is finer than Gantry's
+actions, such as package-level checks resolved with Bazel query or
+`go list -deps -test`. Start at package or suite granularity. Allow
+coverage and observed reads to add candidates as evidence accumulates.
+Unknown input ownership, a changed graph resolver, shared toolchain changes,
+or an unavailable adapter should widen to the full configured gate.
+
+The affected planner chooses targets before execution. Gantry's existing cache
+can still reuse actions inside those targets. A recurring run of the full gate
+on a pinned default-branch commit should bypass Gantry's action cache and
+start any nested build tool caches clean. Periodically run both plans on the
+same candidate to measure which failures the affected plan would have missed.
+The selector, cold-cache control, and scheduling are proposed work.
+
 ## Placement, durability, and landing
 
 | Source | Consequence for Gantry |

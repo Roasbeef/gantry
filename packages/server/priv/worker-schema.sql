@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS identity (
+    worker TEXT NOT NULL PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    name TEXT NOT NULL PRIMARY KEY,
+    assignment TEXT NOT NULL,
+    receipt TEXT,
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    started INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS blobs (
+    sha TEXT NOT NULL PRIMARY KEY,
+    data BLOB NOT NULL
+);

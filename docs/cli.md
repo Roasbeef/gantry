@@ -1,0 +1,111 @@
+# Gantry CLI
+
+Use `gantry` from a release or `scripts/gantry` from a source checkout.
+The CLI uses Bash, jq, and curl. It reads credentials from the environment
+and runs without prompts.
+
+## Discover commands
+
+```sh
+gantry --help
+gantry --help --json
+gantry describe run
+gantry describe submit
+```
+
+Discovery runs without authentication or network access. Machine-readable
+help includes positional arguments, option descriptions, endpoint methods,
+request schemas, response formats, and exit codes. `gantry describe COMMAND`
+returns the metadata for one command. Put options before `--` when a
+positional argument starts with a dash, for example `gantry status -- -build`.
+Request schemas use local references
+into the document's `$defs` object.
+
+## Plan and run a build
+
+```sh
+revision=$(git rev-parse HEAD)
+gantry plan check-123 owner/project "$revision" check --output json
+gantry run check-123 owner/project "$revision" check --output json
+gantry watch check-123 --fields id,phase,submission.kind --output json
+```
+
+The revision must be a full lowercase Git SHA. A plan resolves the graph
+without admitting a run. A run queues a build against that revision.
+An optional fifth positional argument is the path to an ad hoc action JSON
+file. Gantry scopes ad hoc action results to the run, and those actions
+cannot satisfy submission policy. See `gantry describe run` for the action
+schema and defaults.
+
+Keep the same ID and inputs when retrying admission after an ambiguous
+response. Use a new ID when the requested inputs change.
+
+## Preview and submit an ordered group
+
+The `--json` option accepts a request object inline. Use `--json -` to
+read one object from stdin. Use either JSON or positional arguments in
+an invocation. The CLI validates the object parsed by jq and sends its
+serialized form. Use standard JSON with unique object keys and decimal
+integers.
+
+```sh
+payload='{"id":"group-12-13","repo":"owner/project","pulls":[12,13]}'
+gantry submit --json "$payload" --dry-run --output json
+gantry submit --json "$payload" --output json
+gantry watch group-12-13 --fields id,phase,submission.kind,submission.candidate.commit
+```
+
+`--dry-run` is available on `plan`, `run`, and `submit`. It validates the
+request locally and prints the method, URL and body, without credentials or
+a controller. The preview checks the base URL scheme, authority form, and
+port bounds. Repository registration, commit availability and submit
+eligibility are checked by the controller on a live request. A live submit
+queues the supplied PRs in order and can advance the project's configured
+branch when its build, policy, and Git checks pass.
+
+## Read status and artifacts
+
+```sh
+gantry status check-123 --fields id,phase,submission.kind --output json
+gantry watch check-123 --output json
+gantry blob "$digest" --output raw > artifact.bin
+```
+
+Plan, run, submit, status, and describe produce one JSON object. Watch emits
+changed run states as NDJSON and ends on a terminal outcome. Failed and
+blocked terminal states are included in the stream before exit 1. Watch
+retries transport failures and HTTP 5xx until `GANTRY_WATCH_SECONDS`
+(default 1800). A passed build and a landed submission exit 0.
+
+Use comma-separated object fields or dotted object paths with `--fields`.
+It retains the original object structure, omits missing paths, and leaves
+arrays intact when selected as a whole. Watch evaluates terminal state
+from the full response. The default output leaves the full JSON object
+available for inspecting work, artifacts, and log digests.
+
+Blob output is raw bytes. Redirect it to a file when retrieving binary
+artifacts or logs. A blob ID is a lowercase, 64-character SHA-256 digest.
+
+## Credentials and exit codes
+
+Set `GANTRY_URL` to the controller base URL. Its default is
+`http://127.0.0.1:4737`. Use `GANTRY_TOKEN` for plan and run,
+`GANTRY_SUBMIT_TOKEN` for submit, and either token for status or watch.
+Blob reads authorize the agent or worker credential. The CLI checks
+`GANTRY_TOKEN` first and then `GANTRY_WORKER_TOKEN` for blob reads.
+
+Failures emit a JSON object on stderr such as
+`{"error":{"code":"not_found","message":"unknown run","http_status":404}}`.
+Fields vary by error. An HTTP 429 includes `retry_after` when provided by
+the controller. The exit codes are also available through
+`gantry --help --json`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success, including a locally validated dry run |
+| 1 | Transport or service failure, watch deadline, or failed or blocked terminal outcome |
+| 2 | Invalid arguments, payload, or configuration |
+| 3 | Missing credentials or HTTP 401/403 |
+| 4 | HTTP 404 |
+| 5 | HTTP 429 |
+| 6 | HTTP 409 |
