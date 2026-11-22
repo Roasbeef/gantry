@@ -152,10 +152,14 @@ pub fn member(
   // A local pull ref supplies the pin. GitHub also supplies its targeting policy.
   case repo.provider {
     config.Local(_) -> Ok(queue.Member(n, sha))
-    config.GitHub -> {
+    config.GitHub(target) -> {
       let req = job.Request(repo.name, n, sha, job.Submit)
       use pull <- result.try(github.read_pull(cfg.github_token, req))
-      use branch <- result.try(github.validate_pull(pull, req))
+      let allowed = case target {
+        config.DefaultBranch -> pull.default_branch
+        config.RegisteredBranch -> repo.branch
+      }
+      use branch <- result.try(github.validate_pull(pull, req, allowed))
 
       // Only the operator-selected branch can receive this integration.
       case branch == repo.branch {

@@ -249,8 +249,15 @@ wait_for 'empty poll from the surviving quorum' empty_poll "${endpoints[2]}"
 ready_status() {
   curl -sS --max-time 8 -o "$tmp/ready.json" -w '%{http_code}' "$1/ready"
 }
+worker_ready_status() {
+  curl -sS --max-time 8 -H "Authorization: Bearer $2" \
+    -o "$tmp/worker-ready.json" -w '%{http_code}' "$1/v1/worker/ready"
+}
 [[ $(ready_status "${endpoints[2]}") == 200 ]]
 jq -e '.status == "ready"' "$tmp/ready.json" >/dev/null
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_TOKEN") == 401 ]]
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_WORKER_TOKEN") == 200 ]]
+jq -e '.status == "ready"' "$tmp/worker-ready.json" >/dev/null
 kill -KILL -- "-${pids[1]}"
 wait "${pids[1]}" 2>/dev/null || true
 unset 'pids[1]'
@@ -258,8 +265,10 @@ unset 'pids[1]'
 jq -e '.error | startswith("queue ")' "$tmp/poll.json" >/dev/null
 [[ $(ready_status "${endpoints[2]}") == 503 ]]
 jq -e '.error | startswith("queue ")' "$tmp/ready.json" >/dev/null
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_WORKER_TOKEN") == 503 ]]
 start node2-restarted env GANTRY_CONFIG="$tmp/node2.toml" \
   ERL_FLAGS="+S 2:2 -name ${node}2@127.0.0.1 -setcookie $cookie" "${controller[@]}"
 wait_for 'empty poll after quorum recovery' empty_poll "${endpoints[2]}"
 [[ $(ready_status "${endpoints[2]}") == 200 ]]
+[[ $(worker_ready_status "${endpoints[2]}" "$GANTRY_WORKER_TOKEN") == 200 ]]
 echo 'Passed empty poll and gateway readiness through quorum loss and recovery'

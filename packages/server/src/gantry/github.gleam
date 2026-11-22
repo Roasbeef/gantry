@@ -89,24 +89,28 @@ fn pull_decoder() -> decode.Decoder(Pull) {
   }
 }
 
-/// Enforce the first release's default-branch and pinned-head policy.
+/// Require the operator-selected branch and exact pinned head.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // github.validate_pull(pull, request)
+/// // github.validate_pull(pull, request, "main")
 /// ```
-pub fn validate_pull(pull: Pull, request: Request) -> Result(String, String) {
+pub fn validate_pull(
+  pull: Pull,
+  request: Request,
+  branch: String,
+) -> Result(String, String) {
   case
     pull.state == "open",
-    pull.branch == pull.default_branch,
+    pull.branch == branch,
     pull.head == request.head,
     request.mode,
     pull.readiness
   {
     False, _, _, _, _ -> Error("pull request is closed")
     True, False, _, _, _ ->
-      Error("pull request does not target the repository default branch")
+      Error("pull request does not target the allowed branch")
     True, True, False, _, _ ->
       Error("pull request head changed; enqueue the current revision")
     True, True, True, job.Submit, Draft ->
