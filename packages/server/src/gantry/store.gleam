@@ -53,6 +53,17 @@ pub fn read() -> Result(queue.State, String) {
   Ok(state)
 }
 
+/// Probe queue quorum access for a gateway's backend selection.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.ready()
+/// ```
+pub fn ready() -> Result(Nil, String) {
+  ffi_khepri.ready()
+}
+
 /// Run a pure proposal and return its receipt after a majority confirms the
 /// unchanged snapshot or commits a mutation.
 /// A storage timeout leaves the outcome unknown. Recover by operation identity.

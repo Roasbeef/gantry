@@ -11,6 +11,16 @@
 @external(erlang, "gantry_khepri_ffi", "boot")
 pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
 
+/// Confirm that the controller can reach the queue's voting majority.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.ready()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "ready")
+pub fn ready() -> Result(Nil, String)
+
 /// Read bytes after Khepri's bounded fence.
 ///
 /// ## Examples
