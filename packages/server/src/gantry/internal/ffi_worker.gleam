@@ -1,6 +1,10 @@
 //// The worker adapter exposes OS locking, bounded Docker ports, and tar
 //// metadata. Decisions about work and result publication stay in Gleam.
 
+import envoy
+import gleam/list
+import gleam/result
+
 /// Select which bytes a Docker subprocess may write to the captured stream.
 pub type Stream {
   Combined
@@ -38,16 +42,6 @@ pub type Archive
 @external(erlang, "gantry_worker_ffi", "lock")
 pub fn lock(path: String) -> Result(Nil, String)
 
-/// Load checked-in worker database DDL from the OTP application's assets.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // ffi_worker.schema()
-/// ```
-@external(erlang, "gantry_worker_ffi", "schema")
-pub fn schema() -> Result(String, String)
-
 /// Run Docker with a cleared environment and a bounded output stream.
 ///
 /// ## Examples
@@ -55,9 +49,26 @@ pub fn schema() -> Result(String, String)
 /// ```gleam
 /// // ffi_worker.docker(["version"], 30_000, 4096, ffi_worker.Combined)
 /// ```
-@external(erlang, "gantry_worker_ffi", "docker")
 pub fn docker(
   args: List(String),
+  deadline_ms: Int,
+  limit: Int,
+  stream: Stream,
+) -> Result(Command, String) {
+  let path = envoy.get("PATH") |> result.unwrap("/usr/local/bin:/usr/bin:/bin")
+  let connection =
+    list.filter_map(["DOCKER_HOST", "XDG_RUNTIME_DIR"], fn(key) {
+      envoy.get(key) |> result.map(fn(value) { key <> "=" <> value })
+    })
+  let settings = ["PATH=" <> path, "DOCKER_CONFIG=/nonexistent", ..connection]
+  docker_port(args, settings, deadline_ms, limit, stream)
+}
+
+/// Start the Docker port with the selected environment and capture policy.
+@external(erlang, "gantry_worker_ffi", "docker")
+fn docker_port(
+  args: List(String),
+  settings: List(String),
   deadline_ms: Int,
   limit: Int,
   stream: Stream,

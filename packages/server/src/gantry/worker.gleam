@@ -2,6 +2,7 @@
 //// or fences its durable result. The journal separates preparation, a
 //// possible Docker start, and a recorded completion.
 
+import envoy
 import gantry/blobs
 import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
@@ -333,7 +334,7 @@ fn check_directory(path: String) -> Result(Nil, String) {
 }
 
 fn required(key: String) -> Result(String, String) {
-  case ffi_host.getenv(key) {
+  case envoy.get(key) {
     Ok(value) if value != "" -> Ok(value)
     _ -> Error("set " <> key)
   }

@@ -1,16 +1,8 @@
 %% Keep host arguments structured and redact the environment from errors.
 -module(gantry_host_ffi).
--export([getenv/1, run/4, exit_failure/0, sync_path/1]).
+-export([run/4, sync_path/1]).
 
 -define(LOG_LIMIT, 16384).
-
-getenv(Name) ->
-    case os:getenv(chars(Name)) of
-        false -> {error, nil};
-        Value -> {ok, unicode:characters_to_binary(Value)}
-    end.
-
-exit_failure() -> erlang:halt(1).
 
 %% Persist file bytes before rename and the containing directory afterwards.
 sync_path(Path) ->

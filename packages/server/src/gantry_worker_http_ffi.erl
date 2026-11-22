@@ -4,7 +4,7 @@
 
 -define(REQUEST_TIMEOUT, 20000).
 
-dispatch({controller_request, Scheme, Host, Port, Method, Target, Headers, Body}, Limit) ->
+dispatch({Scheme, Host, Port, Method, Target, Headers, Body}, Limit) ->
     Deadline = erlang:monotonic_time(millisecond) + ?REQUEST_TIMEOUT,
     try
         Name = binary_to_list(Host),

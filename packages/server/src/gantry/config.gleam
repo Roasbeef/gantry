@@ -1,7 +1,7 @@
 //// The operator fixes repository, ref and toolchain authority. Agents
 //// select registered work within that policy.
 
-import gantry/internal/ffi_host
+import envoy
 import gantry_core/job
 import gleam/dict.{type Dict}
 import gleam/dynamic/decode
@@ -78,7 +78,7 @@ pub fn load() -> Result(Config, String) {
     worker,
     submit,
   ))
-  let github = ffi_host.getenv("GH_TOKEN") |> result.unwrap("")
+  let github = envoy.get("GH_TOKEN") |> result.unwrap("")
   Ok(Config(
     data,
     blobs,
@@ -100,7 +100,7 @@ pub fn load() -> Result(Config, String) {
 /// // config.env("GANTRY_CONFIG")
 /// ```
 pub fn env(key: String) -> Result(String, String) {
-  ffi_host.getenv(key) |> result.map_error(fn(_) { key <> " is required" })
+  envoy.get(key) |> result.map_error(fn(_) { key <> " is required" })
 }
 
 /// Load a credential and enforce the configured token length floor.

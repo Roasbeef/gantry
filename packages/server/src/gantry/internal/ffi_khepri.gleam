@@ -1,6 +1,18 @@
 //// Khepri/Ra operations use an Erlang bridge because Gleam has no replicated
 //// conditional store. Only trusted startup configuration reaches cluster boot.
 
+/// Whether the expected snapshot authorized the proposal's receipt.
+pub type ProposalOutcome {
+  Accepted
+  SnapshotChanged
+}
+
+/// Whether a worker poll can return before running the full claim decision.
+pub type QuietCheck {
+  ConfirmedQuiet
+  NeedsClaim
+}
+
 /// Open the replica and initialize the snapshot if absent.
 ///
 /// ## Examples
@@ -39,7 +51,7 @@ pub fn read() -> Result(String, String)
 /// // ffi_khepri.confirm(expected)
 /// ```
 @external(erlang, "gantry_khepri_ffi", "confirm")
-pub fn confirm(expected: String) -> Result(Bool, String)
+pub fn confirm(expected: String) -> Result(ProposalOutcome, String)
 
 /// Confirm a previously identified quiet snapshot with the quorum.
 ///
@@ -49,7 +61,7 @@ pub fn confirm(expected: String) -> Result(Bool, String)
 /// // ffi_khepri.confirm_quiet()
 /// ```
 @external(erlang, "gantry_khepri_ffi", "confirm_quiet")
-pub fn confirm_quiet() -> Result(Bool, String)
+pub fn confirm_quiet() -> Result(QuietCheck, String)
 
 /// Remember the bytes whose worker state is terminal.
 ///
@@ -61,7 +73,7 @@ pub fn confirm_quiet() -> Result(Bool, String)
 @external(erlang, "gantry_khepri_ffi", "remember_quiet")
 pub fn remember_quiet(bytes: String) -> Nil
 
-/// Compare exact bytes. False means another proposal won.
+/// Replace the expected bytes with a mutation through Khepri.
 ///
 /// ## Examples
 ///
@@ -69,4 +81,7 @@ pub fn remember_quiet(bytes: String) -> Nil
 /// // ffi_khepri.swap(expected, proposed)
 /// ```
 @external(erlang, "gantry_khepri_ffi", "swap")
-pub fn swap(expected: String, proposed: String) -> Result(Bool, String)
+pub fn swap(
+  expected: String,
+  proposed: String,
+) -> Result(ProposalOutcome, String)

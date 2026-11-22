@@ -3,8 +3,8 @@
 //// container ID so a delayed request cannot start a replacement.
 //// The transfer_fault boundary rejects bad evidence and retries offline reads.
 
+import envoy
 import gantry/blobs
-import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
 import gantry/worker/controllers
 import gantry_core/graph
@@ -515,7 +515,7 @@ fn resource(
   low: Int,
   high: Int,
 ) -> Result(String, String) {
-  let value = ffi_host.getenv(key) |> result.unwrap(fallback)
+  let value = envoy.get(key) |> result.unwrap(fallback)
 
   // Docker only receives limits within the supported resource range.
   case int.parse(value) {

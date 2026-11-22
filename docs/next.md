@@ -54,5 +54,10 @@ combined changes used about one seventeenth of the original CPU per
 empty poll. The deployment runbook and performance skill cover adding
 capacity and repeating the benchmark.
 [Stable gateway origin and readiness](running.md#give-clients-one-stable-origin)
+
+Environment reads, the worker schema lookup, and Docker environment
+policy use Gleam bindings. The queue store distinguishes authorization,
+snapshot conflicts, and the quiet-queue path through typed adapter
+outcomes. [Runtime boundaries](architecture/runtime.md#components)
 [Queue verification](queue-verification.md) ·
 [Controller benchmark](controller-load.md)

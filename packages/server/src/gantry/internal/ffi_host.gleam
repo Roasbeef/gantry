@@ -1,16 +1,7 @@
 //// OTP's port primitives launch named host tools without a shell. The
 //// Gleam port module exposes only the type, so the Erlang bridge owns
 //// argument conversion, the wall deadline and bounded output collection.
-
-/// Read an environment variable without making it part of the configuration file.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // ffi_host.getenv("GANTRY_TOKEN")
-/// ```
-@external(erlang, "gantry_host_ffi", "getenv")
-pub fn getenv(name: String) -> Result(String, Nil)
+//// The private `halt` binding reports a startup failure to the supervisor.
 
 /// Run a host tool with explicit arguments and environment overrides.
 ///
@@ -34,8 +25,12 @@ pub fn run(
 /// ```gleam
 /// // ffi_host.exit_failure()
 /// ```
-@external(erlang, "gantry_host_ffi", "exit_failure")
-pub fn exit_failure() -> Nil
+pub fn exit_failure() -> Nil {
+  halt(1)
+}
+
+@external(erlang, "erlang", "halt")
+fn halt(status: Int) -> Nil
 
 /// Sync an atomically published file or directory through OTP's filesystem API.
 ///

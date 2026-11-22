@@ -97,7 +97,7 @@ pub fn call(
         scheme: req.scheme,
         host: req.host,
         port: option.unwrap(req.port, default_port),
-        method: http.method_to_string(method),
+        method:,
         target:,
         headers: [
           #("authorization", "Bearer " <> network.token),
