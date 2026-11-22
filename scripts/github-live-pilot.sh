@@ -51,13 +51,30 @@ pool = "pilot"
 image = "$image"
 EOF
 launcher="$RUNNER_TEMP/gantry/bin"
-ERL_FLAGS='+S 2:2 -name gantry_live@127.0.0.1' "$launcher/gantryd" > "$dir/controller.log" 2>&1 &
-pids+=("$!")
-for _ in {1..30}; do
-  if curl -fsS --max-time 2 http://127.0.0.1:19871/ready >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-curl -fsS --max-time 5 http://127.0.0.1:19871/ready | jq -e '.status=="ready"' >/dev/null
+start_controller() {
+  ERL_FLAGS='+S 2:2 -name gantry_live@127.0.0.1' "$launcher/gantryd" > "$dir/controller.log" 2>&1 &
+  controller=$!
+  pids+=("$controller")
+  for _ in {1..30}; do
+    if curl -fsS --max-time 2 http://127.0.0.1:19871/ready >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  curl -fsS --max-time 5 http://127.0.0.1:19871/ready | jq -e '.status=="ready"' >/dev/null
+}
+start_controller
+status=$(printf 'Authorization: Bearer %s\n' "$GANTRY_SUBMIT_TOKEN" | \
+  curl -sS --max-time 90 -H @- -H 'Content-Type: application/json' \
+  -d '{"id":"default-policy","repo":"roasbeef/gantry","pulls":[6,7]}' \
+  -o "$dir/rejected.json" -w '%{http_code}' http://127.0.0.1:19871/v1/submits)
+test "$status" = 400
+jq -e '.error == "pull request does not target the allowed branch"' "$dir/rejected.json" >/dev/null
+test "$(git ls-remote origin "refs/heads/$base" | cut -f 1)" = "$existing"
+echo 'Verified default branch policy refused the pilot refs'
+kill -TERM "$controller"
+wait "$controller" || true
+pids=()
+sed -i '/^branch = /a github_target = "registered"' "$GANTRY_CONFIG"
+start_controller
 GANTRY_ENDPOINT=http://127.0.0.1:19871 GANTRY_WORKER_ID=github-pilot GANTRY_POOL=pilot \
   GANTRY_WORKER_DIR="$dir/worker" ERL_FLAGS='+S 2:2' "$launcher/gantry-worker" > "$dir/worker.log" 2>&1 &
 pids+=("$!")
@@ -87,6 +104,14 @@ for _ in {1..15}; do
   sleep 1
 done
 curl -fsS --max-time 5 "$GANTRY_URL/ready" | jq -e '.status=="ready"' >/dev/null
+
+for pull in 6 7; do
+  for _ in {1..36}; do
+    if [[ $(gh pr view "$pull" --json mergeStateStatus --jq .mergeStateStatus) == CLEAN ]]; then break; fi
+    sleep 5
+  done
+  test "$(gh pr view "$pull" --json mergeStateStatus --jq .mergeStateStatus)" = CLEAN
+done
 
 # Exercise the documented workflow's actual shell step, including its replay.
 sed -n '/^        run: |$/,$p' docs/examples/github-submit.yml | tail -n +2 | sed 's/^          //' > "$dir/submit.sh"
