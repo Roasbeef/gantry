@@ -59,5 +59,9 @@ Environment reads, the worker schema lookup, and Docker environment
 policy use Gleam bindings. The queue store distinguishes authorization,
 snapshot conflicts, and the quiet-queue path through typed adapter
 outcomes. [Runtime boundaries](architecture/runtime.md#components)
+
+The fleet bootstrap proposal sketches a local smoke build, remote
+worker setup, and staged controller maintenance.
+[Fleet bootstrap design](design-notes/fleet-bootstrap.md)
 [Queue verification](queue-verification.md) ·
 [Controller benchmark](controller-load.md)
