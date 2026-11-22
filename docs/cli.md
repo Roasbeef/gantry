@@ -11,6 +11,7 @@ gantry --help
 gantry --help --json
 gantry describe run
 gantry describe submit
+gantry describe skill
 ```
 
 Discovery runs without authentication or network access. Machine-readable
@@ -20,6 +21,20 @@ returns the metadata for one command. Put options before `--` when a
 positional argument starts with a dash, for example `gantry status -- -build`.
 Request schemas use local references
 into the document's `$defs` object.
+
+## Load the agent skill
+
+```sh
+gantry skill
+```
+
+The command writes the bundled `SKILL.md` to standard output as Markdown
+with its front matter. Run `scripts/gantry skill` from a source checkout.
+Both invocations work offline and require no controller or credentials.
+An extracted Linux release also includes the file at
+`share/gantry/skill/SKILL.md` relative to its root. Use the command to load
+the instructions or redirect its output to a `SKILL.md` file in your
+agent's skill directory.
 
 ## Plan and run a build
 
@@ -103,7 +118,7 @@ the controller. The exit codes are also available through
 | Exit | Meaning |
 | --- | --- |
 | 0 | Success, including a locally validated dry run |
-| 1 | Transport or service failure, watch deadline, or failed or blocked terminal outcome |
+| 1 | Local resource, transport, or service failure, watch deadline, or failed or blocked terminal outcome |
 | 2 | Invalid arguments, payload, or configuration |
 | 3 | Missing credentials or HTTP 401/403 |
 | 4 | HTTP 404 |

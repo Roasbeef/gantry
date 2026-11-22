@@ -106,7 +106,7 @@ outstanding intent holds the lane, so later groups wait. Include this
 case in the pilot when validating operator recovery.
 [Runtime architecture](architecture/runtime.md#land-an-ordered-pr-group)
 
-## Check the first live deployment
+## Check a live deployment
 
 Start with one build-only run, then submit two small PRs in a pilot
 repository. Compare the landed SHA with the candidate in the Gantry run
@@ -115,3 +115,17 @@ and inspect both PR links. The end-to-end harness exercises those Git
 invariants with a local bare remote. The live pilot supplies the GitHub
 branch policy and PR reconciliation evidence.
 [Verification plan](design-notes/depth-signoff.md)
+
+On 2026-11-22 a GitHub Actions runner booted an installed controller and
+Docker worker behind a fixture HTTPS endpoint. The default-branch policy
+refused the disposable target. With `github_target = "registered"`, the
+documented workflow's submission step tested and landed
+`0b7c4b298e9a84c332a75958a27751aee0cf07da` on the pilot branch. The job
+verified both pinned heads as ancestors, downloaded the verified output,
+and replayed the workflow to check that each PR had one comment linking
+the final tested commit. GitHub marked both PRs merged. The pilot branch
+was unprotected. Rehearse your repository's branch rules and the
+controller's write identity as part of deployment.
+[Pilot run](https://github.com/Roasbeef/gantry/actions/runs/45058513752) ·
+[Pilot PR #6](https://github.com/Roasbeef/gantry/pull/6) ·
+[Pilot PR #7](https://github.com/Roasbeef/gantry/pull/7)

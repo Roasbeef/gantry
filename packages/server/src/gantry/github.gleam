@@ -2,6 +2,7 @@
 //// the refs, so a change to the base between validation and push still
 //// fails at the receiving server.
 
+import gantry/config.{type GitHubTarget, DefaultBranch, RegisteredBranch}
 import gantry_core/job.{type Request}
 import gleam/dynamic/decode
 import gleam/http
@@ -126,12 +127,13 @@ pub fn validate_pull(
 /// ## Examples
 ///
 /// ```gleam
-/// // github.can_land(token, "owner/project", "main", 7, pinned_head)
+/// // github.can_land(token, "owner/project", "main", DefaultBranch, 7, pinned_head)
 /// ```
 pub fn can_land(
   token: String,
   repo: String,
   branch: String,
+  target: GitHubTarget,
   number: Int,
   head: String,
 ) -> Result(Nil, String) {
@@ -152,7 +154,7 @@ pub fn can_land(
       #(
         "query",
         json.string(
-          "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid baseRefName state isDraft mergeStateStatus}}}",
+          "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){defaultBranchRef{name} pullRequest(number:$number){headRefOid baseRefName state isDraft mergeStateStatus}}}",
         ),
       ),
       #("variables", variables),
@@ -189,16 +191,26 @@ pub fn can_land(
     decode.success(#(oid, base, state, draft, status))
   }
   let envelope = {
+    use default_branch <- decode.subfield(
+      ["data", "repository", "defaultBranchRef", "name"],
+      decode.string,
+    )
     use pull <- decode.subfield(["data", "repository", "pullRequest"], decoder)
-    decode.success(pull)
+    decode.success(#(default_branch, pull))
   }
-  use observed <- result.try(
+  use #(default_branch, observed) <- result.try(
     json.parse(response.body, envelope)
     |> result.replace_error("GitHub policy unavailable"),
   )
 
+  // A policy change can narrow the authority of an outstanding intent.
+  let allowed = case target {
+    DefaultBranch -> branch == default_branch
+    RegisteredBranch -> True
+  }
+
   // Bind GitHub’s decision to the same pull state and tested head.
-  case observed == #(head, branch, "OPEN", False, "CLEAN") {
+  case allowed && observed == #(head, branch, "OPEN", False, "CLEAN") {
     True -> Ok(Nil)
     False ->
       Error(

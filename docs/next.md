@@ -34,10 +34,11 @@ and worker launchers.
 The [model and deterministic simulation](../protocol/models/queue/README.md)
 cover claim, generation, custody, and exact-ref safety.
 
-Live GitHub provider validation remains open. Use the integration guide
-to verify branch rules, exact landing, PR reconciliation, and workflow
-comments on a GitHub pilot repository. Loom executor interop and indexed
-queue metadata with retention also remain open.
+A live GitHub pilot has verified exact landing, PR reconciliation, and
+idempotent workflow comments on a disposable target branch. A deployment
+using protected branches still needs a pilot with its own rules and
+controller identity. Loom executor interop and indexed queue metadata
+with retention also remain open.
 The [controller load benchmark](controller-load.md) measures short-action
 admission and drain under concurrent clients, alongside idle polling with
 retained runs. The [verification proposal](design-notes/depth-signoff.md)
@@ -60,8 +61,10 @@ policy use Gleam bindings. The queue store distinguishes authorization,
 snapshot conflicts, and the quiet-queue path through typed adapter
 outcomes. [Runtime boundaries](architecture/runtime.md#components)
 
-The fleet bootstrap proposal sketches a local smoke build, remote
-worker setup, and staged controller maintenance.
+The fleet bootstrap slice adds a managed local smoke build and remote
+worker profiles. Local init and worker setup preserve profile identity
+on repeat runs. The proposal also describes staged controller
+maintenance, per-worker credentials, and managed queue cutover.
 [Fleet bootstrap design](design-notes/fleet-bootstrap.md)
 [Queue verification](queue-verification.md) ·
 [Controller benchmark](controller-load.md)

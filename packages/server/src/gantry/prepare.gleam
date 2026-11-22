@@ -155,10 +155,13 @@ pub fn member(
     config.GitHub(target) -> {
       let req = job.Request(repo.name, n, sha, job.Submit)
       use pull <- result.try(github.read_pull(cfg.github_token, req))
+
+      // Resolve the GitHub admission branch from the current repository policy.
       let allowed = case target {
         config.DefaultBranch -> pull.default_branch
         config.RegisteredBranch -> repo.branch
       }
+
       use branch <- result.try(github.validate_pull(pull, req, allowed))
 
       // Only the operator-selected branch can receive this integration.

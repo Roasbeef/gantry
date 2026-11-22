@@ -4,6 +4,7 @@
 //// the assignment and clears the spool.
 
 import gantry/blobs
+import gantry/internal/ffi_host
 import gantry/sql
 import gantry_core/graph
 import gantry_core/protocol
@@ -72,6 +73,77 @@ pub fn open(
     [sql.WorkerIdentity(existing)] if existing == worker -> Ok(db)
     _ -> Error("GANTRY_WORKER_DIR already belongs to a different worker ID")
   }
+}
+
+/// Bind managed custody to a durable marker outside the worker directory.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // custody.open_managed("/srv/gantry/slot", "/srv/gantry/slot/journal", "linux-1")
+/// ```
+pub fn open_managed(
+  profile: String,
+  directory: String,
+  worker: String,
+) -> Result(sqlight.Connection, String) {
+  let path = directory <> "/custody.sqlite3"
+  let marker = profile <> "/worker-established"
+  let identity = worker <> "\n" <> path <> "\n"
+
+  // The profile must survive deletion of its child journal directory.
+  use Nil <- result.try(case directory == profile <> "/journal" {
+    True -> Ok(Nil)
+    False ->
+      Error("managed worker journal directory does not match the profile")
+  })
+
+  // The worker owns the slot lock before either opening or marking custody.
+  case simplifile.read(marker) {
+    Ok(saved) if saved == identity -> {
+      use exists <- result.try(
+        simplifile.is_file(path)
+        |> result.replace_error("cannot check the managed worker journal"),
+      )
+
+      // An established slot may still have a lease or unpublished receipt.
+      case exists {
+        True -> open(path, worker)
+        False ->
+          Error(
+            "managed worker journal is missing; restore it before restarting",
+          )
+      }
+    }
+    Ok(_) -> Error("managed worker identity does not match its custody marker")
+    Error(simplifile.Enoent) -> {
+      use db <- result.try(open(path, worker))
+      use Nil <- result.try(ffi_host.sync_path(path))
+      use Nil <- result.try(ffi_host.sync_path(directory))
+      use Nil <- result.try(publish_marker(profile, marker, identity))
+      Ok(db)
+    }
+    Error(_) -> Error("cannot read the managed worker custody marker")
+  }
+}
+
+/// Persist a recoverable startup boundary before the slot can claim work.
+fn publish_marker(
+  profile: String,
+  marker: String,
+  identity: String,
+) -> Result(Nil, String) {
+  let staged = marker <> ".next"
+  use Nil <- result.try(
+    simplifile.write(identity, to: staged)
+    |> result.replace_error("cannot stage the managed worker custody marker"),
+  )
+  use Nil <- result.try(ffi_host.sync_path(staged))
+  use Nil <- result.try(
+    simplifile.rename(staged, marker)
+    |> result.replace_error("cannot publish the managed worker custody marker"),
+  )
+  ffi_host.sync_path(profile)
 }
 
 /// Read and validate the recorded attempt before it can authorize an effect.
