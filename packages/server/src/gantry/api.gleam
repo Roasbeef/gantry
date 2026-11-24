@@ -5,14 +5,14 @@ import gantry/config.{type Config}
 import gantry/prepare
 import gantry/store
 import gantry_core/graph
-import gantry_core/job
 import gantry_core/protocol
 import gantry_core/queue
+import gantry_core/request
 import gleam/dict
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 import gleam/time/timestamp
@@ -35,17 +35,14 @@ pub fn build(
   body: String,
   mode: BuildMode,
 ) -> Result(json.Json, String) {
-  use #(id, repository, revision, target, action) <- result.try(parse(
-    body,
-    build_decoder(),
-  ))
-  use Nil <- result.try(check_id(id))
-  use Nil <- result.try(require(
-    job.valid_sha(revision),
-    "expected a full lowercase Git SHA",
-  ))
-  use repo <- result.try(registered(cfg, repository))
-  use tasks <- result.try(prepare.build(cfg, repo, revision, target, id, action))
+  use pinned <- result.try(
+    request.parse_build(body) |> result.map_error(request.message),
+  )
+  use repo <- result.try(registered(cfg, request.build_repo(pinned)))
+  use tasks <- result.try(prepare.build(cfg, repo, pinned))
+  let id = request.build_id(pinned)
+  let revision = request.revision(pinned)
+  let target = request.target(pinned)
 
   // Planning returns the resolved graph. A run also records it in the queue.
   case mode {
@@ -71,23 +68,19 @@ pub fn build(
 /// // api.group(config, body)
 /// ```
 pub fn group(cfg: Config, body: String) -> Result(json.Json, String) {
-  use #(id, repository, pulls) <- result.try(parse(body, group_decoder()))
-  use Nil <- result.try(check_id(id))
-  use Nil <- result.try(require(
-    pulls != []
-      && list.drop(pulls, 16) == []
-      && list.unique(pulls) == pulls
-      && list.all(pulls, fn(pull) { pull > 0 }),
-    "expected one to sixteen distinct PR numbers",
-  ))
-  use repo <- result.try(registered(cfg, repository))
+  use group <- result.try(
+    request.parse_submit(body) |> result.map_error(request.message),
+  )
+  use repo <- result.try(registered(cfg, request.submit_repo(group)))
   use saved <- result.try(store.read())
+  let id = request.submit_id(group)
+  let pulls = request.pulls(group)
 
   // Replaying an admitted group keeps its original candidate and base.
   case queue.find(saved, id) {
     Ok(run) -> replay_group(run, repo.name, pulls)
     Error(Nil) -> {
-      use #(candidate, tasks) <- result.try(prepare.group(cfg, repo, pulls))
+      use #(candidate, tasks) <- result.try(prepare.group(cfg, repo, group))
       admit(
         id,
         repo.name,
@@ -173,8 +166,10 @@ pub fn get(id: String) -> Result(json.Json, String) {
 /// ```
 pub fn claim(body: String) -> Result(Option(json.Json), String) {
   use #(worker, pool) <- result.try(parse(body, claim_decoder()))
-  use Nil <- result.try(check_id(worker))
-  use Nil <- result.try(check_id(pool))
+  use Nil <- result.try(require(
+    request.valid_id(worker) && request.valid_id(pool),
+    "invalid identifier",
+  ))
   let #(now, _) =
     timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
 
@@ -237,13 +232,6 @@ fn registered(
   |> result.replace_error("repository is not registered")
 }
 
-fn check_id(id: String) -> Result(Nil, String) {
-  require(
-    graph.valid_path(id) && !string.contains(id, "/"),
-    "invalid identifier",
-  )
-}
-
 fn require(condition: Bool, reason: String) -> Result(Nil, String) {
   case condition {
     True -> Ok(Nil)
@@ -253,27 +241,6 @@ fn require(condition: Bool, reason: String) -> Result(Nil, String) {
 
 fn parse(body: String, decoder: decode.Decoder(a)) -> Result(a, String) {
   json.parse(body, decoder) |> result.replace_error("invalid request JSON")
-}
-
-/// Read the pinned revision, target and optional ad hoc action from a build request.
-fn build_decoder() {
-  use id <- decode.field("id", decode.string)
-  use repo <- decode.field("repo", decode.string)
-  use revision <- decode.field("revision", decode.string)
-  use target <- decode.field("target", decode.string)
-  use action <- decode.optional_field(
-    "action",
-    None,
-    decode.optional(graph.action_decoder()),
-  )
-  decode.success(#(id, repo, revision, target, action))
-}
-
-fn group_decoder() {
-  use id <- decode.field("id", decode.string)
-  use repo <- decode.field("repo", decode.string)
-  use pulls <- decode.field("pulls", decode.list(decode.int))
-  decode.success(#(id, repo, pulls))
 }
 
 fn claim_decoder() {

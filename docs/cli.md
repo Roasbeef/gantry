@@ -59,9 +59,10 @@ response. Use a new ID when the requested inputs change.
 
 The `--json` option accepts a request object inline. Use `--json -` to
 read one object from stdin. Use either JSON or positional arguments in
-an invocation. The CLI validates the object parsed by jq and sends its
-serialized form. Use standard JSON with unique object keys and decimal
-integers.
+an invocation. The CLI validates the object and sends its serialized
+form. Use standard JSON with unique object keys and decimal integers.
+Unknown keys are rejected, both by the CLI and by the controller, so a
+misspelled field fails instead of being ignored.
 
 ```sh
 payload='{"id":"group-12-13","repo":"owner/project","pulls":[12,13]}'
