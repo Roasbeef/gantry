@@ -1,8 +1,14 @@
 # Gantry CLI
 
 Use `gantry` from a release or `scripts/gantry` from a source checkout.
-The CLI uses Bash, jq, and curl. It reads credentials from the environment
-and runs without prompts.
+The CLI is a Gleam program on the release's bundled BEAM runtime, so it
+needs neither jq nor curl. The source shim builds `packages/server` with
+Gleam and runs the same `gantry/cli` module, which you can also start with
+`gleam run -m gantry/cli -- ARGS` from `packages/server`. The CLI reads
+credentials from the environment and runs without prompts. It validates
+requests with the controller's own rules in `gantry_core/request`, so a
+request that passes locally fails on the controller only for reasons that
+need the controller, such as an unregistered repository.
 
 ## Discover commands
 
@@ -20,7 +26,9 @@ request schemas, response formats, and exit codes. `gantry describe COMMAND`
 returns the metadata for one command. Put options before `--` when a
 positional argument starts with a dash, for example `gantry status -- -build`.
 Request schemas use local references
-into the document's `$defs` object.
+into the document's `$defs` object. Object keys in the printed document
+are sorted. The `build`, `submit`, and `action` definitions carry
+`examples`, and the test suite checks each one against the Gleam rules.
 
 ## Load the agent skill
 
@@ -89,14 +97,18 @@ gantry blob "$digest" --output raw > artifact.bin
 
 Plan, run, submit, status, and describe produce one JSON object. Watch emits
 changed run states as NDJSON and ends on a terminal outcome. Failed and
-blocked terminal states are included in the stream before exit 1. Watch
-retries transport failures and HTTP 5xx until `GANTRY_WATCH_SECONDS`
-(default 1800). A passed build and a landed submission exit 0.
+blocked terminal states are included in the stream before exit 1. If the
+first poll gets no HTTP status at all, watch fails at once with
+`transport_error` instead of waiting out its deadline. After the
+controller has answered once, watch retries transport failures and HTTP
+5xx until `GANTRY_WATCH_SECONDS` (default 1800). A passed build and a
+landed submission exit 0.
 
 Use comma-separated object fields or dotted object paths with `--fields`.
 It retains the original object structure, omits missing paths, and leaves
-arrays intact when selected as a whole. Watch evaluates terminal state
-from the full response. The default output leaves the full JSON object
+arrays intact when selected as a whole. Keys are printed in sorted order.
+Watch prints a new line only when the projected output changes, and
+evaluates terminal state from the full response. The default output leaves the full JSON object
 available for inspecting work, artifacts, and log digests.
 
 Blob output is raw bytes. Redirect it to a file when retrieving binary
@@ -112,16 +124,18 @@ Blob reads authorize the agent or worker credential. The CLI checks
 
 Failures emit a JSON object on stderr such as
 `{"error":{"code":"not_found","message":"unknown run","http_status":404}}`.
-Fields vary by error. An HTTP 429 includes `retry_after` when provided by
-the controller. The exit codes are also available through
-`gantry --help --json`.
+Fields vary by error. An HTTP failure includes `http_status`, and a local
+validation failure usually names the offending `field`. The exit codes are
+also available through `gantry --help --json`.
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | Success, including a locally validated dry run |
-| 1 | Local resource, transport, or service failure, watch deadline, or failed or blocked terminal outcome |
-| 2 | Invalid arguments, payload, or configuration |
-| 3 | Missing credentials or HTTP 401/403 |
-| 4 | HTTP 404 |
-| 5 | HTTP 429 |
-| 6 | HTTP 409 |
+| 1 | Local resource, transport, or service failure, any HTTP status without a more specific code (including 5xx and 429), watch deadline, or failed or blocked terminal outcome |
+| 2 | Invalid arguments, payload, or configuration, or HTTP 400, 411, 413, or 422 |
+| 3 | Missing or invalid credentials, or HTTP 401/403 |
+| 4 | HTTP 404 or a missing local profile |
+| 6 | HTTP 409, a local profile conflict, or a busy profile |
+
+The controller never sends HTTP 429, so earlier releases' exit 5 is gone.
+A gateway that rate limits returns exit 1 with `http_status` 429.

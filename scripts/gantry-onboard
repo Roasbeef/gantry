@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Interim entry for the Bash onboarding helper, called by the Gleam CLI
+# with its arguments already checked. It supplies the error, invalid, and
+# emit functions the helper expects from the old Bash CLI.
+set -euo pipefail
+cli_dir=$1 command=$2 fields=$3 token_stdin=$4
+shift 4
+args=("$@")
+http_status=
+
+error() {
+  local status=$1 code=$2 message=$3 field=${4:-}
+  jq -nc --arg code "$code" --arg message "$message" --arg field "$field" '
+    {error: ({code: $code, message: $message}
+      + (if $field == "" then {} else {field: $field} end))}
+  ' >&2
+  exit "$status"
+}
+
+invalid() {
+  error 2 invalid_input "$1" "${2:-}"
+}
+
+emit() {
+  if [[ -z $fields ]]; then
+    printf '%s\n' "$1"
+    return
+  fi
+  jq -c --arg fields "$fields" '
+    def present($path):
+      if $path == [] then true
+      elif type != "object" or (has($path[0]) | not) then false
+      else .[$path[0]] | present($path[1:])
+      end;
+
+    . as $result |
+    reduce ($fields | split(",") | map(split(".")) | sort_by(length)[]) as $path
+      ({}; if $result | present($path) then setpath($path; $result | getpath($path)) else . end)
+  ' <<<"$1"
+}
+
+source "$(dirname -- "$0")/gantry-onboarding"
+onboard "${args[@]:1}"

@@ -1,6 +1,6 @@
 %% Keep host arguments structured and redact the environment from errors.
 -module(gantry_host_ffi).
--export([run/4, sync_path/1]).
+-export([run/4, sync_path/1, write_stdout/1, read_stdin/0, run_attached/3, halt/1]).
 
 -define(LOG_LIMIT, 16384).
 
@@ -69,3 +69,59 @@ utf8(Binary) ->
         {incomplete, Good, _Tail} -> <<Good/binary, " [incomplete UTF-8]">>;
         {error, Good, _Tail} -> <<Good/binary, " [non-UTF-8 output omitted]">>
     end.
+
+%% Standard output is an io server whose encoding a launcher may set to
+%% UTF-8, which would re-encode every byte above 127. Switch it to latin1
+%% so put_chars passes bytes through unchanged, then write synchronously:
+%% the io request returns only after the port has the bytes.
+write_stdout(Bytes) ->
+    try
+        ok = io:setopts(standard_io, [binary, {encoding, latin1}]),
+        ok = file:write(standard_io, Bytes),
+        {ok, nil}
+    catch
+        _:_ -> {error, nil}
+    end.
+
+%% Read standard input to end of file as raw bytes.
+read_stdin() ->
+    case io:setopts(standard_io, [binary, {encoding, latin1}]) of
+        ok -> read_stdin(<<>>);
+        _ -> {error, nil}
+    end.
+
+read_stdin(Acc) ->
+    case file:read(standard_io, 65536) of
+        {ok, Data} -> read_stdin(<<Acc/binary, (iolist_to_binary(Data))/binary>>);
+        eof -> {ok, Acc};
+        {error, _} -> {error, nil}
+    end.
+
+%% Run a child that inherits the VM's standard input, output, and error.
+%% nouse_stdio moves the port's own pipe to descriptors 3 and 4, so the
+%% child sees the caller's terminal or redirections on 0, 1, and 2.
+run_attached(Program, Args, Env) ->
+    case os:find_executable(chars(Program)) of
+        false -> {error, <<Program/binary, " executable not found">>};
+        Executable ->
+            try
+                Port = open_port({spawn_executable, Executable}, [
+                    nouse_stdio, exit_status, binary, {args, lists:map(fun chars/1, Args)},
+                    {env, [{chars(Key), chars(Value)} || {Key, Value} <- Env]}
+                ]),
+                attached(Port)
+            catch
+                error:badarg -> {error, <<"could not start ", Program/binary>>};
+                error:system_limit -> {error, <<"host port limit reached">>}
+            end
+    end.
+
+attached(Port) ->
+    receive
+        {Port, {exit_status, Status}} -> {ok, Status};
+        {Port, _} -> attached(Port)
+    end.
+
+%% Flush buffered port output, then stop the VM with the given status.
+halt(Status) ->
+    erlang:halt(Status, [{flush, true}]).

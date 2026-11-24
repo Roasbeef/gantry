@@ -46,6 +46,7 @@ packages = [
 ]
 
 [requirements]
+argv = { version = ">= 1.1.0 and < 2.0.0" }
 envoy = { version = "== 1.2.0" }
 gantry_core = { path = "../core" }
 gleam_crypto = { version = ">= 1.0.0 and < 2.0.0" }

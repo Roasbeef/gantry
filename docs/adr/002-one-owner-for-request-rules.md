@@ -12,7 +12,7 @@ failing.
 
 `gantry_core/request` now owns the rules. It decodes a body, rejects
 unknown keys, checks every field, and returns an opaque `Build` or
-`Submit`. The controller's `api` module calls it,
+`Submit`. The controller's `api` module and the Gleam CLI both call it,
 and `prepare` accepts only those typed values, so no path can reach Git
 with an unchecked request. The module is portable and is tested on BEAM
 and JavaScript.
@@ -24,6 +24,6 @@ HTTP 400 with `unknown request field: NAME`. Manifest actions in
 because a manifest is versioned with the repository rather than typed by
 an agent at request time.
 
-`scripts/gantry-schema.json` states the same rule for the CLI and remains the published description for
-`gantry describe`. A test decodes each of its examples with the Gleam
+`packages/server/priv/gantry-schema.json` remains the published
+description for `gantry describe`. A test decodes each of its examples with the Gleam
 rules, so the document cannot claim a shape the rules reject.

@@ -54,8 +54,10 @@ to package the OTP release, including ERTS and the SQLite NIF. It writes
 release and installs `gantryd`, `gantry-worker`, and the `gantry` CLI under
 `PREFIX/bin`. The default prefix is `$HOME/.local`. Installed hosts need
 the system commands for the roles they run. Controllers use Git and GNU
-tar, workers use Docker, GNU coreutils, and `flock`, and the CLI uses Bash,
-curl, and jq. Python is unnecessary at runtime.
+tar, workers use Docker, GNU coreutils, and `flock`. The CLI runs on the
+bundled runtime and needs no other commands, while `gantry init`,
+`gantry local`, and `gantry worker` still use Bash, curl, jq, and OpenSSL
+through the onboarding helper. Python is unnecessary at runtime.
 
 Run `make update PREFIX="$HOME/.local"` from the checkout to build and
 install a new release. The installer publishes a complete, immutable
