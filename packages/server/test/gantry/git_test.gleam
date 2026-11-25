@@ -38,7 +38,7 @@ fn config_for(
       seed: "",
       repositories: dict.from_list([#(repo.name, repo)]),
       agent_token: "",
-      worker_token: "",
+      workers: [],
       submit_token: "",
       github_token: "",
     )

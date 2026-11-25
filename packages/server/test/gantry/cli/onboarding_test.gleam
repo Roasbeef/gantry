@@ -5,6 +5,7 @@ import gantry/cli/failure
 import gantry/cli/onboarding
 import gantry/cli/origin
 import gantry/cli/profile
+import gantry/config
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -127,4 +128,35 @@ pub fn remote_origin_rules_test() {
       Nil
     },
   )
+}
+
+pub fn an_empty_worker_token_mints_a_fresh_credential_test() {
+  let assert Ok(first) =
+    profile.new_worker("https://gantry.example", "linux", "", "/s/journal")
+  let assert Ok(second) =
+    profile.new_worker("https://gantry.example", "linux", "", "/s/journal")
+  assert profile.credential(profile.worker_token(first))
+  assert profile.worker_token(first) != profile.worker_token(second)
+  assert profile.worker_id(first) != profile.worker_id(second)
+}
+
+pub fn the_local_controller_config_registers_its_worker_test() {
+  let local = profile.new_local("/state/gantry/local", 4737)
+  let text = onboarding.controller_config("/state/gantry/local", local)
+  let secrets =
+    config.Secrets(
+      agent: profile.agent_token(local),
+      submit: profile.submit_token(local),
+      github: "",
+    )
+
+  // The controller accepts the generated file and authenticates the
+  // profile's own worker token as the profile's worker ID.
+  let assert Ok(cfg) = config.parse(text, secrets)
+  assert config.worker_for(cfg, profile.local_worker_token(local))
+    == Ok(profile.local_worker_id(local))
+  assert config.worker_for(cfg, profile.agent_token(local)) == Error(Nil)
+
+  // The token itself is never written to the file.
+  assert !string.contains(text, profile.local_worker_token(local))
 }

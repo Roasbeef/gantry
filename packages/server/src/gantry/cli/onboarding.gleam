@@ -39,6 +39,7 @@ import gantry/cli/failure.{
 import gantry/cli/origin
 import gantry/cli/profile
 import gantry/cli/service.{type Service}
+import gantry/config
 import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
 import gantry/worker/docker
@@ -269,13 +270,6 @@ pub fn worker_setup(
           "Recover the profile that belongs to the existing worker journal.",
         ))
       })
-      use <- bool.lazy_guard(supplied == "", fn() {
-        Error(failure.new(
-          Unauthorized,
-          "missing_credentials",
-          "Set GANTRY_WORKER_TOKEN or supply it with --token-stdin.",
-        ))
-      })
       use slot <- result.try(
         profile.new_worker(endpoint, pool, supplied, journal)
         |> result.map_error(fn(_) { invalid_token() }),
@@ -288,13 +282,10 @@ pub fn worker_setup(
     Error(invalid_token())
   })
   use Nil <- result.try(check_docker())
-  use Nil <- result.try(check_remote(
-    effects,
-    endpoint,
-    profile.worker_token(slot),
-  ))
 
-  // The slot is saved only after the host and gateway are both ready.
+  // A new slot is saved before the gateway check, because the gateway
+  // rejects it until the operator registers its digest. Rerunning setup
+  // then reuses the same identity and token.
   use Nil <- result.try(case fresh {
     True ->
       profile.save(
@@ -305,6 +296,12 @@ pub fn worker_setup(
       |> result.map_error(local_io)
     False -> Ok(Nil)
   })
+  use Nil <- result.try(check_remote(
+    effects,
+    endpoint,
+    profile.worker_token(slot),
+    worker_entry_for(slot),
+  ))
 
   emit(
     effects,
@@ -314,6 +311,10 @@ pub fn worker_setup(
       #("endpoint", document.text(endpoint)),
       #("pool", document.text(pool)),
       #("worker_id", document.text(profile.worker_id(slot))),
+      #(
+        "token_sha256",
+        document.text(config.token_digest(profile.worker_token(slot))),
+      ),
       #("profile", document.text(directory)),
       #("journal", document.text(journal)),
       #("worker", document.text("stopped")),
@@ -647,6 +648,36 @@ fn local_port(text: String) -> Result(Int, Failure) {
   }
 }
 
+/// The controller configuration for a local profile: its fixture repository
+/// and the digest of its worker's token.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // onboarding.controller_config("/state/gantry/local", local)
+/// ```
+pub fn controller_config(directory: String, local: profile.Local) -> String {
+  let quoted = fn(text) { json.to_string(json.string(text)) }
+  string.join(
+    [
+      "data_dir = " <> quoted(directory <> "/controller"),
+      "blob_dir = " <> quoted(directory <> "/blobs"),
+      "port = " <> int.to_string(profile.port(local)),
+      "",
+      "[[repository]]",
+      "name = \"gantry/fixture\"",
+      "branch = \"main\"",
+      "target = \"check\"",
+      "pool = \"local\"",
+      "image = " <> quoted(local_image),
+      "local_remote = " <> quoted(directory <> "/fixture.git"),
+      "",
+      worker_entry(local),
+    ],
+    "\n",
+  )
+}
+
 /// Write the controller configuration and cookie once, and the client
 /// environment every time, through atomic saves.
 fn write_local_files(
@@ -654,30 +685,24 @@ fn write_local_files(
   local: profile.Local,
   endpoint: String,
 ) -> Result(Nil, String) {
-  let quoted = fn(text) { json.to_string(json.string(text)) }
-  let config =
-    string.join(
-      [
-        "data_dir = " <> quoted(directory <> "/controller"),
-        "blob_dir = " <> quoted(directory <> "/blobs"),
-        "port = " <> int.to_string(profile.port(local)),
-        "",
-        "[[repository]]",
-        "name = \"gantry/fixture\"",
-        "branch = \"main\"",
-        "target = \"check\"",
-        "pool = \"local\"",
-        "image = " <> quoted(local_image),
-        "local_remote = " <> quoted(directory <> "/fixture.git"),
-      ],
-      "\n",
-    )
-    <> "\n"
+  let config = controller_config(directory, local)
 
-  // The configuration is written once, so an operator's edits survive.
-  use Nil <- result.try(case exists(directory <> "/controller.toml") {
-    True -> Ok(Nil)
-    False -> profile.save(directory, "controller.toml", config)
+  // The configuration is written once, so an operator's edits survive. A
+  // file from an earlier release lists no worker and would fail to load, so
+  // the local worker is appended to it once.
+  let path = directory <> "/controller.toml"
+  use Nil <- result.try(case simplifile.read(path) {
+    Error(_) -> profile.save(directory, "controller.toml", config)
+    Ok(saved) ->
+      case string.contains(saved, "[[worker]]") {
+        True -> Ok(Nil)
+        False ->
+          profile.save(
+            directory,
+            "controller.toml",
+            string.trim_end(saved) <> "\n\n" <> worker_entry(local),
+          )
+      }
   })
 
   // The controller's HOME holds its distribution cookie, readable only by
@@ -849,10 +874,14 @@ fn start_controller(
         ),
         #("GANTRY_CONFIG", directory <> "/controller.toml"),
         #("GANTRY_TOKEN", profile.agent_token(local)),
-        #("GANTRY_WORKER_TOKEN", profile.local_worker_token(local)),
         #("GANTRY_SUBMIT_TOKEN", profile.submit_token(local)),
       ],
-      unset: list.append(git, ["GH_TOKEN", "ERL_AFLAGS", "ERL_ZFLAGS"]),
+      unset: list.append(git, [
+        "GANTRY_WORKER_TOKEN",
+        "GH_TOKEN",
+        "ERL_AFLAGS",
+        "ERL_ZFLAGS",
+      ]),
       directory:,
       log: directory <> "/controller.log",
     )
@@ -1338,12 +1367,36 @@ fn supplied_token(
   }
 }
 
+/// The `controller.toml` entry that registers the local worker.
+fn worker_entry(local: profile.Local) -> String {
+  worker_stanza(
+    profile.local_worker_id(local),
+    profile.local_worker_token(local),
+  )
+}
+
+/// The `controller.toml` entry that registers a remote slot.
+fn worker_entry_for(slot: profile.Worker) -> String {
+  worker_stanza(profile.worker_id(slot), profile.worker_token(slot))
+}
+
+/// A `[[worker]]` table naming a worker and the digest of its token. The
+/// controller never receives the token itself.
+fn worker_stanza(id: String, token: String) -> String {
+  "[[worker]]\nid = "
+  <> json.to_string(json.string(id))
+  <> "\ntoken_sha256 = "
+  <> json.to_string(json.string(config.token_digest(token)))
+  <> "\n"
+}
+
 /// Confirm the gateway forwards authenticated worker readiness to a current
 /// controller, without claiming work.
 fn check_remote(
   effects: Effects,
   endpoint: String,
   token: String,
+  entry: String,
 ) -> Result(Nil, Failure) {
   let reply = {
     use outgoing <- result.try(http_request.to(endpoint <> "/v1/worker/ready"))
@@ -1363,7 +1416,8 @@ fn check_remote(
           Error(failure.new(
             Unauthorized,
             "auth_failed",
-            "The gateway rejected the worker token.",
+            "The controller does not accept this worker. Add this entry to controller.toml, restart the controller, and rerun this command. "
+              <> string.replace(entry, "\n", " "),
           ))
         404, _ ->
           Error(failure.new(

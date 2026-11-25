@@ -170,17 +170,23 @@ pub fn get(id: String) -> Result(json.Json, Error) {
   |> result.map(protocol.encode_run)
 }
 
-/// Reissue the worker's lease or durably reserve one eligible action.
+/// Reissue the worker's lease or durably reserve one eligible action. The
+/// `identity` is the worker the request's credential names. A body that
+/// names any other worker is refused before the queue is read.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // api.claim("{...}")
+/// // api.claim("worker-1", "{...}")
 /// ```
-pub fn claim(body: String) -> Result(Option(json.Json), Error) {
+pub fn claim(
+  identity: String,
+  body: String,
+) -> Result(Option(json.Json), Error) {
   use #(worker, pool) <- result.try(parse(body, claim_decoder()))
+  use Nil <- result.try(bound(identity, worker))
   use Nil <- result.try(require(
-    request.valid_id(worker) && request.valid_id(pool),
+    request.valid_id(pool),
     fault.Invalid("invalid identifier"),
   ))
   let #(now, _) =
@@ -191,17 +197,24 @@ pub fn claim(body: String) -> Result(Option(json.Json), Error) {
 }
 
 /// Accept a result only after the worker staged its log and output bytes.
+/// The `identity` is the worker the request's credential names, and the
+/// result must be reported under that same worker.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // api.finish(config, body)
+/// // api.finish(config, "worker-1", body)
 /// ```
-pub fn finish(cfg: Config, body: String) -> Result(json.Json, Error) {
+pub fn finish(
+  cfg: Config,
+  identity: String,
+  body: String,
+) -> Result(json.Json, Error) {
   use #(run, action, worker, serial, completion) <- result.try(parse(
     body,
     completion_decoder(),
   ))
+  use Nil <- result.try(bound(identity, worker))
   use Nil <- result.try(verify_blobs(cfg.blobs, completion))
 
   store.change(fn(state) {
@@ -244,6 +257,14 @@ fn registered(
 ) -> Result(config.Repository, Error) {
   dict.get(cfg.repositories, string.lowercase(repository))
   |> result.replace_error(fault.NotFound("repository is not registered"))
+}
+
+/// A worker may act only as the identity its credential registered.
+fn bound(identity: String, claimed: String) -> Result(Nil, Error) {
+  require(
+    identity == claimed,
+    fault.Forbidden("worker does not match the presented credential"),
+  )
 }
 
 fn require(condition: Bool, otherwise: Error) -> Result(Nil, Error) {

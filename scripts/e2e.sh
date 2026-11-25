@@ -23,7 +23,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export GANTRY_TOKEN="agent-$(openssl rand -hex 24)"
+# Each worker has its own token. The controllers hold only their digests.
 export GANTRY_WORKER_TOKEN="worker-$(openssl rand -hex 24)"
+probe_token="probe-$(openssl rand -hex 24)"
+token_digest() { printf '%s' "$1" | sha256sum | cut -d ' ' -f 1; }
 export GANTRY_SUBMIT_TOKEN="submit-$(openssl rand -hex 24)"
 cookie=$(openssl rand -hex 20)
 node="gantry_e2e_$$"
@@ -105,6 +108,14 @@ branch = "main"
 target = "check"
 pool = "default"
 image = "$image"
+
+[[worker]]
+id = "worker-one"
+token_sha256 = "$(token_digest "$GANTRY_WORKER_TOKEN")"
+
+[[worker]]
+id = "probe"
+token_sha256 = "$(token_digest "$probe_token")"
 TOML
   start "node$i" env GANTRY_CONFIG="$tmp/node$i.toml" ERL_FLAGS="+S 2:2 -name ${node}$i@127.0.0.1 -setcookie $cookie" "${controller[@]}"
   wait_for "voter $i" healthy "${endpoints[i-1]}"
@@ -114,7 +125,7 @@ post() {
 }
 poll_status() {
   curl -sS --connect-timeout 1 --max-time 8 -o "$tmp/poll.json" -w '%{http_code}' \
-    -H "Authorization: Bearer $GANTRY_WORKER_TOKEN" -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $probe_token" -H 'Content-Type: application/json' \
     --data '{"worker":"probe","pool":"default"}' "$1/v1/claims"
 }
 empty_poll() { [[ $(poll_status "$1") == 204 ]]; }
@@ -139,6 +150,16 @@ stop_worker() {
 }
 empty_poll "${endpoints[1]}"
 empty_poll "${endpoints[1]}"
+
+# A worker credential selects the worker identity. A body naming another
+# worker is refused, and so is a role token.
+[[ $(curl -sS --max-time 8 -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $probe_token" -H 'Content-Type: application/json' \
+  --data '{"worker":"worker-one","pool":"default"}' "${endpoints[1]}/v1/claims") == 403 ]]
+[[ $(curl -sS --max-time 8 -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $GANTRY_TOKEN" -H 'Content-Type: application/json' \
+  --data '{"worker":"probe","pool":"default"}' "${endpoints[1]}/v1/claims") == 401 ]]
+echo 'Passed per-worker credential checks'
 run "${endpoints[0]}" initial "$base"
 post "${endpoints[1]}/v1/claims" "$GANTRY_WORKER_TOKEN" '{"worker":"worker-one","pool":"default"}'
 original_serial=$(jq -er 'select(.run == "initial" and .task.action.name == "normalize") | .lease.serial' "$tmp/post.json")

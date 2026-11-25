@@ -38,7 +38,7 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
       )
     Get, ["ready"] -> ready_reply()
     Get, ["v1", "worker", "ready"] -> {
-      use <- authorized(req, cfg.worker_token)
+      use _ <- worker(req, cfg)
       ready_reply()
     }
     Post, ["v1", "runs"] -> {
@@ -58,20 +58,20 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
       api.get(id) |> respond
     }
     Post, ["v1", "claims"] -> {
-      use <- authorized(req, cfg.worker_token)
-      with_json(req, claim_reply)
+      use identity <- worker(req, cfg)
+      with_json(req, fn(body) { claim_reply(identity, body) })
     }
     Post, ["v1", "results"] -> {
-      use <- authorized(req, cfg.worker_token)
-      with_json(req, fn(body) { api.finish(cfg, body) |> respond })
+      use identity <- worker(req, cfg)
+      with_json(req, fn(body) { api.finish(cfg, identity, body) |> respond })
     }
     Put, ["v1", "blobs", id] -> {
-      use <- authorized(req, cfg.worker_token)
+      use _ <- worker(req, cfg)
       use body <- with_body(req, blobs.limit)
       upload(cfg.blobs, id, body)
     }
     Get, ["v1", "blobs", id] -> {
-      use <- authorized_either(req, cfg.agent_token, cfg.worker_token)
+      use <- agent_or_worker(req, cfg)
       download(cfg.blobs, id)
     }
     _, _ -> error(404, "route not found")
@@ -92,10 +92,10 @@ fn ready_reply() -> Reply {
 /// ## Examples
 ///
 /// ```gleam
-/// // claim_reply(body)
+/// // claim_reply("worker-1", body)
 /// ```
-fn claim_reply(body: String) -> Reply {
-  case api.claim(body) {
+fn claim_reply(identity: String, body: String) -> Reply {
+  case api.claim(identity, body) {
     Ok(None) ->
       response.new(204)
       |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(<<>>)))
@@ -122,12 +122,12 @@ fn authorized(
   }
 }
 
-/// Allow two roles to read shared state or artifacts.
+/// Allow two roles to read shared state.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // use <- authorized_either(request, agent_token, worker_token)
+/// // use <- authorized_either(request, agent_token, submit_token)
 /// ```
 fn authorized_either(
   req: Request(Connection),
@@ -141,15 +141,63 @@ fn authorized_either(
   }
 }
 
+/// Authenticate a worker and hand its registered ID to the handler. The
+/// identity comes from the credential alone, so no field a client sends can
+/// choose it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // use identity <- worker(request, config)
+/// ```
+fn worker(
+  req: Request(Connection),
+  cfg: Config,
+  then: fn(String) -> Reply,
+) -> Reply {
+  case bearer(req) |> result.try(config.worker_for(cfg, _)) {
+    Ok(identity) -> then(identity)
+    Error(Nil) -> fault_reply(fault.Unauthorized("authentication required"))
+  }
+}
+
+/// Allow the build agent or any registered worker to read shared artifacts.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // use <- agent_or_worker(request, config)
+/// ```
+fn agent_or_worker(
+  req: Request(Connection),
+  cfg: Config,
+  then: fn() -> Reply,
+) -> Reply {
+  let worker = bearer(req) |> result.try(config.worker_for(cfg, _))
+  case accepts(req, cfg.agent_token), worker {
+    True, _ | False, Ok(_) -> then()
+    False, Error(Nil) ->
+      fault_reply(fault.Unauthorized("authentication required"))
+  }
+}
+
+/// The bearer token a request presents, if any.
+fn bearer(req: Request(Connection)) -> Result(String, Nil) {
+  case request.get_header(req, "authorization") {
+    Ok("Bearer " <> supplied) -> Ok(supplied)
+    Ok(_) | Error(Nil) -> Error(Nil)
+  }
+}
+
 /// Compare a bearer credential with the required role's token in constant time.
 fn accepts(req: Request(Connection), token: String) -> Bool {
-  case request.get_header(req, "authorization") {
-    Ok("Bearer " <> supplied) ->
+  case bearer(req) {
+    Ok(supplied) ->
       crypto.secure_compare(
         bit_array.from_string(supplied),
         bit_array.from_string(token),
       )
-    Ok(_) | Error(Nil) -> False
+    Error(Nil) -> False
   }
 }
 

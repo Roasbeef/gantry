@@ -76,12 +76,15 @@ pub fn new_local(directory: String, port: Int) -> Local {
   )
 }
 
-/// Bind a new remote slot to a gateway, pool, and supplied worker token.
+/// Bind a new remote slot to a gateway, pool, and a token for this worker.
+/// An empty `worker_token` mints a fresh one. A supplied token must pass
+/// `credential`. The controller authorizes the slot by the digest of this
+/// token, which `onboarding` shows the operator to register.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // profile.new_worker("https://gantry.example", "linux", supplied, journal)
+/// // profile.new_worker("https://gantry.example", "linux", "", journal)
 /// ```
 pub fn new_worker(
   endpoint: String,
@@ -89,6 +92,10 @@ pub fn new_worker(
   worker_token: String,
   journal: String,
 ) -> Result(Worker, Nil) {
+  let worker_token = case worker_token {
+    "" -> token(32)
+    supplied -> supplied
+  }
   use <- bool.guard(
     !request.valid_id(pool) || !credential(worker_token),
     Error(Nil),

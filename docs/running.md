@@ -128,18 +128,28 @@ controller is stopped.
 ### Prepare a remote worker
 
 Install the release on a Linux Docker host. Use a stable HTTPS gateway
-origin and the existing deployment's worker role token. The gateway
-must pass `GET /v1/worker/ready` and its authorization header to a current
-controller. Readiness checks the token and queue quorum without
-acquiring a lease.
+origin. The gateway must pass `GET /v1/worker/ready` and its
+authorization header to a current controller. Readiness checks the
+worker's credential and queue quorum without acquiring a lease.
+
+Each worker has its own token, and the controller authorizes it by the
+token's SHA-256 digest in `controller.toml`. Setup mints the worker's ID
+and token, saves them in the slot's profile, and prints the `token_sha256`
+for the controller. The first run fails with `auth_failed` until the
+controller lists the worker. The error message carries the exact
+`[[worker]]` entry to add.
 
 ```sh
-gantry worker setup https://gantry.example linux --token-stdin < /private/path/worker-token
+gantry worker setup https://gantry.example linux
+# Add the printed [[worker]] entry to controller.toml on every controller,
+# restart them, and rerun setup.
+gantry worker setup https://gantry.example linux
 gantry worker start
 ```
 
-You can also supply the token through `GANTRY_WORKER_TOKEN`. Setup checks
-Docker and authenticated gateway readiness, saves one slot, and exits.
+To use a token you generated yourself, supply it with `--token-stdin` or
+`GANTRY_WORKER_TOKEN` on the first run. Setup checks Docker and
+authenticated gateway readiness, saves one slot, and exits.
 Use the explicit start command as the foreground command for your
 supervisor. Install a gateway's private CA in the system trust store on
 the worker when needed. Pre-pull the images required by the pool before
@@ -218,10 +228,15 @@ of those BEAM mechanisms.
 
 ## Start a controller
 
-Copy the [controller example](examples/controller.toml) and register
-a project. Set three distinct secrets of at least 32 bytes
-in `GANTRY_TOKEN`, `GANTRY_WORKER_TOKEN`, and `GANTRY_SUBMIT_TOKEN`.
-`GH_TOKEN` supplies GitHub authentication to controllers only. A local
+Copy the [controller example](examples/controller.toml), register a
+project, and list each worker. Set two distinct secrets of at least 32
+bytes in `GANTRY_TOKEN` and `GANTRY_SUBMIT_TOKEN`. Workers do not share a
+token. Each `[[worker]]` entry gives the worker's ID and the SHA-256
+digest of its own token, and the controller derives a request's worker
+identity from the credential it presents. A worker that sends a different
+`worker` in its request body gets HTTP 403. A configuration with no
+`[[worker]]` entry, such as one that relied on `GANTRY_WORKER_TOKEN`,
+fails to load. `GH_TOKEN` supplies GitHub authentication to controllers only. A local
 provider can instead set an absolute `local_remote` path and use bare Git
 pull refs at `refs/pull/<number>/head`.
 
@@ -230,9 +245,19 @@ export GANTRY_CONFIG=/absolute/path/to/controller.toml
 gantryd
 ```
 
-For a new deployment, generate the three role tokens once with a separate
+For a new deployment, generate the two role tokens once with a separate
 `openssl rand -hex 32` invocation for each and load them from a private
-service environment. Give each client only the token for its role.
+service environment. Give each client only the token for its role. Mint
+each worker's token the same way and register its digest:
+
+```sh
+token=$(openssl rand -hex 32)
+printf '%s' "$token" | sha256sum | cut -d ' ' -f 1
+```
+
+Put the printed digest in the worker's `token_sha256` and give the worker
+the token as `GANTRY_WORKER_TOKEN` with `GANTRY_WORKER_ID` set to the
+entry's `id`.
 From a source checkout, use `gleam run` in `packages/server` with the
 same environment.
 
@@ -278,7 +303,7 @@ Use a build to verify worker execution and blob access.
 
 ### Form a three-controller quorum
 
-Use the same repository policy, role tokens, and shared filesystem on all
+Use the same repository policy, worker entries, role tokens, and shared filesystem on all
 three controllers. Mount that filesystem at `blob_dir` before starting
 Gantry. It must provide atomic renames and file and directory sync. Keep
 `data_dir` on each controller's local disk for its Ra state.
@@ -368,7 +393,7 @@ export GANTRY_ENDPOINT=https://controller-a.example,https://controller-b.example
 export GANTRY_WORKER_ID=linux-01 GANTRY_POOL=linux
 export GANTRY_WORKER_DIR=/srv/gantry/worker-linux-01
 install -d -m 0700 "$GANTRY_WORKER_DIR"
-: "${GANTRY_WORKER_TOKEN:?Load the shared worker token from the private service environment}"
+: "${GANTRY_WORKER_TOKEN:?Load this worker's own token from the private service environment}"
 export GANTRY_WORKER_TOKEN
 gantry-worker
 ```

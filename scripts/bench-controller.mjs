@@ -30,7 +30,8 @@ assert(voters === 1 || voters === 3, 'use one or three voters')
 const root = mkdtempSync(join(tmpdir(), 'gantry-bench-'))
 const nodes = []
 const token = randomBytes(24).toString('hex')
-const workerToken = randomBytes(24).toString('hex')
+// Each worker lane has its own token, and the controllers hold digests.
+const workerTokens = Array.from({ length: workers }, () => randomBytes(24).toString('hex'))
 const submitToken = randomBytes(24).toString('hex')
 const cookie = randomBytes(20).toString('hex')
 const nodeName = (i) => `gantry_bench_${process.pid}_${i}@127.0.0.1`
@@ -86,14 +87,18 @@ branch = "main"
 target = "check"
 pool = "default"
 image = "${image}"
-`)
+${workerTokens.map((t, lane) => `
+[[worker]]
+id = "worker-${lane}"
+token_sha256 = "${createHash('sha256').update(t).digest('hex')}"
+`).join('')}`)
   const fd = openSync(log, 'w')
   const controller = spawn(launcher[0], launcher.slice(1), {
     stdio: ['ignore', fd, fd],
     env: {
       ...process.env,
       ERL_FLAGS: `+S ${schedulers}:${schedulers} -name ${nodeName(i)} -setcookie ${cookie}`,
-      GANTRY_CONFIG: config, GANTRY_TOKEN: token, GANTRY_WORKER_TOKEN: workerToken, GANTRY_SUBMIT_TOKEN: submitToken,
+      GANTRY_CONFIG: config, GANTRY_TOKEN: token, GANTRY_SUBMIT_TOKEN: submitToken,
     },
   })
   closeSync(fd)
@@ -178,9 +183,9 @@ async function runLanes(count, lanes, transfer) {
   }))).flat()
 }
 
-async function stage(node, bytes) {
+async function stage(node, lane, bytes) {
   const id = digest(bytes)
-  const response = await request(node, `/v1/blobs/${id}`, { method: 'PUT', authorization: workerToken, bytes })
+  const response = await request(node, `/v1/blobs/${id}`, { method: 'PUT', authorization: workerTokens[lane], bytes })
   assert.equal(JSON.parse(response).digest, id)
   return id
 }
@@ -214,29 +219,29 @@ async function benchmark() {
   const queue = await measure('queue-drain', workers, () => runLanes(runs, workers, async (_, lane) => {
     const worker = `worker-${lane}`
     const node = lane % voters
-    const offer = await post(node, '/v1/claims', { worker, pool: 'default' }, workerToken)
+    const offer = await post(node, '/v1/claims', { worker, pool: 'default' }, workerTokens[lane])
     assert(offer, 'pending action was not claimed')
     assert(!claimed.has(offer.run), `duplicate claim for ${offer.run}`)
     claimed.add(offer.run)
     assert.equal(offer.lease.worker, worker)
     assert.deepEqual(offer.task.action.argv, action.argv)
-    const source = await request(node, `/v1/blobs/${offer.task.source}`, { authorization: workerToken })
+    const source = await request(node, `/v1/blobs/${offer.task.source}`, { authorization: workerTokens[lane] })
     assert.equal(digest(source), offer.task.source)
     const { stdout } = await exec(offer.task.action.argv[0], offer.task.action.argv.slice(1), { cwd: workDirs[lane] })
     const output = readFileSync(join(workDirs[lane], artifact))
     assert.equal(output.toString(), expected)
     assert.equal(stdout, expectedLog)
-    const files = [{ path: artifact, digest: await stage(node, output) }]
-    const logId = await stage(node, Buffer.from(stdout))
+    const files = [{ path: artifact, digest: await stage(node, lane, output) }]
+    const logId = await stage(node, lane, Buffer.from(stdout))
     const finished = await post(node, '/v1/results', {
       run: offer.run, action: offer.task.action.name, worker, serial: offer.lease.serial,
       completion: { kind: 'succeeded', files, log: logId },
-    }, workerToken)
+    }, workerTokens[lane])
     assert.equal(finished.accepted, true)
   }))
 
   const polling = await measure('empty-polls', workers, () => runLanes(polls, workers, async (_, lane) => {
-    assert.equal(await post(lane % voters, '/v1/claims', { worker: `worker-${lane}`, pool: 'default' }, workerToken), null)
+    assert.equal(await post(lane % voters, '/v1/claims', { worker: `worker-${lane}`, pool: 'default' }, workerTokens[lane]), null)
   }))
 
   // Check durable evidence independently of the timed worker result.
