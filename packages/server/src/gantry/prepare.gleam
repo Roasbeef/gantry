@@ -288,12 +288,17 @@ fn tasks(
   use #(actions, scope) <- result.try(case adhoc {
     Some(action) -> Ok(#([action], "ad-hoc:" <> id))
     None -> {
-      // The commit is already local, so a missing manifest is a refusal and
-      // not a transient failure.
-      use oid <- result.try(
-        git.command(s, ["rev-parse", "--verify", base <> ":gantry.json"])
-        |> result.replace_error(fault.Invalid("revision has no gantry.json")),
+      use #(status, oid) <- result.try(
+        git.raw(s, ["rev-parse", "--verify", base <> ":gantry.json"]),
       )
+
+      // The commit is already local, so a nonzero exit means the manifest is
+      // missing, which is a refusal. A fault running Git stays an error.
+      use Nil <- result.try(case status {
+        0 -> Ok(Nil)
+        _ -> Error(fault.Invalid("revision has no gantry.json"))
+      })
+
       use file <- result.try(git.command(s, ["unpack-file", string.trim(oid)]))
 
       // The checkout lands beside the mirror, so remove it once it is read.
