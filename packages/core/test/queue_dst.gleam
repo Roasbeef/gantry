@@ -495,7 +495,7 @@ fn prepare(world: World, refuse: Bool) -> World {
 /// Drop finished runs and check what survives against an independent oracle.
 fn retention(world: World) -> World {
   let before = world.durable
-  let after = queue.retain(before, queue.Retention(2, 6))
+  let after = queue.retain(before, queue.Retention(1, 6))
   let kept = list.map(after.runs, fn(run) { run.id })
   let dropped =
     list.filter(before.runs, fn(run) { !list.contains(kept, run.id) })
@@ -505,7 +505,7 @@ fn retention(world: World) -> World {
   })
   assert after.cache == list.take(before.cache, 6)
     as "retention keeps the newest proofs for reuse"
-  assert list.length(list.filter(after.runs, finished)) <= 2
+  assert list.length(list.filter(after.runs, finished)) <= 1
     as "retention bounds finished runs"
   World(..world, durable: after)
   |> add("retained_dropped", list.length(dropped))

@@ -798,7 +798,7 @@ fn elapse(world: World, k: Int) -> World {
 /// Drop finished runs and check the survivors against an independent oracle.
 fn retention(world: World, k: Int) -> World {
   let before = world.durable
-  let after = queue.retain(before, queue.Retention(3, 6))
+  let after = queue.retain(before, queue.Retention(1, 6))
   let kept = list.map(after.runs, fn(run) { run.id })
   let dropped =
     list.filter(before.runs, fn(run) { !list.contains(kept, run.id) })
