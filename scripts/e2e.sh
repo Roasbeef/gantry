@@ -362,6 +362,32 @@ fi
 for index in "${!pids[@]}"; do
   if [[ ${pids[index]} == "$wide_pid" ]]; then unset "pids[$index]"; fi
 done
+# An action that declares Git metadata gets a shallow .git for its commit and
+# nothing else, and an input over one blob is staged in verified chunks.
+cat > "$tmp/metadata.json" <<JSON
+{"name":"metadata","argv":["sh","-ec","test \"\$(cat .git/HEAD)\" = $candidate; test \"\$(cat .git/shallow)\" = $candidate; test -s .git/index; test ! -e .git/refs/remotes"],"inputs":["source.txt"],"outputs":[],"git":"shallow"}
+JSON
+"$cli" run git-metadata fixture/project "$candidate" check "$tmp/metadata.json" > "$tmp/git-metadata.json"
+wait_for 'declared Git metadata action' matches "$GANTRY_URL" git-metadata '.phase == "passed"'
+cat > "$tmp/no-metadata.json" <<'JSON'
+{"name":"nometa","argv":["sh","-ec","test ! -e .git"],"inputs":["source.txt"],"outputs":[]}
+JSON
+"$cli" run no-metadata fixture/project "$candidate" check "$tmp/no-metadata.json" > "$tmp/no-metadata-run.json"
+wait_for 'action without Git metadata' matches "$GANTRY_URL" no-metadata '.phase == "passed"'
+g checkout -q --detach "$candidate"
+head -c 73400320 /dev/urandom > "$source_dir/big.bin"
+big_digest=$(sha256sum "$source_dir/big.bin" | cut -d ' ' -f 1)
+g add big.bin
+g commit -qm 'Add an input larger than one blob'
+big=$(g rev-parse HEAD)
+g push -q "$remote" HEAD:refs/heads/big
+cat > "$tmp/big.json" <<JSON
+{"name":"big","argv":["sh","-ec","echo '$big_digest  big.bin' | sha256sum -c -"],"inputs":["big.bin"],"outputs":[]}
+JSON
+"$cli" run big-input fixture/project "$big" check "$tmp/big.json" > "$tmp/big-run.json"
+wait_for 'chunked input action' matches "$GANTRY_URL" big-input '.phase == "passed"'
+jq -e '.work[0].task.source_layout == "chunks"' "$tmp/current.json" >/dev/null
+echo 'Passed shallow Git metadata and a chunked 70 MiB input'
 
 # Kill the executor after Docker has acknowledged its start. The restarted
 # slot must clean up the original resources and report the attempt
