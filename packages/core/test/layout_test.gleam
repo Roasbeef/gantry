@@ -248,3 +248,52 @@ pub fn a_full_queue_refuses_a_new_run_until_retention_frees_one_test() {
     )
   assert layout.writes(plan) == []
 }
+
+pub fn a_prepared_candidate_is_admitted_only_into_a_free_lane_test() {
+  let members = [queue.Member(1, "head")]
+  let candidate = queue.candidate("main", "base", "head", members)
+  let work = tasks("one", False)
+
+  // The first candidate finds its lane free on both sides.
+  let #(state, store) = {
+    let assert Ok(#(next, _)) =
+      queue.admit(
+        queue.empty(),
+        "one",
+        "repo",
+        "head",
+        "check",
+        queue.Queued(candidate),
+        work,
+      )
+    let assert Ok(stored) =
+      audit.admit(
+        image.empty(),
+        queue.empty(),
+        "one",
+        "repo",
+        "head",
+        "check",
+        queue.Queued(candidate),
+        work,
+      )
+    #(next, stored)
+  }
+  assert list.length(state.runs) == 1
+
+  // The lane is held now, so both sides refuse a second candidate for it,
+  // and the audit reports no difference between the refusals.
+  let rival = queue.candidate("main", "base", "head-2", members)
+  let assert Ok(unchanged) =
+    audit.admit(
+      store,
+      state,
+      "two",
+      "repo",
+      "head-2",
+      "check",
+      queue.Queued(rival),
+      tasks("two", False),
+    )
+  assert image.keys(unchanged) == image.keys(store)
+}

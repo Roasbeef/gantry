@@ -33,9 +33,10 @@ launchers (`scripts/release.sh`): `gantryd`, the controller
 (`gantry/cli.gleam:211`).
 
 A deployment is one to three controllers, any number of worker slots, and a
-shared filesystem. Controllers hold the queue as a single JSON snapshot in
-Khepri on Ra, and every change is a compare-and-swap of that snapshot's exact
-bytes (`gantry/store.gleam`). Large objects go to the shared filesystem by
+shared filesystem. Controllers hold the queue in Khepri on Ra, each run under its
+own key with small indexes beside it (`gantry_core/layout.gleam`), and every
+change is one transaction that compares the keys the decision read
+(`gantry/store.gleam`). Large objects go to the shared filesystem by
 SHA-256 (`gantry/blobs.gleam`). A worker keeps a private SQLite journal of its
 one active attempt (`gantry/worker/custody.gleam`). Git is read and written
 only by controllers, through a persistent bare mirror per repository
@@ -43,11 +44,11 @@ only by controllers, through a persistent bare mirror per repository
 modules and their typed `gantry/internal/ffi_*.gleam` bindings.
 
 The rule that explains most of the code: a transition is decided in the core
-from a snapshot the caller read, the caller proposes the result with a swap,
-and an external effect (a Docker start, a Git push) happens only after the
-decision it depends on has committed. A stale proposer loses the swap and
-recomputes, so a lost reply or a restart is always recoverable by replaying
-the same identity.
+from the keys the caller read, the caller commits the resulting plan only if
+every key it relied on is unchanged, and an external effect (a Docker start, a
+Git push) happens only after the decision it depends on has committed. A stale
+planner loses the commit and recomputes, so a lost reply or a restart is
+always recoverable by replaying the same identity.
 
 ## 1. Before the request
 
@@ -87,9 +88,9 @@ and no body field can choose it. Role tokens must be at least 32 bytes
 supervisor with two children (`gantry.gleam:62`,
 `gantry.gleam:71`): the Mist HTTP listener, bound to loopback, and
 the reconciler. `store.boot` decides from a marker file and the seed whether
-this node reopens, bootstraps, or joins (`gantry/store.gleam:82`),
+this node reopens, bootstraps, or joins (`gantry/store.gleam:93`),
 and it refuses a node whose name changed or whose Ra server vanished
-(`gantry/store.gleam:116`). A child that crashes five times in a
+(`gantry/store.gleam:127`). A child that crashes five times in a
 minute ends the supervisor and the VM, and the service manager restarts it.
 
 ## 2. A repository declares its graph
@@ -125,12 +126,12 @@ posts the JSON with the agent token (`gantry/cli.gleam:821`).
 which matches the method and path and picks the credential the route needs
 (`gantry/http_api.gleam:113`). It checks the token before it reads
 the body, requires a bounded `Content-Length`
-(`gantry/http_api.gleam:229`), and refuses a body that is not UTF-8.
+(`gantry/http_api.gleam:225`), and refuses a body that is not UTF-8.
 `POST /v1/runs` calls `gantry/api.gleam:39`. Every route and status is
 in the [API reference](../api.md).
 
 **Admission.** `api.build` parses the body (unknown keys are rejected), looks the
-repository up in the operator's allowlist (`gantry/api.gleam:266`),
+repository up in the operator's allowlist (`gantry/api.gleam:257`),
 then calls `prepare.build` (`gantry/prepare.gleam:26`). That opens a
 Git session on the repository's mirror (`gantry/git.gleam:53`),
 which takes a node-local lock, fetches the pinned commit
@@ -149,19 +150,20 @@ target shares one scope. An ad hoc action is scoped to its run ID, so its
 results cannot satisfy a declared target. `gantry plan` stops here and returns
 the action list.
 
-**The commit.** For a run, `api.admit` (`gantry/api.gleam:154`) proposes
-`queue.admit` (`gantry_core/queue.gleam:391`) through `store.change`
-(`gantry/store.gleam:243`). `queue.admit` appends the run in
+**The commit.** For a run, `api.admit` (`gantry/api.gleam:154`) calls
+`store.admit` (`gantry/store.gleam:380`), which plans `layout.admit`
+(`gantry_core/layout.gleam:685`) around `queue.admit`
+(`gantry_core/queue.gleam:391`). `queue.admit` appends the run in
 admission order with every action `Pending(0)`. If the ID already exists, it
 returns the stored run only when the inputs match, which is what makes a
-retry after a lost response safe. `store.change` reads the snapshot with its
-exact bytes (`gantry/store.gleam:194`), runs the proposal, and swaps
-those bytes for the new ones (`gantry/store.gleam:333`, over
-`gantry_khepri_ffi.erl:141`). A competing writer makes the swap fail, and
-`attempt` recomputes from a fresh read up to eight times
-(`gantry/store.gleam:293`) before it answers 503 `queue contention
-exceeded retry budget`. A snapshot over 4 MiB is refused before it reaches the
-log (`gantry/store.gleam:45`).
+retry after a lost response safe. The layout gives the run the next
+enrollment number and writes its record and index entries. The store commits
+the plan (`gantry/store.gleam:255`, over `gantry_khepri_ffi.erl:131`) as one
+transaction that compares every key the decision read and writes all of its
+own, and a refused plan is recomputed from fresh reads up to eight times
+(`gantry/store.gleam:312`) before it answers 503 `queue contention
+exceeded retry budget`. A queue that already holds 10,000 runs refuses a new
+one as unavailable (`layout.max_runs`).
 
 ## 4. Waiting
 
@@ -171,8 +173,9 @@ slot qualifies for it, and four things decide that.
 **Prerequisites.** `queue.next_work` (`gantry_core/queue.gleam:860`)
 returns a `Pending` action only when every action named in `deps` and `after`
 has passed or been reused, and it builds the cache key from the recipe and the
-resolved dependency files. Nothing stores "ready"; it is recomputed on each
-claim.
+resolved dependency files. The `ready` index lists a run under each pool where
+`next_work` finds an action, and `layout.entries`
+(`gantry_core/layout.gleam:189`) recomputes it whenever the run changes.
 
 **Pools.** Only a task whose pool equals the slot's pool is considered.
 Admission copied the repository's pool into the task, so editing
@@ -216,20 +219,23 @@ first and moves to the next after a transport error or a 5xx answer
 (`gantry/worker/controllers.gleam:156`), over one reused Gun
 connection per origin with connect, first-byte, and idle bounds. On the
 controller, `handle` authenticates the worker and calls
-`gantry/api.gleam:192`, which checks that the body's worker matches the
-credential's (`gantry/api.gleam:275`) and calls `store.claim`
+`gantry/api.gleam:188`, which checks that the body's worker matches the
+credential's (`gantry/api.gleam:266`) and calls `store.claim`
 (`gantry/store.gleam:256`).
 
-**The quiet path.** Before it reads anything, `store.claim` asks the Ra leader
-whether the snapshot it remembers as fully terminal is still the current one
-(`gantry/store.gleam:273`). The question carries a 32-byte digest and
-the answer is a boolean. A match returns 204 without decoding the snapshot.
-The controller remembers such a snapshot only after an unchanged proposal
-confirmed it and `queue.quiescent` held (`gantry_core/queue.gleam:686`).
-Any queue change makes the digest differ and sends the poll down the full path.
+**The quiet path.** `store.claim` (`gantry/store.gleam:407`) plans
+`layout.claim` (`gantry_core/layout.gleam:818`), which reads the `active`
+index (leases and their deadlines) and the pool's `ready` index. A poll whose
+worker holds no lease, with no lapsed lease and nothing ready, reads no run
+and writes nothing. The store confirms that plan with a Ra consistent query
+that the leader answers after a majority confirms its authority
+(`gantry_khepri_ffi.erl:188`), returns 204, and appends nothing to the log.
+It takes no lock, so empty polls never wait behind real claims.
 
-**The decision.** The full path is a `store.change` around `queue.claim`
-(`gantry_core/queue.gleam:706`). It runs `queue.expire` first. Then it
+**The decision.** The full path runs `queue.claim`
+(`gantry_core/queue.gleam:706`) on only the runs the layout loaded: those with
+a lapsed lease, the worker's own lease, and the oldest ready ones. It runs
+`queue.expire` first. Then it
 returns the lease this worker already holds, if any
 (`gantry_core/queue.gleam:782`), so a replayed poll costs
 nothing. Otherwise `offer` walks the runs in admission order
@@ -313,11 +319,11 @@ the containers once and calls `publish`
 
 `publish` uploads only the blobs the receipt names. Each is a `PUT
 /v1/blobs/<sha256>`; the controller refuses a body whose digest differs
-from the path (`gantry/http_api.gleam:277`) and stores it through
+from the path (`gantry/http_api.gleam:268`) and stores it through
 `blobs.put`. Then the worker posts the receipt to `/v1/results`.
-`api.finish` (`gantry/api.gleam:218`) checks that the body's worker
+`api.finish` (`gantry/api.gleam:214`) checks that the body's worker
 matches the credential, that every referenced blob exists
-(`gantry/api.gleam:249`), and proposes `queue.finish`
+(`gantry/api.gleam:240`), and proposes `queue.finish`
 (`gantry_core/queue.gleam:921`). The queue accepts a result only for the
 live serial held by that worker. A success must list exactly the action's
 declared outputs, and it becomes a `Passed` proof that is also indexed for
@@ -335,21 +341,21 @@ idempotent.
 ## 8. Watching and fetching
 
 `gantry watch` polls `GET /v1/runs/<id>` (`gantry/cli.gleam:1171`).
-The controller reads the snapshot and encodes the run
-(`gantry/api.gleam:176`), adding a phase computed from the steps
+The controller reads the run's record and encodes it
+(`gantry/api.gleam:173`), adding a phase computed from the steps
 (`gantry_core/queue.gleam:1133`,
 `gantry_core/protocol.gleam:112`). The phase is derived on
 output and never stored. The stream ends at a terminal phase, and the exit
 code says whether it passed. `gantry blob <sha256>` fetches a log or an output
-from `GET /v1/blobs/<sha256>` (`gantry/http_api.gleam:288`), where the
+from `GET /v1/blobs/<sha256>` (`gantry/http_api.gleam:279`), where the
 controller re-hashes the bytes before returning them. The status JSON is
 described in the [API reference](../api.md#run-status).
 
 Meanwhile the reconciler trims history. Once a minute it applies
-`queue.retain` (`gantry_core/queue.gleam:1106`) through
-`gantry/reconcile.gleam:200`), dropping the oldest terminal runs
-and proofs beyond the `[retention]` bounds, so the snapshot stays far below
-its 4 MiB ceiling. Blobs are not collected.
+`queue.retain` (`gantry_core/queue.gleam:1106`) through `layout.retain`
+(`gantry_core/layout.gleam:1176`) and `gantry/reconcile.gleam:195`, dropping
+the oldest terminal runs and proofs beyond the `[retention]` bounds in batches
+of 250 commits. Blobs are not collected.
 
 ## 9. Landing a group
 
@@ -379,11 +385,11 @@ none has failed, the run holds its lane. If one fails, the run's phase is
 `failed` and the lane is free.
 
 **Intent.** Every tick the reconciler proposes `queue.landings`
-(`gantry_core/queue.gleam:1019` through `gantry/reconcile.gleam:228`).
+(`gantry_core/queue.gleam:1019` through `gantry/reconcile.gleam:220`).
 Each `Queued` run whose actions all passed becomes `Landing`, and the committed
 `Landing` state is the intent. A lane holds at most one such run, so a lane
 never has two intents. The reconciler then calls `submit.reconcile` for each
-due intent (`gantry/reconcile.gleam:249`).
+due intent (`gantry/reconcile.gleam:241`).
 
 **The push.** `submit.reconcile` (`gantry/submit.gleam:53`) fetches
 the target and restores the candidate bundle, then decides from history alone.
@@ -399,12 +405,12 @@ another controller may have landed in the meantime.
 
 **The result.** `reconcile_one` records the outcome through
 `queue.record_landing` (`gantry_core/queue.gleam:1053`,
-`gantry/reconcile.gleam:336`), which matches it to the exact
+`gantry/reconcile.gleam:328`), which matches it to the exact
 outstanding intent. `landed` leaves the commit in
 `submission.candidate.commit`. `blocked` carries `target_advanced` or
 `policy_denied` and frees the lane. Any error (network, an unknown GitHub merge
 state, a failed push) keeps the intent open, and the retry table backs it off
-from 1 s to 60 s (`gantry/reconcile.gleam:306`).
+from 1 s to 60 s (`gantry/reconcile.gleam:298`).
 
 ## 10. A crash anywhere
 
@@ -413,7 +419,7 @@ end-to-end gate (`scripts/e2e.sh`) kills most of them.
 
 | What dies or is lost | What recovers it |
 | --- | --- |
-| A controller | The other voters hold quorum. Workers move to their next origin (`gantry/worker/controllers.gleam:156`). The controller restarts with its node name and Ra directory, and refuses to start if either is wrong (`gantry/store.gleam:82`). The e2e kills a voter during an active lease (`scripts/e2e.sh:189`). |
+| A controller | The other voters hold quorum. Workers move to their next origin (`gantry/worker/controllers.gleam:156`). The controller restarts with its node name and Ra directory, and refuses to start if either is wrong (`gantry/store.gleam:93`). The e2e kills a voter during an active lease (`scripts/e2e.sh:189`). |
 | The reply to an admission | The client repeats the request with the same ID and gets the stored run (`gantry_core/queue.gleam:465`). |
 | The reply to a claim | The next poll gets the same lease, because the worker already holds it (`gantry_core/queue.gleam:782`). |
 | The reply to a result | The worker keeps the receipt and blobs until it hears 200 or 409. The e2e loses a committed reply on purpose (`scripts/e2e.sh:308`). |
@@ -442,8 +448,8 @@ machines help a repository only if its manifest has independent actions. The
 checklist is in [Operations](../operations.md#add-a-machine), and the rule
 for how work is spread is in [Scheduling](../scheduling.md).
 
-The controller side scales differently. All voters serve the same snapshot, and
-every mutation rewrites the whole document, so more voters add safety and not
+The controller side scales differently. All voters serve the same keys, and
+every mutation is committed through Raft, so more voters add safety and not
 throughput. The [benchmark](../controller-load.md#measurements-on-the-gleam-benchmark)
 (`packages/server/dev/gantry/bench.gleam`) measures where that limit is.
 
