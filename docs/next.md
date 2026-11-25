@@ -67,28 +67,38 @@ macOS, so `make e2e` was not run here either. It needs Linux and Docker.
 
 ## What to do next
 
-1. **Measure the current build.** Rerun the offered-rate sweep on a four-vCPU
+1. **Clear the Loom lint error.** `make check` exits 2 at `e13d4d9`. Format,
+   build, and the unit tests pass (core on BEAM and JavaScript, 128 server
+   tests), and then `make lint` reports one error-level finding: R21
+   case-stanza at `packages/server/src/gantry/worker/custody.gleam:86`, in
+   `reopen`, a `case` with no comment above it and no blank line around it.
+   It also warns on R9 (`api.require` takes a `Bool`) and R18 (`claim_decoder`
+   and `reconcile.on_message` each have one caller). This pass changed no
+   code, so the error was already in the tree. **Exit:**
+   `make check` exits 0. **Cut:** the three warnings stay unless the fix is
+   free.
+2. **Measure the current build.** Rerun the offered-rate sweep on a four-vCPU
    Linux host with retention in place ([controller benchmark](controller-load.md)).
    The recorded results predate retention, and the 600-retained-run cell in
    particular should be redone. **Exit:** a table in `controller-load.md`
    with the same cells (10, 15, and 25 actions per second, one and three
    voters, 8 and 32 slots, 100 repositories) from a named commit, and a
    statement of what changed. **Cut:** no code change, and no new cells.
-2. **Run the live gates on Linux.** `make e2e` and `make model-check` were not
+3. **Run the live gates on Linux.** `make e2e` and `make model-check` were not
    run in the documentation pass. **Exit:** both exit 0 from the branch head,
    with the number of cases printed. **Cut:** nothing new is added to either.
-3. **Remove stray tracked files.** The repository tracks
+4. **Remove stray tracked files.** The repository tracks
    `scratchpad_lint1.py` through `scratchpad_lint7.py` at its root, and two
    `.orig` files (`packages/server/src/gantry/internal/ffi_host.gleam.orig`
    and `packages/server/src/gantry_host_ffi.erl.orig`). They look like
    leftovers from earlier edits. **Exit:** they are gone and `make check`
    still exits 0. **Cut:** no other cleanup in the same commit.
-4. **Pilot protected-branch rules.** Use a disposable repository whose target
+5. **Pilot protected-branch rules.** Use a disposable repository whose target
    has the rules a real deployment would have, and the controller identity
    that deployment will use ([integrating](integrating.md#check-a-live-deployment)).
    **Exit:** a group lands or is refused with a typed reason, and the result
    is recorded next to the earlier pilot.
-5. **Decide the per-repository sandbox policy.** The depth run found Loom
+6. **Decide the per-repository sandbox policy.** The depth run found Loom
    lanes that cannot run under `--cap-drop=ALL` (nested `bwrap` needs user
    namespaces), and a 64 MiB blob cap against a Loom source tree of about
    87.5 MiB. Those findings come from session notes and were not re-measured
