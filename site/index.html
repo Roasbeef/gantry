@@ -76,13 +76,13 @@
           <article>
             <h3>Build</h3>
             <p>Run a target against a full commit SHA. Each action declares its inputs and runs in Docker with no network. Status is per action, and logs and artifacts are fetched by SHA-256 digest. Retry or check back later with the same run ID.</p>
-            <p>An action whose definition, image, input files and upstream outputs match an earlier result in the same repository is reused, even across commits.</p>
+            <p>A declared action whose definition, image, input files and upstream outputs match an earlier result in the same repository is reused, even across commits.</p>
             <code>gantry run ID REPO SHA TARGET</code>
           </article>
           <article>
             <h3>Submit</h3>
             <p>Name PRs in order. Gantry pins their heads, builds their combined commit on the target branch, and runs the required actions on it. A group queued behind another builds on the tip the first one lands.</p>
-            <p>If the target moves before the push, the group ends <code>blocked</code> and nothing lands. You submit again to test against the new tip.</p>
+            <p>If the target moves before the push, the group ends <code>blocked</code> and nothing lands. You submit again, under a new run ID, to test against the new tip.</p>
             <code>gantry submit ID REPO PR [PR ...]</code>
           </article>
         </div>
@@ -94,7 +94,7 @@
         <header class="section-head">
           <p class="label"><span class="num">02</span> Guarded submit</p>
           <h2 id="submit-title">The commit that passed is the commit that lands.</h2>
-          <p>The landing is a single ref update with an expected old value. Git compares the target's tip with the tested base at the moment of the push, so a branch that moved during the build can't receive an untested combination.</p>
+          <p>Before pushing, Gantry fetches the target and checks that it still points at the tested base. The push itself is a single ref update with that base as the expected old value, so if the branch moves after the check, Git refuses it. A branch that moved during the build can't receive an untested combination.</p>
           <p>The intent to land is committed to the replicated queue before the push. If a push ends with an unclear result, the same intent is replayed, and a candidate that is already on the target is recorded as landed instead of pushed again.</p>
           <div class="toggle" role="group" aria-label="Choose an outcome" hidden>
             <button type="button" data-outcome="landed" aria-pressed="true">Base unchanged</button>
@@ -107,7 +107,7 @@
           <ol>
             <li class="row r-base">
               <span class="cell" aria-hidden="true"><i class="l0 from-node"></i><i class="l0 to-node"></i><b class="dot l0"></b></span>
-              <div><h3><code>53ad9e2</code> Tested base</h3><p><code>main</code> points here when the group is pinned.</p></div>
+              <div><h3><code>53ad9e2</code> Tested base</h3><p><code>main</code> points here when the group reaches the head of its lane and the candidate is built.</p></div>
             </li>
             <li class="row r-fork">
               <span class="cell" aria-hidden="true"><i class="l0 full"></i><svg class="fork" viewBox="0 0 60 28"><path d="M16 0C16 14 44 10 44 26v2"/></svg><i class="l1 below-fork"></i><b class="dot l1 fork-dot"></b></span>
@@ -131,7 +131,7 @@
             </li>
             <li class="row r-reject only-blocked">
               <span class="cell" aria-hidden="true"><i class="l0 to-node"></i><i class="l1 to-node"></i><b class="mark l1 cross">×</b></span>
-              <div><h3>Blocked: <code>target_advanced</code></h3><p>The tip is <code>b71e6a4</code>, not <code>53ad9e2</code>, so the guarded update can't apply. <code>main</code> keeps the other push. Submit again to build and test against <code>b71e6a4</code>.</p></div>
+              <div><h3>Blocked: <code>target_advanced</code></h3><p>Gantry fetches <code>main</code>, finds <code>b71e6a4</code> instead of <code>53ad9e2</code>, and records the group as blocked without pushing. Submit again under a new run ID to build and test against <code>b71e6a4</code>.</p></div>
             </li>
           </ol>
           <p class="graph-status" aria-live="polite"><span class="pill">Landed</span> <span class="status-text"><code>main</code>: <code>53ad9e2</code> → <code>c42f8b7</code></span></p>
@@ -144,9 +144,9 @@
         <header class="section-head">
           <p class="label"><span class="num">03</span> Runtime</p>
           <h2 id="runtime-title">A replicated queue and workers on your hosts.</h2>
-          <p>Three controllers share one queue through Khepri and Ra. Runs, leases, proofs and landing intents live there, so losing one controller loses no work.</p>
+          <p>Controllers share one queue through Khepri and Ra. Runs, leases, proofs and landing intents live there. One controller is enough on a single host; with three, losing one loses no work.</p>
           <p>Workers pull. Each worker slot asks for an action, runs it in Docker, and records the result in a local SQLite journal before cleaning up, so a restarted slot replays its result rather than running the action again. A lease that lapses goes to another slot.</p>
-          <p>Each repository routes its actions to one named pool. A slot runs one action at a time; a large host runs several slots.</p>
+          <p>Each repository routes its actions to one named pool. A slot runs one action at a time; a large host can run several slots.</p>
           <a class="text-link" href="https://github.com/Roasbeef/gantry/blob/main/docs/architecture/runtime.md">Runtime architecture<span class="external" aria-hidden="true"></span></a>
         </header>
 
@@ -194,7 +194,7 @@
             <div><dt>TLA+ model</dt><dd>Waiting groups, claims, lease expiry and reassignment, late results, and guarded landing. TLC explores 109,896 distinct states.</dd></div>
             <div><dt>Seeded simulation</dt><dd>The production queue transitions against virtual controllers, workers and a Git ref. A sweep of 1,000 seeds, each run twice, reports no safety or liveness violation.</dd></div>
             <div><dt><code>make e2e</code></dt><dd>Three real controllers, a Docker worker and a bare Git remote. It kills controllers, replays worker results, reuses actions, and lands and blocks a group.</dd></div>
-            <div><dt>Live GitHub</dt><dd>A pilot landed a group and marked its PRs merged on a disposable, unprotected branch. Protected-branch rules have not been piloted.</dd></div>
+            <div><dt>Live GitHub</dt><dd>A pilot landed a group on a disposable, unprotected branch, and GitHub marked its PRs merged. Protected-branch rules have not been piloted.</dd></div>
           </dl>
           <aside class="limits" aria-labelledby="limits-title">
             <h3 id="limits-title">Not built yet</h3>

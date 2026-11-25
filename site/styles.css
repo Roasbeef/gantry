@@ -15,7 +15,7 @@
   --ok-ink: #f3efe4;
   --stop: #ad3c16;
   --stop-ink: #fbf3ea;
-  --focus: #1f6a43;
+  --focus: var(--ok);
   --sans: "Schibsted Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -34,7 +34,6 @@
     --ok-ink: #0b1a12;
     --stop: #ff9a70;
     --stop-ink: #24110a;
-    --focus: #7fd3a0;
   }
 }
 
@@ -202,7 +201,7 @@ h3 { font-size: 1.05rem; font-weight: 600; line-height: 1.35; }
 .toggle button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 
 .graph { border: 1px solid var(--line); padding: 18px 18px 0; min-width: 0; }
-.graph figcaption { font-size: .85rem; color: var(--ink-3); padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+.graph figcaption { font-size: .85rem; color: var(--ink-2); padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
 .graph ol { padding-top: 6px; }
 .row { display: grid; grid-template-columns: 60px minmax(0, 1fr); }
 .row > div { padding: 4px 0 18px; min-width: 0; }
