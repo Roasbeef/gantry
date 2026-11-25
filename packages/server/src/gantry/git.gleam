@@ -173,9 +173,11 @@ fn raw(s: Session, args: List(String)) -> Result(#(Int, String), Fault) {
 /// // git.clear_locks("/data/mirrors/owner/project.git")
 /// ```
 pub fn clear_locks(directory: String) -> Nil {
+  // An unreadable directory has nothing to clear.
   case simplifile.get_files(directory) {
     Ok(files) ->
       list.each(files, fn(path) {
+        // Only lock files are removed.
         case string.ends_with(path, ".lock") {
           True -> {
             let _ = simplifile.delete_file(path)

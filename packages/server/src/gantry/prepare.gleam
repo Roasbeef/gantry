@@ -200,6 +200,7 @@ fn stage(
   commit: String,
   pinned: List(queue.Member),
 ) -> Result(Prepared, Fault) {
+  // A manifest the controller rejects ends the wait. Anything else retries.
   case tasks(cfg, repo, s, base, commit, repo.target, "", None) {
     Error(fault.Invalid(detail)) -> Ok(Refusal(queue.Refused(detail)))
     Error(other) -> Error(other)

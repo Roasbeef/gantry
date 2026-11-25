@@ -180,6 +180,8 @@ fn prepare_one(
     )),
   )
   use outcome <- result.try(prepare.candidate(cfg, repo, preparation))
+
+  // A built candidate and a refusal are both durable outcomes.
   let recorded = case outcome {
     prepare.Ready(candidate, tasks) -> Ok(#(candidate, tasks))
     prepare.Refusal(failure) -> Error(failure)
@@ -196,11 +198,13 @@ fn prepare_one(
 /// interval. An unchanged snapshot is confirmed and not rewritten, so a
 /// queue within its bounds costs one read.
 fn retain_finished(state: State, now: Int) -> State {
-  // Between passes the queue is left alone.
+  // Before the first pass nothing is scheduled, so a pass is due at once.
   let due = case state.next_retain {
     Some(at) -> now >= at
     None -> True
   }
+
+  // Between passes the queue is left alone.
   case due {
     False -> state
     True -> {
@@ -208,10 +212,13 @@ fn retain_finished(state: State, now: Int) -> State {
         store.change(fn(snapshot) {
           Ok(#(queue.retain(snapshot, state.cfg.retention), Nil))
         })
+
+      // A failed pass is logged and tried again at the next interval.
       case outcome {
         Ok(Nil) -> Nil
         Error(reason) -> log_failure("cannot apply retention", reason)
       }
+
       State(..state, next_retain: Some(now + retain_every))
     }
   }
