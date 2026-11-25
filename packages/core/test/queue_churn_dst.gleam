@@ -99,7 +99,7 @@ pub const safety = [
 pub const liveness = [
   "stuck_active_seeds", "stuck_active_vanished_seeds",
   "stuck_active_other_seeds", "stuck_landing_seeds", "stuck_runs",
-  "nonterminal_runs", "nonterminal_lanes",
+  "nonterminal_runs", "nonterminal_lanes", "heal_live_lapses",
 ]
 
 /// Counters that show each fault class was exercised.
@@ -145,7 +145,34 @@ pub fn run(mask: Int, ops: List(Int)) -> Report {
         clock: world.clock + 5 + op * 13 % 41,
       )
     })
-  Report(classify(heal(world, 0, 60)))
+  // Live workers must finish under healed delivery without any expiry. Only
+  // then does time pass, so vanished workers' leases can lapse.
+  let world = heal(world, 0, 60, Deliver)
+  let world = bump_by(world, "heal_live_lapses", live_leases(world))
+  Report(classify(heal(world, 0, 60, Expire)))
+}
+
+/// What a heal round does once its deliveries are done.
+type Heal {
+  /// Deliver only. Time does not pass, so no lease can lapse.
+  Deliver
+  /// Deliver, then let leases lapse so a vanished worker's action moves on.
+  Expire
+}
+
+/// Count active leases held by workers that have not vanished, leaving out
+/// poison actions, which never report and are meant to need expiry.
+fn live_leases(world: World) -> Int {
+  list.count(active_leases(world.durable), fn(entry) {
+    let #(run, _, lease) = entry
+    !list.contains(world.vanished, queue.lease_worker(lease))
+    && !poisoned(world, run)
+  })
+}
+
+/// Whether a run's action kills its worker on every attempt in this world.
+fn poisoned(world: World, run: String) -> Bool {
+  world.mask / 512 % 2 == 1 && { world.mask + denial_key(run) } % 4 == 0
 }
 
 /// Read the counters of one report.
@@ -796,6 +823,14 @@ fn elapse(world: World, k: Int) -> World {
   commit(world, k, queue.expire(world.durable, world.clock))
 }
 
+/// Let leases lapse at the end of an expiring heal round.
+fn heal_expiry(world: World, k: Int, mode: Heal) -> World {
+  case mode {
+    Deliver -> world
+    Expire -> elapse(world, k)
+  }
+}
+
 /// Drop finished runs and check the survivors against an independent oracle.
 fn retention(world: World, k: Int) -> World {
   let before = world.durable
@@ -911,8 +946,7 @@ fn complete(
 ) -> World {
   let w = worker(world, pool)
   let poison = case w.held {
-    Some(job) ->
-      world.mask / 512 % 2 == 1 && { world.mask + denial_key(job.run) } % 4 == 0
+    Some(job) -> poisoned(world, job.run)
     None -> False
   }
   case w.held, poison {
@@ -1255,7 +1289,7 @@ fn finished(run: queue.Run) -> Bool {
 }
 
 /// Restore reliable delivery to live workers and both controllers.
-fn heal(world: World, round: Int, rounds: Int) -> World {
+fn heal(world: World, round: Int, rounds: Int, mode: Heal) -> World {
   case round == rounds || list.all(world.durable.runs, finished) {
     True -> world
     False -> {
@@ -1269,10 +1303,8 @@ fn heal(world: World, round: Int, rounds: Int) -> World {
       |> event(complete(_, k, "test", False, False))
       |> drain(k, 12)
       |> drain(1 - k, 12)
-      // Live workers have finished this round's work, so any lease still held
-      // belongs to a vanished worker. Its expiry lets the action move on.
-      |> elapse(k)
-      |> heal(round + 1, rounds)
+      |> heal_expiry(k, mode)
+      |> heal(round + 1, rounds, mode)
     }
   }
 }
