@@ -148,8 +148,13 @@ This drops the mixed-version query that the snapshot hint kept for rollouts.
 The exit is the one in the next slice: at 100 actions per second across 100
 repositories, a ready-to-dispatch p99 under one second on the four-vCPU host,
 with the drain at 10 actions per second unchanged when 1,000 runs are
-retained. The numbers are in [controller load](../controller-load.md). The
-custom Ra state machine stays out unless this layout misses that exit. Two
+retained. The numbers are in [controller load](../controller-load.md#the-indexed-layout-9f273c1).
+With one voter the layout meets it: a p99 of 145 ms at 100 actions per second,
+and a drain at 10 actions per second that is the same with 100 and with 1,000
+retained runs. Three voters on that one host hold 75 actions per second and
+miss 100, because the three VMs, the load driver, and Git share four vCPUs, so
+this record does not claim the target for three voters. The custom Ra state
+machine stays out unless this layout misses that exit. Two
 costs remain linear and are named so a later reader can find them: a claim
 lists its pool's ready index, and retention lists the finished index. Both
 entries are tens of bytes, and a per-pool head cursor replaces the listing if

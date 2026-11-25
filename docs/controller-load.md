@@ -17,10 +17,10 @@ invocations.
 cd packages/server
 GANTRY_BENCH_CONTROLLER="$(command -v gantryd)" gleam run -m gantry/bench
 
-# The offered-rate sweep behind the results below.
+# One cell of the offered-rate sweep behind the results below.
 GANTRY_BENCH_CONTROLLER="$(command -v gantryd)" GANTRY_BENCH_REPOS=100 \
-  GANTRY_BENCH_RATE=15 GANTRY_BENCH_SLEEP_MS=50 GANTRY_BENCH_RUNS=600 \
-  GANTRY_BENCH_WORKERS=8 gleam run -m gantry/bench
+  GANTRY_BENCH_RATE=15 GANTRY_BENCH_SLEEP_MS=50 GANTRY_BENCH_RUNS=300 \
+  GANTRY_BENCH_RETAINED=300 GANTRY_BENCH_WORKERS=8 gleam run -m gantry/bench
 ```
 
 A sample prints one JSON row per phase and prints nothing if a durable check
@@ -76,34 +76,125 @@ when comparing builds, and alternate old and new controllers to reduce drift.
 
 ## Measurements on the Gleam benchmark
 
-These runs used a four-vCPU Linux host, 100 repositories,
-50 ms actions, and three samples per cell, and report the median. They
-predate the retention fix (`[retention]` in `controller.toml`), so a sample's
-snapshot grew with every retained run. The measured target is the one in
-[ADR 001](adr/001-khepri-owns-queue-decisions.md): a ready-to-dispatch p99
-under one second at 100 actions per second across 100 repositories.
+Every run below used the same four-vCPU Linux host (an AMD EPYC with a
+four-CPU quota, shared with other work and the live controller, which was
+idle), 100 repositories, 50 ms actions, `GANTRY_BENCH_RUNS=300` unless a table
+says otherwise, and three samples per cell. The tables report the median.
+"Ready p99" is the time from an action becoming ready to a slot receiving its
+lease, and "Snapshot KiB" is the size the runs would encode to as the earlier
+whole-snapshot document, which is what the old store replicated on every
+change. The [ADR 001 target](adr/001-khepri-owns-queue-decisions.md) is a
+ready p99 under one second at 100 actions per second across 100 repositories.
 
-| Offered rate | Cell | Result |
-| ---: | --- | --- |
-| 10 to 15 actions/s | One and three voters | Drain keeps pace. Ready-to-dispatch p99 is 57 to 110 ms |
-| 25 actions/s | One voter, 8 slots | Saturates at 21.5 actions/s, p99 825 ms |
-| 25 actions/s | One voter, 32 slots | Saturates at 5.2 actions/s, with 1015 CAS refusals (HTTP 503) |
-| 25 actions/s | Three voters, 8 slots | Saturates at 13.3 actions/s, p99 4.8 s |
-| 10 actions/s, 600 retained runs | One voter | Drain falls to 1.3 to 1.7 actions/s, p99 in minutes |
+### The whole-snapshot store with retention (`6a561d4`)
 
-At 25 actions per second every cell saturates or exceeds a one second p99,
-which is a quarter of the rate the ADR asks for. BEAM CPU per operation grew
-from 12 ms at a 31 KiB snapshot to 52 to 75 ms at 94 to 141 KiB, which is
-what the whole-snapshot compare-and-swap predicts: every mutation reads,
-decodes, re-encodes, and replaces the full document. More slots make it worse
-(the 32-slot cell), because competing mutations lose the swap and retry.
-Three voters did worse than one at the same slot count, which fits each write
-waiting on a majority.
+This re-measures the sweep that predates retention, with the controller built
+from `6a561d4`, which has `[retention]`. Retention runs once a minute and
+keeps 200 finished runs, so a sample shorter than a minute never reaches it.
+Every sample here ends with a snapshot of about 279 KiB (300 runs at 0.95 KiB
+each), so these cells measure the cost of a snapshot that retention allows,
+not one it trimmed. With the default of four retries after a contention
+reply, every cell at 10 actions per second and above failed with HTTP 503
+`queue contention exceeded retry budget`, so the table uses 1,000 retries.
 
-Two caveats. Retention now bounds the snapshot, so the 600-run cell should be
-rerun against a current build before anyone reads it as the steady state.
-Three samples per cell is enough to see the cliff and not enough to rank
-cells that are close.
+| Offered/s | Voters | Slots | Admitted/s | Drained/s | Ready p99 | Drain p99 | BEAM CPU ms/op | CAS retries |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 1 | 8 | 9.6 | 9.2 | 1.3 s | 1.1 s | 197.8 | 54 |
+| 10 | 1 | 32 | 2.6 | 1.9 | 94.5 s | 70.2 s | 1187.1 | 3043 |
+| 10 | 3 | 8 | 8.1 | 7.3 | 8.3 s | 4.6 s | 321.2 | 177 |
+| 10 | 3 | 32 | 2.8 | 2.8 | 36.0 s | 52.0 s | 1101.5 | 1610 |
+| 15 | 1 | 8 | 11.8 | 10.8 | 6.3 s | 3.7 s | 197.5 | 156 |
+| 15 | 1 | 32 | 2.3 | 1.8 | 102.4 s | 64.9 s | 1300.4 | 3610 |
+| 15 | 3 | 8 | 7.0 | 6.9 | 12.6 s | 5.3 s | 409.9 | 409 |
+| 15 | 3 | 32 | 2.4 | 2.4 | 43.6 s | 43.6 s | 1357.6 | 2394 |
+| 25 | 1 | 8 | 5.4 | 4.5 | 48.3 s | 17.9 s | 487.3 | 997 |
+| 25 | 1 | 32 | 2.3 | 1.7 | 114.4 s | 42.8 s | 1385.3 | 4075 |
+| 25 | 3 | 8 | 5.1 | 5.1 | 26.0 s | 14.1 s | 621.0 | 871 |
+| 25 | 3 | 32 | 2.2 | 2.2 | 51.2 s | 71.3 s | 1498.2 | 2902 |
+
+The earlier table said 10 to 15 actions per second kept pace with a p99 under
+110 ms. That held while the snapshot was small: one sample of 100 runs at 10
+actions per second on this build (95 KiB) had a ready p99 of 15 ms. At 300
+runs no cell keeps pace, and 32 slots are worse than eight because more slots
+lose more compare-and-swap races. Three voters do worse than one at the same
+slots, which fits each write waiting on a majority. Retention bounds the
+snapshot at roughly `keep_runs` runs plus `keep_proofs` proofs, which at the
+defaults is a megabyte or more, so the bound does not fix the cost of rewriting
+the document.
+
+Four of the 12 cells needed a rerun for a reason that is the benchmark's, not
+the controller's. A sample that lasts more than a minute meets a retention
+pass, which drops the finished runs beyond 200, and the benchmark's final
+re-read of every run then fails with 404. Those cells (`15/3/32`, `25/1/8`,
+`25/3/8`, and `25/3/32`) were repeated with `GANTRY_BENCH_RETAINED=300`, which
+the benchmark gained for this purpose, against the same `6a561d4` controller,
+and their rows above come from the reruns.
+
+### The indexed layout (`9f273c1`)
+
+The same cells on the indexed layout. Every cell keeps pace with no
+contention reply, and the ready p99 stays under 25 ms.
+
+| Offered/s | Voters | Slots | Admitted/s | Drained/s | Ready p99 | Drain p99 | BEAM CPU ms/op | CAS retries |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 1 | 8 | 10.0 | 10.0 | 12 ms | 89 ms | 71.3 | 0 |
+| 10 | 1 | 32 | 10.0 | 10.0 | 11 ms | 111 ms | 133.5 | 0 |
+| 10 | 3 | 8 | 10.0 | 10.0 | 12 ms | 95 ms | 95.9 | 0 |
+| 10 | 3 | 32 | 10.0 | 10.0 | 14 ms | 125 ms | 187.6 | 0 |
+| 15 | 1 | 8 | 15.0 | 15.0 | 12 ms | 82 ms | 49.5 | 0 |
+| 15 | 1 | 32 | 15.0 | 15.1 | 13 ms | 111 ms | 91.4 | 0 |
+| 15 | 3 | 8 | 15.0 | 15.0 | 14 ms | 93 ms | 68.6 | 0 |
+| 15 | 3 | 32 | 15.0 | 15.0 | 15 ms | 119 ms | 128.1 | 0 |
+| 25 | 1 | 8 | 25.1 | 25.1 | 13 ms | 90 ms | 33.3 | 0 |
+| 25 | 1 | 32 | 25.1 | 25.1 | 13 ms | 125 ms | 60.7 | 0 |
+| 25 | 3 | 8 | 25.0 | 25.0 | 17 ms | 102 ms | 51.5 | 0 |
+| 25 | 3 | 32 | 25.0 | 25.1 | 21 ms | 146 ms | 77.5 | 0 |
+
+"BEAM CPU ms/op" divides all CPU of the voters by the admitted actions, and
+at these rates most of it is idle polling: each slot polls every 10 ms while
+it has nothing to do, so more slots cost more. An empty poll takes no lock and
+appends nothing to the log, and it costs a few local reads and one quorum
+read.
+
+**The exit: 100 actions per second across 100 repositories** (3,000 runs,
+32 slots, `GANTRY_BENCH_RETAINED=1000`):
+
+| Offered/s | Voters | Admitted/s | Drained/s | Ready p50 | Ready p99 | Admission p99 | CAS retries |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 1 | 100.0 | 100.4 | 6 ms | 145 ms | 739 ms | 0 |
+| 100 | 3 | 98.1 | 78.9 | 3.3 s | 8.0 s | 3.4 s | 192 |
+| 75 | 3 | 75.0 | 75.2 | 10 ms | 467 ms | 3.0 s | 48 |
+| 50 | 3 | 50.0 | 50.1 | 7 ms | 31 ms | 354 ms | 3 |
+| 150 | 1 | 149.5 | 109.9 | 1.9 s | 11.2 s | 1.1 s | 0 |
+
+One voter meets the target: a ready p99 of 145 ms against 1 s, with every
+admitted action drained at the offered rate. Three voters on this host do
+not. They hold 75 actions per second and saturate before 100, because three
+BEAM VMs, the load driver, and Git share four vCPUs (the voters used about
+240% of 400%), and every command is applied three times. One voter saturates
+near 110 actions per second. With eight slots the drain at 100 actions per
+second is slot-bound (89% utilization, ready p99 4 s), so the table uses 32
+slots, which leave most slots idle (33% utilization).
+
+**Drain at 10 actions per second with 1,000 retained runs** (eight slots,
+`GANTRY_BENCH_RETAINED` 200 for 100 runs and 1,000 for 1,000 runs):
+
+| Voters | Runs | Drained/s | Ready p99 | Drain p99 | Final snapshot as one document |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 100 | 10.0 | 13 ms | 97 ms | 93 KiB |
+| 1 | 1,000 | 10.0 | 11 ms | 86 ms | 930 KiB |
+| 3 | 100 | 10.0 | 13 ms | 95 ms | 93 KiB |
+| 3 | 1,000 | 10.0 | 14 ms | 94 ms | 930 KiB |
+
+The drain does not change with the retained runs. On the whole-snapshot store
+the same sample at 300 runs could not hold 10 actions per second.
+
+Not explained: three of about 40 samples of 100 or 150 actions per second on
+one voter ended with `ResponseTimeout` (the benchmark's 60 s) on
+`POST /v1/runs`. The controller logged nothing, and 26 consecutive samples at
+the same settings then passed. One of the 150 per second samples also ended
+with the benchmark's retention 404 described above. The cause is open, and
+[the handoff](next.md) names it.
 
 ## Earlier measurements (Node driver)
 

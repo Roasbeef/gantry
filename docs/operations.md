@@ -125,6 +125,18 @@ backups, which loses whatever was admitted since. An upgrade drill on
 read every earlier run; the rollback refused the snapshot; and the
 upgraded worker reopened the old journal but failed its in-flight action.
 
+### Upgrade from the single-snapshot release
+
+The indexed layout is a new set of keys, and voters of the two releases cannot
+share a cluster. Take a backup first
+([back up](#back-up-and-restore-the-voter-data)), stop every controller, and
+start them on the new release. The first voter to open its replica imports the
+old snapshot in one transaction and deletes it, and the others find the layout
+in place. The
+import was checked by opening the data directory of a controller built from
+the earlier release with the new one: all 40 runs it held read back with their
+phases.
+
 ### The queue is full
 
 The queue holds at most 10,000 runs at once, finished or not. A new run past

@@ -151,14 +151,14 @@ results cannot satisfy a declared target. `gantry plan` stops here and returns
 the action list.
 
 **The commit.** For a run, `api.admit` (`gantry/api.gleam:154`) calls
-`store.admit` (`gantry/store.gleam:380`), which plans `layout.admit`
-(`gantry_core/layout.gleam:685`) around `queue.admit`
+`store.admit` (`gantry/store.gleam:400`), which plans `layout.admit`
+(`gantry_core/layout.gleam:704`) around `queue.admit`
 (`gantry_core/queue.gleam:391`). `queue.admit` appends the run in
 admission order with every action `Pending(0)`. If the ID already exists, it
 returns the stored run only when the inputs match, which is what makes a
 retry after a lost response safe. The layout gives the run the next
 enrollment number and writes its record and index entries. The store commits
-the plan (`gantry/store.gleam:255`, over `gantry_khepri_ffi.erl:131`) as one
+the plan (`gantry/store.gleam:255`, over `gantry_khepri_ffi.erl:150`) as one
 transaction that compares every key the decision read and writes all of its
 own, and a refused plan is recomputed from fresh reads up to eight times
 (`gantry/store.gleam:312`) before it answers 503 `queue contention
@@ -175,7 +175,7 @@ returns a `Pending` action only when every action named in `deps` and `after`
 has passed or been reused, and it builds the cache key from the recipe and the
 resolved dependency files. The `ready` index lists a run under each pool where
 `next_work` finds an action, and `layout.entries`
-(`gantry_core/layout.gleam:189`) recomputes it whenever the run changes.
+(`gantry_core/layout.gleam:188`) recomputes it whenever the run changes.
 
 **Pools.** Only a task whose pool equals the slot's pool is considered.
 Admission copied the repository's pool into the task, so editing
@@ -221,15 +221,15 @@ connection per origin with connect, first-byte, and idle bounds. On the
 controller, `handle` authenticates the worker and calls
 `gantry/api.gleam:188`, which checks that the body's worker matches the
 credential's (`gantry/api.gleam:266`) and calls `store.claim`
-(`gantry/store.gleam:256`).
+(`gantry/store.gleam:427`).
 
-**The quiet path.** `store.claim` (`gantry/store.gleam:407`) plans
-`layout.claim` (`gantry_core/layout.gleam:818`), which reads the `active`
+**The quiet path.** `store.claim` (`gantry/store.gleam:427`) plans
+`layout.claim` (`gantry_core/layout.gleam:837`), which reads the `active`
 index (leases and their deadlines) and the pool's `ready` index. A poll whose
 worker holds no lease, with no lapsed lease and nothing ready, reads no run
 and writes nothing. The store confirms that plan with a Ra consistent query
 that the leader answers after a majority confirms its authority
-(`gantry_khepri_ffi.erl:188`), returns 204, and appends nothing to the log.
+(`gantry_khepri_ffi.erl:207`), returns 204, and appends nothing to the log.
 It takes no lock, so empty polls never wait behind real claims.
 
 **The decision.** The full path runs `queue.claim`
@@ -353,7 +353,7 @@ described in the [API reference](../api.md#run-status).
 
 Meanwhile the reconciler trims history. Once a minute it applies
 `queue.retain` (`gantry_core/queue.gleam:1106`) through `layout.retain`
-(`gantry_core/layout.gleam:1176`) and `gantry/reconcile.gleam:195`, dropping
+(`gantry_core/layout.gleam:1261`) and `gantry/reconcile.gleam:195`, dropping
 the oldest terminal runs and proofs beyond the `[retention]` bounds in batches
 of 250 commits. Blobs are not collected.
 

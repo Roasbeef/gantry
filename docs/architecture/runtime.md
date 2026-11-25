@@ -470,10 +470,14 @@ workflow comments on a disposable, unprotected target branch
 
 - A deployment with protected-branch rules needs its own pilot, using the
   controller identity it will run with. This is the only GitHub item left.
-- The queue is one snapshot with a whole-document swap. The benchmark has met
-  the reconsideration trigger of [ADR 001](../adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-benchmark-meets-the-reconsideration-trigger)
-  (on the four-vCPU benchmark host, throughput saturates near 20 actions per second with 100 repositories),
-  and the indexed layout is not built.
+- The queue is stored as one key per run with small indexes
+  ([ADR 001](../adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-indexed-layout)).
+  On the four-vCPU benchmark host one voter holds 100 actions per second across
+  100 repositories with a ready-to-dispatch p99 of 145 ms. Three voters on the
+  same host hold 75 and saturate before 100
+  ([measurements](../controller-load.md#the-indexed-layout-9f273c1)).
+  A claim reads its pool's `ready` listing, and retention reads the `done`
+  listing, so each grows with the backlog it lists.
 - Loom's executor is not used. [ADR 003](../adr/003-gantry-docker-worker.md)
   records why, and what an interop proof would need to show.
 - No cancel route, workspace overlay, event cursor, resource reservation,

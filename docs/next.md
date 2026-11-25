@@ -6,68 +6,68 @@ is open on purpose. It is rewritten at the end of each body of work and is
 not appended to. [Tour of the code](guide/tour.md) ·
 [Status](architecture/runtime.md#status)
 
-**Baseline.** Branch `claude/project-review-refactor-0d0088` at `8c84edf`
-(2026-11-25), ahead of `main` at `f4cc695`. At that commit `make check` exits 0
-(37 core tests on BEAM and JavaScript, 129 server tests, Loom lint with 0
-errors and 3 warnings). The 1,000-seed `sweep` reports 0 safety and 0 liveness
-violations. On a Linux host (Ubuntu 24.04, 4 vCPU) the release,
-install, and `make e2e` exit 0 with 9 checks passing, and `make model-check`
-exits 0 with 109,896 distinct states. The previous edition of this file was
-carried forward from earlier slices, and several of its claims no longer held.
-They are named under
+**Baseline.** Branch `indexed-queue-layout`, whose last code commit is
+`7fa0052` (2026-11-25), on top of `main` at `6a561d4`. At that commit
+`make check` exits 0 (49 core tests on BEAM and on JavaScript, 134 server
+tests, Loom lint with 0 errors and 17 warnings, 3 of them from before this
+branch). The queue simulations report 0 safety and 0 liveness violations:
+`sweep 1 1000 128`, `swarm 1 10000 128`, `churn 73 128`, `growth 2000`, and
+`ops`. On a Linux host (Ubuntu 24.04, 4 vCPU) the release and install exit 0,
+`make e2e` exits 0 with all 9 checks, and `make model-check` exits 0 with
+109,896 distinct states. The benchmark numbers were measured at `9f273c1`,
+and the later commits only reshape lint. The previous edition's claims that
+changed are under
 [what the previous edition got wrong](#what-the-previous-edition-got-wrong).
 
 ## Where the tree is
 
 | Area | Where it stands |
 | --- | --- |
-| Controller and queue | Pinned Git inputs, declared and ad hoc actions, a quorum snapshot with whole-document swap, lease expiry and reassignment (3 attempts), skipped steps after a failure, deferred preparation of waiting groups, retention, typed failure and block reasons |
+| Controller and queue | Pinned Git inputs, declared and ad hoc actions, an indexed Khepri layout (a key per run, small indexes, one transaction per decision), lease expiry and reassignment (3 attempts), skipped steps after a failure, deferred preparation of waiting groups, retention, typed failure and block reasons |
 | Controller API and operations | Per-worker credentials, typed HTTP errors, a persistent Git mirror per repository with per-intent backoff, policy denials that block a run, a supervised listener and reconciler, logging |
 | Worker | Result recorded before cleanup, collector preflight, Gun connection reuse with progress timeouts, journal pruned on acknowledgement, SQLite exclusive lock, Weft-run `docker start` with cancel, one port runner, configurable process, file, and `/tmp` limits |
 | CLI | Gleam (`gantry/cli*`), no jq or curl at runtime, onboarding (`init --local`, `local start`, `worker setup`) in the same program, schema in `packages/server/priv` |
-| Verification | TLA+ model with expiry, waiting, and skipping (TLC: 109,896 distinct states, exit 0), seeded queue simulations (`sweep`, `churn`, `growth`), live gate `make e2e` |
-| Throughput | The ADR 001 reconsideration trigger is met. The queue saturates near 20 actions per second on four vCPUs with 100 repositories |
+| Verification | TLA+ model with expiry, waiting, and skipping (TLC: 109,896 distinct states, exit 0), seeded queue simulations (`sweep`, `churn`, `growth`) that also replay every operation through the layout and compare, live gate `make e2e` |
+| Throughput | One voter holds 100 actions per second across 100 repositories on four vCPUs (ready p99 145 ms), and saturates near 110. Three voters on that host hold 75 ([measurements](controller-load.md#the-indexed-layout-9f273c1)) |
 | GitHub | Pilot done on a disposable, unprotected branch. Protected-branch rules are not piloted |
 | Documentation | Brought level with the code in this pass, and a tour, an API reference, a scheduling page, and an operations page added |
 
 ### What this series changed
 
-The series moved the CLI and onboarding from Bash into Gleam and gave the
-admission rules one owner ([ADR 002](adr/002-one-owner-for-request-rules.md)).
-It made the core queue enforce leases, which the previous edition and the
-model had described but the code did not. It stopped building a group's
-candidate at admission, so a group behind another is built on the commit the
-first one lands. It bounded the snapshot with retention. In the controller it
-replaced the shared worker token with per-worker credentials, classified
-failures by type instead of by message text, kept one Git mirror per
-repository, and made a policy denial block the run instead of holding the
-lane forever. In the worker it recorded results before cleanup, bounded
-transfers by progress, and made the sandbox limits configurable. The Node
-benchmark became a Gleam module. The new churn simulation
-(`packages/core/test/queue_churn_dst.gleam`) and the extended model cover the
-new transitions, and each has a mutation that it must fail
-([queue verification](queue-verification.md#mutation-checks)).
+It re-measured the controller with retention in place and found the
+whole-snapshot store could not hold 10 actions per second at 300 runs. It then
+replaced the snapshot with an indexed layout ([ADR 001
+addendum](adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-indexed-layout)).
+The core decides each operation against the few keys it reads
+(`gantry_core/layout`), the unchanged transitions in `queue` run on only the
+runs it selected, and the store commits the resulting plan in one Khepri
+transaction that compares every key the decision relied on. The churn
+simulation replays each committed operation on a reference store and counts a
+difference as a safety violation, and a rival-claim check requires that two
+claims issuing leases cannot both commit. A review of the layout found a claim
+that could hold one worker to two leases, a claim order the simulation could
+not reach, and a refusal read from a lagging replica. Each is fixed with a
+test that fails without it. An earlier release's data directory opens under the
+new one.
 
 ### What the previous edition got wrong
 
-It said retention and indexed queue metadata both remained open. Retention
-is built (`queue.retain`, `[retention]` in `controller.toml`), and the
-indexed layout is still open. It listed per-worker credentials only in a
-proposal ([fleet bootstrap](design-notes/fleet-bootstrap.md#whats-built-and-whats-not)),
-and they have shipped. It said the model covered claim and generation, but
-the code had no generation until this series added lease serials with expiry
-and the model gained them too. It named Loom executor interop as open work,
-and [ADR 003](adr/003-gantry-docker-worker.md) now records that Gantry runs
-its own Docker worker and what a proof would need to show. It spread status
-across the README, the runbook, and the architecture page, and they disagreed
-about the GitHub pilot. They now link to
-[one status section](architecture/runtime.md#status).
+It said the retention fix bounded the snapshot and that the offered-rate sweep
+needed only a re-measure. At 300 runs the store with retention fell to 2 to 11
+actions per second in every cell, because retention runs once a minute and
+keeps 200 runs and 1,000 proofs, and a snapshot costs about 0.95 KiB per run. It
+said the 10 to 15 actions per second cells kept pace, which held only while the
+snapshot was small (about 100 runs). It counted nine `make e2e` checks without
+saying the ninth needs `GANTRY_RELEASE_BIN` pointing at the installed
+launchers, and it did not say the result-proxy fixture needs Node.js on the
+`PATH`. The host had Node.js only under another session's directory. Those
+requirements are now under [how to verify](#how-to-verify). It listed the
+indexed layout as designed and unbuilt, and it was built here.
 
-Not re-checked in this pass, and carried as historical: the Loom pilot
-numbers (318 and 319 tests, the landed commit `676951e`), the CLI latency
-comparison (about 230 to 340 ms against 7 to 24 ms for the old Bash CLI), and
-the hand-checked interrupt behaviour of `gantry local start`. `make e2e` needs Linux and Docker; the
-baseline above records the run on the controller host.
+Not re-checked in this pass, and carried as historical: the Loom pilot numbers
+(318 and 319 tests, the landed commit `676951e`), the CLI latency comparison
+(about 230 to 340 ms against 7 to 24 ms for the old Bash CLI), and the
+hand-checked interrupt behaviour of `gantry local start`.
 
 ## What to do next
 
@@ -79,26 +79,27 @@ the third slice.
 
 ### Ordered slices
 
-1. **Re-measure the controller with retention in place.** The offered-rate
-   sweep predates retention, and its 600-retained-run cell fell to 1.3 to 1.7
-   actions per second at a 563 KiB snapshot. **Exit:** the same cells (10, 15,
-   and 25 actions per second; one and three voters; 8 and 32 slots; 100
-   repositories) from a named commit, run with `gleam run -m gantry/bench`.
-   **Guard:** the benchmark's own proof and artifact re-read. **Cut:** no code
-   change.
-2. **Build the indexed, batched Khepri layout.** ADR 001's reconsideration
-   trigger is met: every cell at 25 actions per second either fell behind the
-   offered rate or exceeded 1 s p99 ready-to-dispatch, and CPU per operation
-   grew from 12 ms at a 31 KiB snapshot to 52 to 75 ms at 94 to 141 KiB because
-   each change rewrites and replicates the whole snapshot. Put each run under
-   its own key with a small ready and lane index, so a claim and its
-   reservation still commit in one transaction. **Exit:** at 100 actions per
-   second across 100 repositories, ready-to-dispatch p99 under 1 s on the same
-   host, and drain at 10 actions per second unchanged with 1,000 retained runs.
-   **Guard:** the TLA model and both simulations with 0 violations, the
-   planted-mutation checks in [queue verification](queue-verification.md),
-   and `make e2e`. **Cut:** no custom Ra state machine unless the indexed
-   Khepri layout misses the exit.
+1. **Find what ended three samples with `ResponseTimeout`.** Three of about 40
+   one-voter samples at 100 and 150 actions per second ended with the
+   benchmark's 60 s timeout on `POST /v1/runs`, and the controller logged
+   nothing. 26 consecutive samples at the same settings passed. The suspects are
+   the Git mirror lock in admission (`gantry/git.gleam`), the node-local lock
+   in `gantry_khepri_ffi:gated/2`, and the benchmark's own connection pool.
+   **Exit:** a cause, shown by a sample that fails on purpose or by a trace of
+   the stuck request, and a fix or a documented bound. **Guard:** the
+   100-per-second exit in [controller load](controller-load.md#the-indexed-layout-9f273c1)
+   keeps its p99 under one second. **Cut:** no new subsystem.
+2. **Raise the three-voter ceiling.** Three voters on one four-vCPU host hold
+   75 actions per second and miss 100, with the voters at about 240% of 400%
+   CPU. Profile it with Pickglass ([controller load](controller-load.md#profiling-with-pickglass-commit-b2ff8cb-for-pickglass))
+   to see whether the cost is the replicated transaction function, the three
+   copies of every index write, or the counters that two nodes contend on
+   (about 190 retries per 3,000 runs). The target is 100 actions per second on
+   a host with a core per voter, so measure there too. **Exit:** the measured
+   split, and either 100 actions per second on three voters or a rule for the
+   host size that gets it. **Guard:** the same simulations and mutation checks.
+   **Cut:** no custom Ra state machine unless the split says Khepri's
+   transaction is the cost.
 3. **Let a trusted repository ask for a wider sandbox.** Real Loom lanes run
    on the 32-core worker host under the worker's exact flags: `static` and `mid` pass; the
    `fast`, `conformance`, and `client` lanes fail, mostly because Loom's own
@@ -152,7 +153,10 @@ the third slice.
    cleanup and the poll gap. The worker host's `/etc/resolv.conf` bypasses
    MagicDNS, so the slots resolve the gateway through `ERL_INETRC`
    (`~/gantry-fleet/inetrc`) until that host's DNS uses Tailscale. The Loom
-   group and the laptop worker are still open.
+   group and the laptop worker are still open. The fleet's controller still
+   runs the single-snapshot release. Upgrading it follows
+   [the upgrade steps](operations.md#upgrade-from-the-single-snapshot-release)
+   and was not done here, because that service is live.
 8. **Schedule beyond first-fit.** Today each slot polls and takes the oldest
    ready action in its pool, one action per slot. Add fairness across
    repositories, then one worker process with several slots and CPU and
@@ -182,10 +186,11 @@ the third slice.
 Each of these is settled. Re-open one only with new evidence, and record the
 reopening where the ruling lives.
 
-**Khepri owns queue decisions.** One bounded snapshot with a whole-document
-compare-and-swap, until profiling says otherwise. The trigger has fired, and
-the next step is an indexed, batched Khepri layout, not a custom Ra state
-machine ([ADR 001](adr/001-khepri-owns-queue-decisions.md)).
+**Khepri owns queue decisions.** The queue is an indexed Khepri layout, one
+key per run, and a decision commits as one transaction that compares what it
+read. The layout met its exit on one voter, so a custom Ra state machine stays
+out unless a measurement of the three-voter ceiling says Khepri's transaction
+is the cost ([ADR 001](adr/001-khepri-owns-queue-decisions.md)).
 
 **One owner for request rules.** `gantry_core/request` decodes and checks every
 build and submit request for both the controller and the CLI, and unknown keys
@@ -215,7 +220,17 @@ is gone, and `packages/server/dev/gantry/bench.gleam` is the benchmark.
 
 None of these is unfinished work somebody forgot.
 
-- **Indexed queue layout.** Designed in ADR 001, unbuilt. It is slice 2.
+- **Ordering across overlapping operations.** A claim reads the ready index
+  and then the runs, so a run that becomes ready in between can be passed over
+  by one claim. Safety does not depend on it, and the oldest-first order is
+  exact when operations do not overlap
+  ([ADR 001](adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-indexed-layout)).
+- **Per-pool ready cursor.** A claim lists its pool's `ready` entries and
+  retention lists `done`, so each grows with the backlog. The entries are
+  tens of bytes, and a head cursor replaces the listing if a backlog shows it.
+- **The lock processes are not supervised.** `gantry_khepri_ffi` starts three
+  mutex processes with `spawn` and registers them. They release on a crash and
+  have not died in testing, and a Weft supervisor would own their lifecycle.
 - **Cancellation, workspace overlays, event cursors, resource reservations,
   quotas, and priority.** Described as targets in the
   [design pages](architecture/build-and-submit.md#what-is-built), unbuilt.
@@ -235,13 +250,16 @@ None of these is unfinished work somebody forgot.
 ```sh
 make check                                      # format, build, tests on BEAM and JavaScript, Loom lint
 make model-check TLA2TOOLS=/absolute/path/to/tla2tools.jar
-make e2e                                        # Linux, Docker, three voters, a bare Git remote
+GANTRY_RELEASE_BIN=$HOME/.local/bin make e2e   # Linux, Docker, Node.js, three voters, a bare Git remote
 scripts/queue-dst.sh sweep 1 1000 128           # seeded simulation, 1,000 seeds
 ```
 
 Capture each command's exit status directly, and report the cases it ran.
-The unit gate does not need Docker. The live gate does, and it uses `jq` and
-`curl` as test tooling.
+The unit gate does not need Docker. The live gate does, and it uses `jq`,
+`curl`, and Node.js (the result-proxy fixture `drop-result-reply.mjs`) as test
+tooling. `GANTRY_RELEASE_BIN` names the directory of the installed launchers,
+and without it the ninth check, the packaged skill and onboarding, does not run
+and `make e2e` still exits 0 with eight.
 
 **The Loom lint is part of `make check`.** Several commits in this series
 exist only to satisfy its case-stanza and flow-spine rules, so run
