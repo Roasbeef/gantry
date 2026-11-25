@@ -461,6 +461,12 @@ pub fn empty_settings_mean_unset_test() {
   assert outcome.code == 0
   assert field(outcome.stdout, ["url"], decode.string)
     == Ok("http://127.0.0.1:4737/v1/plans")
+
+  // An empty deadline falls back to the default, so watch reaches the
+  // credential check (exit 3) instead of rejecting the setting (exit 2).
+  let outcome = invoke(host, ["watch", "local"])
+  assert outcome.code == 3
+  assert error_code(outcome) == "missing_credentials"
 }
 
 pub fn schema_exit_codes_match_the_cli_test() {

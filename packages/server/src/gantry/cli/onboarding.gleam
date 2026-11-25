@@ -402,10 +402,15 @@ fn release(effects: Effects, roles: Roles) -> Result(Binaries, Failure) {
       Error(_) -> False
     }
   }
-  let signals = ffi_host.run("kill", ["-l"], [], 5000)
-  let present =
-    list.all(needed, executable)
-    && result.map(signals, fn(reply) { reply.0 }) == Ok(0)
+
+  // Service teardown signals process groups with the kill tool. A remote
+  // slot runs attached and never signals a group.
+  let signals = case roles {
+    Both -> ffi_host.run("kill", ["-l"], [], 5000) |> result.map(fn(r) { r.0 })
+    WorkerOnly -> Ok(0)
+  }
+
+  let present = list.all(needed, executable) && signals == Ok(0)
   use <- bool.lazy_guard(!present, fn() {
     Error(failed(
       "missing_release",
