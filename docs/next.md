@@ -140,7 +140,19 @@ the third slice.
    path inside and outside the container, because input archives are bind
    mounts). **Exit:** a Loom group lands through the gateway. Add a second
    and third voter for failover only when there are three machines that stay
-   up.
+   up. **Status (2026-11-24):** the gateway, controller and four slots are up
+   at 10fd0ef. The gateway is `tailscale serve` on
+   `https://blue-knight.tail0a99b.ts.net`, in front of `gantryd` on loopback
+   (systemd unit `gantryd`, files in `~/gantry-fleet`). Gilgamesh runs the
+   slots `gilgamesh-01` to `-04` as user units `gantry-worker@NN`, each with
+   4 CPUs and 3 GiB, in pool `linux`. The fan-out fixture `fleet/fanout`
+   (eight 20-second shards and a collector) passed in 66 s through the
+   gateway, with four containers running at once in each of two waves; the
+   floor is about 40 s, and each wave added about 7 s for collector start,
+   cleanup and the poll gap. Gilgamesh's `/etc/resolv.conf` bypasses
+   MagicDNS, so the slots resolve the gateway through `ERL_INETRC`
+   (`~/gantry-fleet/inetrc`) until that host's DNS uses Tailscale. The Loom
+   group and the laptop worker are still open.
 8. **Schedule beyond first-fit.** Today each slot polls and takes the oldest
    ready action in its pool, one action per slot. Add fairness across
    repositories, then one worker process with several slots and CPU and
