@@ -146,3 +146,4 @@ also available through `gantry --help --json`.
 
 The controller never sends HTTP 429, so earlier releases' exit 5 is gone.
 A gateway that rate limits returns exit 1 with `http_status` 429.
+The controller's own statuses and error body are in the [HTTP API reference](api.md#errors).

@@ -4,6 +4,8 @@ Gantry workers run actions against immutable Git snapshots. Gantry
 supports target plans, declared builds, restricted ad hoc actions,
 result polling, artifact and log retrieval, and guarded submission of
 ordered PR groups. Controllers share the same replicated queue.
+[Operations](operations.md) covers adding a machine and recovery, and
+[the status page](architecture/runtime.md#status) says what is built.
 
 ## Build and verify
 
@@ -121,9 +123,13 @@ in the shell that will use the CLI.
 gantry status RUN_ID
 ```
 
-The generated controller configuration registers only the smoke fixture.
-Add other repositories explicitly in `controller.toml` while the
-controller is stopped.
+The generated controller configuration registers only the smoke fixture,
+`gantry/fixture`, with `pool = "local"` and a bare Git repository as its
+`local_remote`. The profile's one worker slot is in the pool `local`, and
+the controller runs without `GH_TOKEN`. A repository added to the file
+(while the controller is stopped) therefore needs `pool = "local"` and an
+absolute `local_remote` path, since the controller cannot authenticate to
+GitHub. A slot added later needs its own `[[worker]]` entry.
 
 ### Prepare a remote worker
 
@@ -380,9 +386,12 @@ For a same-host rehearsal, use the loopback configuration in the
 ## Start a worker
 
 Pre-pull the digest-pinned action images for the slot's pool and the
-Alpine 3.22 collector image on each Docker host. The collector uses the
-digest in the controller example. Choose images containing `/bin/sh`, `tar`,
-and the toolchains your targets need. The action receives its selected Git
+collector image on each Docker host. The collector is a fixed Alpine 3.22
+image whose digest is compiled into the worker (`docker.gleam`), shown in the
+`docker pull` below. The controller example reuses that digest only as a
+sample action image, and nothing reads it from `controller.toml`. Choose
+action images containing `/bin/sh`, `tar`, and the toolchains your targets
+need. The action receives its selected Git
 files and verified upstream artifacts in a private tmpfs workspace.
 It runs without network access and has a read-only container root.
 For a worker sharing a host with a single controller, use
@@ -438,10 +447,13 @@ connection per controller origin.
 Infrastructure faults retry while they are safe to retry, and
 [otherwise become a failed action](architecture/runtime.md#worker-faults).
 To add slots, launch one supervisor-managed worker per slot with its own
-deployment-wide ID and directory, for example `linux-02` and
-`/srv/gantry/worker-linux-02`. Size their combined reservations to fit
-the host. No controller registration step is needed. Retain each
-directory and reuse the same worker ID on restart. The journal records
+deployment-wide ID, token, and directory, for example `linux-02` and
+`/srv/gantry/worker-linux-02`. Register each slot's ID and token digest as a
+`[[worker]]` entry on every controller, and restart the controllers. Size the
+slots' combined limits to fit the host, because the controller does not know
+how large the machine is. Adding slots is how a large host does more at once
+([how work is spread](scheduling.md), [add-a-machine checklist](operations.md#add-a-machine)).
+Retain each directory and reuse the same worker ID on restart. The journal records
 whether a container could have started and keeps unpublished outcomes
 until a controller acknowledges them.
 
@@ -498,7 +510,8 @@ the candidate, ends as `blocked` with its reason, and an action skipped
 after a failure shows step kind `skipped`.
 [CLI reference](cli.md)
 
-The [GitHub Actions example](examples/github-submit.yml) uses a trusted
+The [HTTP API reference](api.md) lists every route, status code, and the
+run-status JSON. The [GitHub Actions example](examples/github-submit.yml) uses a trusted
 manual workflow to submit an ordered list, wait for landing, and link the
 confirmed commit on the original PRs. GitHub can recognize the merge by
 ancestry. This path requires the configured GitHub identity to be allowed
@@ -509,15 +522,16 @@ the current target.
 
 ## Current implementation boundaries
 
-The first store replaces a bounded 4 MiB metadata snapshot with an atomic
-Khepri CAS. The controller trims finished runs and proofs to the
-`[retention]` bounds in `controller.toml` (200 runs and 1000 proofs by
-default). High-throughput placement and indexed state remain separate work. Startup and failover tests use real voters. The worker uses
-Docker while Loom executor integration awaits its own interop proof. The
-GitHub adapter and workflow require deployment validation on a live
-repository. The full gate exercises the same Git preparation and mutation
-against a local bare remote.
+[The status section](architecture/runtime.md#status) is the single record of
+what is built and what is open. Three limits matter when you size a
+deployment. The queue is one snapshot of at most 4 MiB, and the controller
+trims finished runs and proofs to the `[retention]` bounds in
+`controller.toml` (200 runs and 1000 proofs by default). Throughput on the
+whole-snapshot swap saturates near 20 actions per second on four vCPUs
+([measurements](controller-load.md#measurements-on-the-gleam-benchmark)).
+Blobs and candidate bundles are not collected.
 
 The API uses immutable commits and optional ad hoc actions. Workspace
-overlays, cancellation, and event cursors are described in the
-[design](architecture/build-and-submit.md) for later protocol work.
+overlays, cancellation, and event cursors are in the
+[target design](architecture/build-and-submit.md#what-is-built) for later
+protocol work.
