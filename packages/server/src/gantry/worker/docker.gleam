@@ -16,12 +16,14 @@ import gantry/worker/controllers
 import gantry_core/graph
 import gantry_core/queue
 import gleam/bit_array
+import gleam/erlang/process
 import gleam/int
 import gleam/list
 import gleam/result
 import gleam/set
 import gleam/string
 import simplifile
+import weft
 
 const collector =
   "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
@@ -454,15 +456,11 @@ fn run(
 
   // From here the action can run, so a restart must treat it as started.
   use Nil <- result.try(start() |> result.map_error(JournalFault))
-  use command <- result.try(
-    ffi_worker.docker(
-      ["start", "-a", container],
-      task.action.timeout * 1000,
-      65_536,
-      ffi_host.Combined,
-    )
-    |> result.map_error(Unavailable),
-  )
+  use command <- result.try(start_action(
+    name,
+    container,
+    task.action.timeout * 1000,
+  ))
   use log <- result.try(
     spool(with_truncation(command)) |> result.map_error(JournalFault),
   )
@@ -507,6 +505,100 @@ fn run(
         _ -> Ok(queue.Rejected("container failed to exit normally", log))
       }
     }
+  }
+}
+
+/// What the parked Docker client owner is told to do: `Launch` the client
+/// and send its outcome to `reply`, or `Abandon` without starting it.
+type Release {
+  Launch(reply: process.Subject(Result(ffi_host.Command, String)))
+  Abandon
+}
+
+/// How long past the action's own deadline Weft waits for the Docker client.
+const client_grace = 15_000
+
+/// Run `docker start -a` as a Weft task with a deadline.
+///
+/// The Docker client lives in a parked owner process that Weft monitors
+/// before the client can start. Removing the containers is the task's cancel
+/// capability, so every way the task can end early takes one path: the
+/// runner's own deadline, Weft's backstop deadline, and the death of the
+/// calling slot loop at shutdown. Each removes the container by name, which
+/// ends the attached client. The command is `Completed` with `TimedOut` when
+/// the runner's deadline fired first, and the log it captured survives.
+fn start_action(
+  name: String,
+  container: String,
+  wall: Int,
+) -> Result(ffi_host.Command, Fault) {
+  let ready = process.new_subject()
+  let owner =
+    process.spawn_unlinked(fn() {
+      let release = process.new_subject()
+      process.send(ready, release)
+
+      // A scope that died before launching leaves nobody to cancel. Give up.
+      case process.receive(release, client_grace) {
+        Ok(Launch(reply)) ->
+          process.send(
+            reply,
+            ffi_worker.docker(
+              ["start", "-a", container],
+              wall,
+              65_536,
+              ffi_host.Combined,
+            ),
+          )
+        Ok(Abandon) | Error(Nil) -> Nil
+      }
+    })
+
+  // The owner reports its release channel as soon as it is parked.
+  case process.receive(ready, 5000) {
+    Error(Nil) -> Error(Unavailable("could not start the Docker client owner"))
+    Ok(release) -> {
+      let cancel = fn() {
+        process.send(release, Abandon)
+        let _ = remove_container(name)
+        let _ = remove_container(name <> "-collector")
+        Nil
+      }
+      let begin = fn() {
+        let reply = process.new_subject()
+        process.send(release, Launch(reply))
+        wait_for_client(reply, wall + client_grace)
+      }
+      let outcomes =
+        weft.new_prepared([weft.prepared_leaf(owner:, cancel:, begin:)])
+        |> weft.deadline(wall + client_grace)
+        |> weft.cancel_grace(10_000)
+        |> weft.start
+
+      // One task ran, so one outcome says how the Docker client ended.
+      case outcomes {
+        [weft.Completed(_, command)] -> Ok(command)
+        [weft.Failed(_, reason)] -> Error(Unavailable(reason))
+
+        // Weft's backstop fired, so the cancel path already removed the
+        // container. Report a timeout without a log.
+        [weft.Abandoned(_)] ->
+          Ok(ffi_host.Command(ffi_host.TimedOut, <<>>, ffi_host.Complete))
+        _ -> Error(Unavailable("Docker client ended abnormally"))
+      }
+    }
+  }
+}
+
+/// Wait for the parked owner to report the Docker client's outcome.
+fn wait_for_client(
+  reply: process.Subject(Result(ffi_host.Command, String)),
+  within: Int,
+) -> Result(ffi_host.Command, String) {
+  // A missing report means the owner died before the client finished.
+  case process.receive(reply, within) {
+    Ok(outcome) -> outcome
+    Error(Nil) -> Error("Docker client did not report")
   }
 }
 

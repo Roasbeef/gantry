@@ -5,6 +5,8 @@ import gleam/dynamic/decode
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
+import simplifile
 import sqlight
 import worker_fixture
 
@@ -99,6 +101,7 @@ pub fn opening_compacts_rows_acknowledged_by_older_workers_test() {
       on: db,
     )
   assert count(db, "attempts") == 1
+  let assert Ok(Nil) = sqlight.close(db)
 
   let assert Ok(reopened) = custody.open(directory <> "/custody.sqlite3", "w1")
   assert count(reopened, "attempts") == 0
@@ -148,5 +151,30 @@ pub fn identical_artifact_digests_are_listed_once_test() {
   let assert Ok(Nil) = custody.record(db, name, assignment, completion)
   let assert Ok(Some(custody.Recorded(_, receipt))) = custody.pending(db)
   assert custody.referenced(receipt) == Ok([same])
+  worker_fixture.remove(directory)
+}
+
+pub fn a_second_open_of_a_held_journal_is_refused_test() {
+  let #(directory, db) = worker_fixture.journal()
+  let path = directory <> "/custody.sqlite3"
+  let assert Error(reason) = custody.open(path, "w1")
+  assert string.contains(reason, "another worker already owns")
+
+  // Releasing the first connection frees the slot for its next owner.
+  let assert Ok(Nil) = sqlight.close(db)
+  let assert Ok(_) = custody.open(path, "w1")
+  worker_fixture.remove(directory)
+}
+
+pub fn a_managed_journal_is_held_exclusively_too_test() {
+  let directory = worker_fixture.temp_directory()
+  let journal = directory <> "/journal"
+  let assert Ok(Nil) = simplifile.create_directory_all(journal)
+  let assert Ok(first) = custody.open_managed(directory, journal, "w1")
+  let assert Error(reason) = custody.open_managed(directory, journal, "w1")
+  assert string.contains(reason, "another worker already owns")
+
+  // The lock ends with the connection, so the first owner must stay alive.
+  let assert Ok(Nil) = sqlight.close(first)
   worker_fixture.remove(directory)
 }

@@ -71,13 +71,12 @@ pub type Cursor {
   Cursor(network: controllers.Controllers, cleaned: Option(String))
 }
 
-/// What one step accomplished.
+/// What one step accomplished. `Advanced` means work moved forward, so the
+/// next step can start at once. `Idled` means the controller had nothing for
+/// this slot. `Faulted` carries the fault, which says whether to retry.
 pub type Verdict {
-  /// Work moved forward, so the next step can start at once.
   Advanced
-  /// The controller had nothing for this slot.
   Idled
-  /// The step failed and the fault says whether to retry.
   Faulted(Fault)
 }
 
@@ -95,6 +94,7 @@ pub type Fault {
 /// // slot.step(slot, Cursor(network, None))
 /// ```
 pub fn step(slot: Slot, cursor: Cursor) -> #(Cursor, Verdict) {
+  // The journal's phase picks the effect. Only an empty journal may claim.
   case custody.pending(slot.db) {
     Error(reason) -> #(cursor, Faulted(Stop(reason)))
     Ok(None) -> claim(slot, cursor)
@@ -135,6 +135,8 @@ fn claim(slot: Slot, cursor: Cursor) -> #(Cursor, Verdict) {
       #("worker", json.string(slot.worker)),
       #("pool", json.string(slot.pool)),
     ])
+
+  // Only a 200 carries an assignment. A 204 means no eligible work.
   case send(cursor.network, http.Post, "/v1/claims", json.to_string(request)) {
     Error(fault) -> #(cursor, Faulted(fault))
     Ok(#(network, 204, _)) -> #(Cursor(..cursor, network:), Idled)
@@ -203,6 +205,7 @@ fn perform(
       fn(bytes) { custody.spool(slot.db, bytes) },
     )
 
+  // A finished action is recorded as it ended. Only a start fault retries.
   case result {
     Ok(completion) ->
       custody.record(slot.db, name, assignment, completion)
@@ -235,6 +238,7 @@ fn recorded(
   name: String,
   receipt: String,
 ) -> #(Cursor, Verdict) {
+  // Cleanup is idempotent, so run it once per attempt and remember that.
   let cleaned = case cursor.cleaned {
     Some(done) if done == name -> Ok(cursor)
     _ ->
@@ -243,9 +247,11 @@ fn recorded(
       |> result.replace(Cursor(..cursor, cleaned: Some(name)))
   }
 
+  // A cleanup fault keeps the receipt and retries on the next step.
   case cleaned {
     Error(fault) -> #(cursor, Faulted(fault))
     Ok(cursor) ->
+      // Publication releases the slot only after the controller answers.
       case publish(slot, cursor.network, name, receipt) {
         Ok(network) -> #(Cursor(network:, cleaned: None), Advanced)
         Error(fault) -> #(cursor, Faulted(fault))

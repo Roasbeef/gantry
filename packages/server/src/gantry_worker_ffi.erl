@@ -1,41 +1,6 @@
-%% OS resources that OTP ports and erl_tar can provide to the Gleam worker.
+%% Tar metadata and archive writing through erl_tar for the Gleam worker.
 -module(gantry_worker_ffi).
--export([lock/1, entries/1, archive_open/1, archive_add/3, archive_close/1]).
-
-lock(Path) ->
-    case os:find_executable("flock") of
-        false -> {error, <<"worker requires the flock executable">>};
-        Flock ->
-            Owner = self(),
-            Ref = make_ref(),
-            spawn(fun() -> hold_lock(Flock, Path, Owner, Ref) end),
-            receive {Ref, Reply} -> Reply
-            after 5000 -> {error, <<"worker lock did not respond">>}
-            end
-    end.
-
-hold_lock(Flock, Path, Owner, Ref) ->
-    Monitor = monitor(process, Owner),
-    try
-        Port = open_port({spawn_executable, Flock},
-                         [binary, exit_status, use_stdio,
-                          {args, ["-n", unicode:characters_to_list(Path), "/bin/sh", "-ec",
-                                  "printf 'locked\\n'; exec cat >/dev/null"]}]),
-        receive
-            {Port, {data, <<"locked\n">>}} ->
-                Owner ! {Ref, {ok, nil}},
-                receive
-                    {'DOWN', Monitor, process, Owner, _} -> port_close(Port);
-                    {Port, {exit_status, _}} -> erlang:halt(1)
-                end;
-            {Port, {exit_status, _}} ->
-                Owner ! {Ref, {error, <<"cannot acquire worker directory lock">>}};
-            {'DOWN', Monitor, process, Owner, _} -> port_close(Port)
-        end
-    catch
-        error:badarg -> Owner ! {Ref, {error, <<"cannot start worker directory lock">>}};
-        error:system_limit -> Owner ! {Ref, {error, <<"worker lock port limit reached">>}}
-    end.
+-export([entries/1, archive_open/1, archive_add/3, archive_close/1]).
 
 entries(Bytes) ->
     try erl_tar:table({binary, Bytes}, [verbose]) of

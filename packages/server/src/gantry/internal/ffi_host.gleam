@@ -5,11 +5,11 @@
 //// deadline it kills the child by pid and returns the bytes captured so far.
 //// The private `halt` binding reports a startup failure to the supervisor.
 
-/// Which environment the child receives.
+/// Which environment the child receives. `Inherit` is the VM's environment
+/// with the overrides added or replaced. `Clear` is exactly the `KEY=VALUE`
+/// settings and nothing else, through `env -i`.
 pub type Environment {
-  /// The VM's environment with these values added or replaced.
   Inherit(overrides: List(#(String, String)))
-  /// Exactly these settings and nothing else, through `env -i`.
   Clear(settings: List(String))
 }
 

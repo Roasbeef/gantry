@@ -1,4 +1,4 @@
-//// The worker adapter exposes OS locking, bounded Docker ports, and tar
+//// The worker adapter exposes the bounded Docker runner and tar
 //// metadata. Decisions about work and result publication stay in Gleam.
 
 import envoy
@@ -15,16 +15,6 @@ pub type Entry {
 
 /// An open, worker-owned dependency archive.
 pub type Archive
-
-/// Hold an exclusive OS lock for the life of the worker VM.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // ffi_worker.lock("/srv/gantry/worker/slot.lock")
-/// ```
-@external(erlang, "gantry_worker_ffi", "lock")
-pub fn lock(path: String) -> Result(Nil, String)
 
 /// Run Docker with a cleared environment and a bounded output stream.
 ///
