@@ -94,6 +94,11 @@ collect(Port, Deadline, Remaining, Parts, Truncated) ->
         {ok, {command, timed_out, bytes(Parts), completeness(Truncated)}}
     end.
 
+%% Run kill with Args and return its exit status, or -1 if it did not finish.
+signal(Kill, Args) ->
+    Killer = open_port({spawn_executable, Kill}, [exit_status, {args, Args}]),
+    receive {Killer, {exit_status, Status}} -> Status after 2000 -> -1 end.
+
 %% Kill the child's process group, then release the port. erl_child_setup
 %% starts every port child in a new session, so its pid is also its group ID,
 %% and the negative pid reaches the children it started, such as the helpers
@@ -103,9 +108,11 @@ kill(Port) ->
     case {erlang:port_info(Port, os_pid), os:find_executable("kill")} of
         {{os_pid, Pid}, Kill} when Kill =/= false ->
             try
-                Killer = open_port({spawn_executable, Kill},
-                                   [exit_status, {args, ["-KILL", "--", "-" ++ integer_to_list(Pid)]}]),
-                receive {Killer, {exit_status, _}} -> ok after 2000 -> ok end
+                case signal(Kill, ["-KILL", "--", "-" ++ integer_to_list(Pid)]) of
+                    0 -> ok;
+                    %% A kill that rejects the group form still stops the child.
+                    _ -> signal(Kill, ["-KILL", integer_to_list(Pid)])
+                end
             catch error:_ -> ok
             end;
         _ -> ok
