@@ -103,9 +103,11 @@ duplicate name, a cycle, and two actions whose outputs overlap.
 | `deps` | `[]` | Actions whose output files are staged here and become part of this action's cache key |
 | `after` | `[]` | Actions that must pass first, with no files passed and no effect on the key |
 | `timeout` | 300 | Wall seconds, 1 to 3600 |
+| `git` | `"none"` | `"shallow"` stages a `.git` for the action's commit, with its parents cut off, and adds that commit to the action's cache key. Without it the action sees no `.git` and its key does not depend on the commit |
 
 Paths are at most 240 bytes with components of letters, digits, `-`, `.`, and
-`_`, and none may be `.`, `..`, or `.git`. Everything else a project might
+`_`, and none may be `.`, `..`, or `.git`. A source tree may be larger than one
+blob (up to 512 MiB); Gantry stores it in verified chunks. Everything else a project might
 want to say per action (the image, the pool, the CPU and memory it needs) is
 not in the manifest. Image and pool come from the repository entry, and a
 slot's resource limits come from the worker that runs it.
