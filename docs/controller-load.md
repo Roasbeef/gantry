@@ -75,7 +75,7 @@ when comparing builds, and alternate old and new controllers to reduce drift.
 
 ## Measurements on the Gleam benchmark
 
-These runs used a four-vCPU Linux host (blue-knight), 100 repositories,
+These runs used a four-vCPU Linux host, 100 repositories,
 50 ms actions, and three samples per cell, and report the median. They
 predate the retention fix (`[retention]` in `controller.toml`), so a sample's
 snapshot grew with every retained run. The measured target is the one in
