@@ -62,7 +62,11 @@ authenticate to GitHub. Edit the file while the controller is stopped.
 ### A worker is lost
 
 A lease carries a deadline: the claim time plus the action's `timeout` plus
-150 seconds. Nothing renews it. Every claim from any slot first expires the
+600 seconds, which covers collecting, journaling, and uploading outputs after
+the action exits. Nothing renews it. Lease times are wall-clock seconds taken
+on whichever controller serves the poll, so keep the controllers' clocks in
+sync with NTP: a clock step forward larger than that slack expires live
+leases. Every claim from any slot first expires the
 leases past their deadline. An expired action goes back to `pending` with one
 more attempt, and the next eligible poll can lease it to another slot. The
 third lapse fails the run: the action's step becomes `expired`, the run's

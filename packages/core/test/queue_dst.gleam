@@ -282,7 +282,8 @@ fn restart(world: World) -> World {
 
 /// Let time pass so held leases lapse, then run the controller's expiry tick.
 fn elapse(world: World) -> World {
-  let clock = world.clock + 200
+  // The jump outlasts the lease slack plus the fixture's action timeout.
+  let clock = world.clock + 1000
   let durable = queue.expire(world.durable, clock)
   let lapsed = active_count(world.durable) - active_count(durable)
   World(..world, clock:, durable:) |> add("expiries", lapsed)

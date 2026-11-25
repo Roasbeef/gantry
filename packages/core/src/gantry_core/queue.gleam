@@ -73,8 +73,12 @@ pub const max_attempts = 3
 /// The longest externally supplied reason the core stores, in bytes.
 pub const max_detail_bytes = 1024
 
-/// Slack between an action's timeout and the lease deadline, in time units.
-const lease_slack = 150
+/// Slack between an action's timeout and the lease deadline, in seconds. It
+/// covers the worker's fixed work after the action exits: collecting outputs,
+/// journaling, cleanup, and uploading up to the blob limit at the worker's
+/// slowest accepted transfer rate. Too little slack expires a lease whose
+/// valid result is still on its way.
+const lease_slack = 600
 
 /// A regular file staged by content digest.
 pub type Artifact {

@@ -791,7 +791,8 @@ fn offer_placeholder(offers: List(queue.Preparation)) -> queue.Preparation {
 
 /// Let time pass and run the controller's expiry tick.
 fn elapse(world: World, k: Int) -> World {
-  let world = World(..world, clock: world.clock + 300)
+  // The jump outlasts the lease slack plus the fixture's action timeout.
+  let world = World(..world, clock: world.clock + 1000)
   commit(world, k, queue.expire(world.durable, world.clock))
 }
 
@@ -1268,6 +1269,9 @@ fn heal(world: World, round: Int, rounds: Int) -> World {
       |> event(complete(_, k, "test", False, False))
       |> drain(k, 12)
       |> drain(1 - k, 12)
+      // Live workers have finished this round's work, so any lease still held
+      // belongs to a vanished worker. Its expiry lets the action move on.
+      |> elapse(k)
       |> heal(round + 1, rounds)
     }
   }
