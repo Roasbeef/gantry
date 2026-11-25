@@ -487,6 +487,15 @@ as JSON lines. Pass a file containing one action as the optional final
 CLI argument for isolated ad hoc work. Ad hoc keys are scoped to their
 run ID. The submit token can admit or inspect submissions. It cannot
 claim work or upload worker outputs.
+
+A submission pins the heads of its pull requests and waits. The controller
+builds the candidate on the branch's current tip only when the group heads
+its lane, so a group queued behind another is built on the commit the first
+one lands. A waiting group shows phase `waiting`. A pinned head that moved,
+a merge conflict, or a provider refusal ends it as `unprepared` with a typed
+reason. A landing that GitHub policy denies, or a target that moved outside
+the candidate, ends as `blocked` with its reason, and an action skipped
+after a failure shows step kind `skipped`.
 [CLI reference](cli.md)
 
 The [GitHub Actions example](examples/github-submit.yml) uses a trusted
@@ -501,8 +510,9 @@ the current target.
 ## Current implementation boundaries
 
 The first store replaces a bounded 4 MiB metadata snapshot with an atomic
-Khepri CAS. High-throughput placement, indexed state and retention remain
-separate work. Startup and failover tests use real voters. The worker uses
+Khepri CAS. The controller trims finished runs and proofs to the
+`[retention]` bounds in `controller.toml` (200 runs and 1000 proofs by
+default). High-throughput placement and indexed state remain separate work. Startup and failover tests use real voters. The worker uses
 Docker while Loom executor integration awaits its own interop proof. The
 GitHub adapter and workflow require deployment validation on a live
 repository. The full gate exercises the same Git preparation and mutation

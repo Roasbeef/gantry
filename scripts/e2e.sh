@@ -168,7 +168,7 @@ worker_pid=${pids[3]}
 matches() {
   get "$1/v1/runs/$2" > "$tmp/current.json" || return 1
   if jq -e "$3" "$tmp/current.json" >/dev/null; then return 0; fi
-  if jq -e '.phase == "failed" or .phase == "blocked"' "$tmp/current.json" >/dev/null; then
+  if jq -e '.phase == "failed" or .phase == "blocked" or .phase == "unprepared"' "$tmp/current.json" >/dev/null; then
     cat "$tmp/current.json" >&2
     exit 1
   fi
@@ -192,6 +192,11 @@ run "${endpoints[2]}" cutoff "$changed"
 wait_for 'unchanged normalized bytes to reuse consumer' matches "${endpoints[1]}" cutoff '
   .phase == "passed" and ([.work[] | {(.task.action.name):.step.kind}] | add == {normalize:"passed",collect:"reused"})'
 post "${endpoints[2]}/v1/submits" "$GANTRY_SUBMIT_TOKEN" '{"id":"group","repo":"fixture/project","pulls":[12,13]}'
+
+# Admission pins the pulls and builds nothing. The reconciler builds the
+# candidate once the group heads the free lane.
+jq -e '.submission.kind == "waiting" and (.submission.members | map(.pull) == [12, 13]) and .work == []' \
+  "$tmp/post.json" >/dev/null
 wait_for 'tested group to land' matches "${endpoints[1]}" group '.phase == "landed"'
 candidate=$(jq -er '.submission.candidate.commit' "$tmp/current.json")
 [[ $(git -C "$remote" rev-parse refs/heads/main) == "$candidate" ]]
@@ -221,6 +226,31 @@ g push -q "$remote" HEAD:refs/heads/main
 wait_for 'stale base to block landing' matches "${endpoints[2]}" race '.phase == "blocked"'
 [[ $(git -C "$remote" rev-parse refs/heads/main) == "$winner" ]]
 echo "Passed stale-base protection at $winner"
+
+# A second group queued behind the first waits, and is built on the commit
+# the first one lands, never on the base it saw at admission.
+for pull in 15 16; do
+  g checkout -q --detach "$winner"
+  echo "held-$pull" > "$source_dir/held-$pull.txt"
+  g add "held-$pull.txt"
+  g commit -qm "Held $pull"
+  g push -q "$remote" "HEAD:refs/pull/$pull/head"
+done
+post "${endpoints[1]}/v1/submits" "$GANTRY_SUBMIT_TOKEN" '{"id":"held-a","repo":"fixture/project","pulls":[15]}'
+post "${endpoints[2]}/v1/submits" "$GANTRY_SUBMIT_TOKEN" '{"id":"held-b","repo":"fixture/project","pulls":[16]}'
+jq -e '.phase == "waiting" and .work == []' "$tmp/post.json" >/dev/null
+wait_for 'first held group to land' matches "${endpoints[1]}" held-a '.phase == "landed"'
+first_held=$(jq -er '.submission.candidate.commit' "$tmp/current.json")
+[[ $(jq -er '.submission.candidate.base' "$tmp/current.json") == "$winner" ]]
+wait_for 'second held group to land' matches "${endpoints[1]}" held-b '.phase == "landed"'
+second_held=$(jq -er '.submission.candidate.commit' "$tmp/current.json")
+[[ $(jq -er '.submission.candidate.base' "$tmp/current.json") == "$first_held" ]]
+[[ $(git -C "$remote" rev-parse refs/heads/main) == "$second_held" ]]
+for rev in "$first_held" refs/pull/15/head refs/pull/16/head; do
+  git -C "$remote" merge-base --is-ancestor "$rev" "$second_held"
+done
+echo 'Passed deferred preparation: the second group was built on the first group tip'
+
 echo "Passed DAG, seed loss during active lease, early cutoff, grouped landing and artifact byte checks ($candidate)"
 
 # Check an agent-only failure through the normal CLI and read its persisted log.

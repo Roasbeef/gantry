@@ -1,23 +1,7 @@
-//// A provider request binds a pull number to an immutable Git revision.
 //// Identifier validators keep remote and ref operands in the GitHub domain.
 
-import gleam/int
 import gleam/list
 import gleam/string
-
-/// Whether the entry may advance the target branch.
-pub type Mode {
-  /// Run the build and record its outcome.
-  Build
-
-  /// Submit the tested commit after a successful build.
-  Submit
-}
-
-/// A validated, immutable queue request.
-pub type Request {
-  Request(repository: String, pull: Int, head: String, mode: Mode)
-}
 
 /// Check the spelling allowed for a github.com repository slug.
 ///
@@ -62,15 +46,4 @@ pub fn valid_sha(sha: String) -> Bool {
     let n = string.utf_codepoint_to_int(point)
     { n >= 48 && n <= 57 } || { n >= 97 && n <= 102 }
   })
-}
-
-/// Format a pull request number for a GitHub URL or ref.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // job.pull_number(request)
-/// ```
-pub fn pull_number(request: Request) -> String {
-  int.to_string(request.pull)
 }

@@ -41,6 +41,7 @@ import gantry/bench/load.{
   Usage, Window,
 }
 import gantry/blobs
+import gantry/config
 import gantry/internal/ffi_bench
 import gantry/internal/ffi_host
 import gantry_core/graph
@@ -274,7 +275,12 @@ fn remote(root: String, index: Int) -> String {
 }
 
 /// Write the voter's configuration with every repository registered.
-fn configuration(settings: Settings, root: String, index: Int) -> String {
+fn configuration(
+  settings: Settings,
+  root: String,
+  index: Int,
+  worker_token: String,
+) -> String {
   // The first voter bootstraps the cluster, and later voters join it.
   let seed = case index {
     0 -> ""
@@ -292,13 +298,33 @@ fn configuration(settings: Settings, root: String, index: Int) -> String {
       <> image
       <> "\"\n"
     })
+  // Each lane is a registered worker with its own credential.
+  let workers =
+    load.indices(settings.workers)
+    |> list.map(fn(lane) {
+      "\n[[worker]]\nid = \"worker-"
+      <> int.to_string(lane)
+      <> "\"\ntoken_sha256 = \""
+      <> config.token_digest(lane_token(worker_token, lane))
+      <> "\"\n"
+    })
   string.concat([
     "data_dir = \"" <> root <> "/data-" <> int.to_string(index) <> "\"\n",
     "blob_dir = \"" <> root <> "/blobs\"\n",
     "port = " <> int.to_string(settings.port + index) <> "\n",
     "seed = \"" <> seed <> "\"\n",
-    ..repositories
+    ..list.append(repositories, workers)
   ])
+}
+
+/// The credential of one worker lane, derived from the sample's secret.
+fn lane_token(secret: String, lane: Int) -> String {
+  secret <> "-" <> int.to_string(lane)
+}
+
+/// The credential a lane presents to the controller.
+fn worker_credential(bench: Bench, lane: Int) -> String {
+  lane_token(bench.worker_token, lane)
 }
 
 /// The distributed Erlang name of voter `index`.
@@ -336,7 +362,10 @@ fn boot(
         <> cookie
       let spawned = {
         use Nil <- result.try(
-          simplifile.write(config, configuration(settings, root, index))
+          simplifile.write(
+            config,
+            configuration(settings, root, index, worker_token),
+          )
           |> result.replace_error("cannot write voter configuration"),
         )
 
@@ -728,7 +757,7 @@ fn claim(bench: Bench, lane: Int) -> Result(Leased, String) {
     bench,
     node,
     "/v1/claims",
-    bench.worker_token,
+    worker_credential(bench, lane),
     body,
     protocol.assignment_decoder(),
   ))
@@ -770,7 +799,7 @@ fn execute(
     bench,
     node,
     "/v1/blobs/" <> offer.task.source,
-    bench.worker_token,
+    worker_credential(bench, lane),
   ))
   use Nil <- result.try(require(
     blobs.digest(source) == offer.task.source,
@@ -804,8 +833,8 @@ fn execute(
       && output == bit_array.from_string(expected),
     "unexpected action output",
   ))
-  use output <- result.try(stage(bench, node, output))
-  use log <- result.try(stage(bench, node, bit_array.from_string(log)))
+  use output <- result.try(stage(bench, node, lane, output))
+  use log <- result.try(stage(bench, node, lane, bit_array.from_string(log)))
   let report =
     json.object([
       #("run", json.string(offer.run)),
@@ -824,7 +853,7 @@ fn execute(
     bench,
     node,
     "/v1/results",
-    bench.worker_token,
+    worker_credential(bench, lane),
     report,
     decode.at(["accepted"], decode.bool),
   ))
@@ -833,14 +862,19 @@ fn execute(
 
 /// Upload bytes under their digest and return the digest the controller
 /// confirmed storing.
-fn stage(bench: Bench, node: Int, bytes: BitArray) -> Result(String, String) {
+fn stage(
+  bench: Bench,
+  node: Int,
+  lane: Int,
+  bytes: BitArray,
+) -> Result(String, String) {
   let id = blobs.digest(bytes)
   use #(_, reply) <- result.try(exchange(
     bench,
     node,
     http.Put,
     "/v1/blobs/" <> id,
-    bench.worker_token,
+    worker_credential(bench, lane),
     Some(#("application/octet-stream", bytes)),
   ))
   use saved <- result.try(decoded(reply, decode.at(["digest"], decode.string)))
@@ -866,7 +900,7 @@ fn idle(bench: Bench) -> Result(Window, String) {
             bench,
             lane % settings.voters,
             "/v1/claims",
-            bench.worker_token,
+            worker_credential(bench, lane),
             body,
             protocol.assignment_decoder(),
           ))
