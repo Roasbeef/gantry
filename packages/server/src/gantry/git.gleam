@@ -149,8 +149,43 @@ pub fn scratch(s: Session, name: String) -> String {
 
 /// Preserve Git exit codes for commands with meaningful negative answers.
 fn raw(s: Session, args: List(String)) -> Result(#(Int, String), Fault) {
-  ffi_host.run("git", list.append(["-C", s.dir], args), s.env, 120_000)
-  |> result.map_error(fault.Unavailable)
+  case ffi_host.run("git", list.append(["-C", s.dir], args), s.env, 120_000) {
+    Ok(reply) -> Ok(reply)
+
+    // The runner kills only the Git process it started when its deadline
+    // passes, and a killed Git cannot remove the lock files it created.
+    // This session holds the repository's lock, so no other Git of ours is
+    // using the mirror, and a lock file left behind is stale. Without this a
+    // single timeout would fail every later fetch with "File exists".
+    Error(reason) -> {
+      clear_locks(s.dir)
+      Error(fault.Unavailable(reason))
+    }
+  }
+}
+
+/// Delete the `.lock` files a killed Git leaves in a mirror. Callers hold the
+/// repository's session lock, so every lock file found is stale.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // git.clear_locks("/data/mirrors/owner/project.git")
+/// ```
+pub fn clear_locks(directory: String) -> Nil {
+  case simplifile.get_files(directory) {
+    Ok(files) ->
+      list.each(files, fn(path) {
+        case string.ends_with(path, ".lock") {
+          True -> {
+            let _ = simplifile.delete_file(path)
+            Nil
+          }
+          False -> Nil
+        }
+      })
+    Error(_) -> Nil
+  }
 }
 
 /// Execute Git with structured arguments.

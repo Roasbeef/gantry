@@ -1,48 +1,54 @@
-//// The worker keeps one physical slot locked until the controller accepts
-//// or fences its durable result. The journal separates preparation, a
-//// possible Docker start, and a recorded completion.
+//// The worker owns one physical slot until the controller accepts or fences
+//// its durable result. The journal separates preparation, a possible Docker
+//// start, and a recorded completion.
+////
+//// ## Flow
+////
+//// `main` calls `boot`, which opens the journal and takes its exclusive
+//// lock. `supervise` then starts the slot loop under a supervisor, and
+//// `on_message` advances the slot once per tick. `poll_delay` spaces ticks
+//// after an idle poll or a retryable fault.
+////
+//// ```text
+//// main -> boot -> supervise -> on_message -> slot.step -> next Tick
+//// ```
+////
+//// | Verdict           | Next Tick                                  | Invariant kept                          |
+//// | ----------------- | ------------------------------------------ | --------------------------------------- |
+//// | `Advanced`        | at once, with the idle streak reset        | work is never delayed after progress    |
+//// | `Idled`           | after a jittered delay, up to 2 s          | idle polling stays below one per second |
+//// | `Faulted(Retry)`  | after the same delay                       | a transient fault never spins           |
+//// | `Faulted(Stop)`   | none, the VM exits                         | untrusted custody never continues       |
+////
+//// The slot loop is a supervised Weft actor, so a crash restarts it with the
+//// same journal. The exclusive lock lives on the SQLite connection that
+//// `boot` opens, which `main` keeps alive, so a restart cannot admit a
+//// second worker. A custody fault does not restart: it halts the VM, since
+//// a restart would resume from the same untrusted journal.
 
 import envoy
-import gantry/blobs
 import gantry/internal/ffi_host
-import gantry/internal/ffi_worker
 import gantry/worker/controllers
 import gantry/worker/custody
 import gantry/worker/docker
+import gantry/worker/slot
 import gantry_core/graph
-import gantry_core/queue
-import gleam/bit_array
 import gleam/erlang/process
-import gleam/http
 import gleam/int
 import gleam/io
-import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{None}
+import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import gleam/string
 import simplifile
-import sqlight
+import weft/actor
 
-type Slot {
-  Slot(
-    directory: String,
-    worker: String,
-    pool: String,
-    db: sqlight.Connection,
-    limits: docker.Limits,
-  )
-}
+/// The first idle or retry delay ceiling, in milliseconds.
+const first_delay = 500
 
-type Step {
-  Idle(controllers.Controllers)
-  Advance(controllers.Controllers)
-}
-
-type Fault {
-  Retry(reason: String)
-  Stop(reason: String)
-}
+/// The delay ceiling once a streak of idle polls has built up.
+const longest_delay = 2000
 
 /// Run a remote executor using the configured physical slot and controller list.
 ///
@@ -53,13 +59,13 @@ type Fault {
 /// ```
 pub fn main() -> Nil {
   case boot() {
-    Ok(#(slot, network)) -> loop(slot, network)
+    Ok(#(current, network)) -> supervise(current, network)
     Error(reason) -> stop(reason)
   }
 }
 
 /// Validate the slot configuration and acquire its journal exclusively.
-fn boot() -> Result(#(Slot, controllers.Controllers), String) {
+fn boot() -> Result(#(slot.Slot, controllers.Controllers), String) {
   use worker <- result.try(identity("GANTRY_WORKER_ID"))
   use pool <- result.try(identity("GANTRY_POOL"))
   use endpoint <- result.try(required("GANTRY_ENDPOINT"))
@@ -68,237 +74,134 @@ fn boot() -> Result(#(Slot, controllers.Controllers), String) {
   use limits <- result.try(docker.limits())
   use raw_directory <- result.try(required("GANTRY_WORKER_DIR"))
   use directory <- result.try(worker_directory(raw_directory))
-  use Nil <- result.try(ffi_worker.lock(directory <> "/slot.lock"))
 
+  // Opening the journal takes its exclusive lock before anything else runs.
   // A managed profile must preserve custody even if its journal is removed.
   use db <- result.try(case envoy.get("GANTRY_WORKER_GUARD") {
     Ok(profile) -> custody.open_managed(profile, directory, worker)
     Error(Nil) -> custody.open(directory <> "/custody.sqlite3", worker)
   })
 
-  Ok(#(Slot(directory, worker, pool, db, limits), network))
-}
+  use Nil <- result.try(docker.preflight())
 
-/// Poll the controller or advance the recorded attempt until stopped.
-fn loop(slot: Slot, network: controllers.Controllers) -> Nil {
-  // Only retry temporary faults. Stop when local custody cannot be trusted.
-  case step(slot, network) {
-    Ok(Advance(next)) -> loop(slot, next)
-    Ok(Idle(next)) -> {
-      process.sleep(1000)
-      loop(slot, next)
-    }
-    Error(Retry(reason)) -> {
-      io.println_error("gantry worker: " <> reason)
-      process.sleep(1000)
-      loop(slot, network)
-    }
-    Error(Stop(reason)) -> stop(reason)
-  }
-}
-
-/// Choose an effect from the persisted phase before requesting any new work.
-fn step(slot: Slot, network: controllers.Controllers) -> Result(Step, Fault) {
-  use pending <- result.try(custody.pending(slot.db) |> result.map_error(Stop))
-
-  // A recorded or interrupted attempt owns the slot until it is resolved.
-  case pending {
-    None -> claim(slot, network)
-    Some(custody.Recorded(name, receipt)) ->
-      publish(slot, network, name, receipt)
-    Some(custody.Interrupted(name, assignment)) -> {
-      use Nil <- result.try(
-        docker.cleanup(slot.directory, name) |> result.map_error(cleanup_fault),
-      )
-      reject(
-        slot,
-        name,
-        assignment,
-        "worker interrupted before recording outcome",
-      )
-      |> result.replace(Advance(network))
-    }
-    Some(custody.Ready(name, assignment)) ->
-      perform(slot, network, name, assignment)
-      |> result.replace(Advance(network))
-  }
-}
-
-/// Persist the controller's assignment before the next loop can execute it.
-fn claim(slot: Slot, network: controllers.Controllers) -> Result(Step, Fault) {
-  let request =
-    json.object([
-      #("worker", json.string(slot.worker)),
-      #("pool", json.string(slot.pool)),
-    ])
-  use #(next, status, body) <- result.try(send(
-    network,
-    http.Post,
-    "/v1/claims",
-    json.to_string(request),
-  ))
-
-  // Only a successful claim response carries an assignment.
-  case status {
-    204 -> Ok(Idle(next))
-    200 -> {
-      use payload <- result.try(
-        bit_array.to_string(body)
-        |> result.replace_error(Stop("assignment is not UTF-8")),
-      )
-      use assignment <- result.try(
-        custody.assignment(payload) |> result.map_error(Stop),
-      )
-
-      // The lease must name this exact capacity slot and pool.
-      let owned = case
-        queue.lease_worker(assignment.lease) == slot.worker
-        && assignment.task.pool == slot.pool
-      {
-        True -> Ok(Nil)
-        False -> Error(Stop("assignment does not match this worker and pool"))
-      }
-
-      use Nil <- result.try(owned)
-
-      let identity =
-        json.array(
-          [
-            json.string(slot.directory),
-            json.string(slot.worker),
-            json.string(assignment.run),
-            json.string(assignment.task.action.name),
-            json.int(queue.lease_serial(assignment.lease)),
-          ],
-          fn(value) { value },
-        )
-      let name =
-        "gantry-"
-        <> blobs.digest(bit_array.from_string(json.to_string(identity)))
-      custody.claim(slot.db, name, assignment)
-      |> result.map_error(Stop)
-      |> result.replace(Advance(next))
-    }
-    _ -> Error(Retry("claim returned HTTP " <> int.to_string(status)))
-  }
-}
-
-/// Run the assigned action and durably record its outcome after cleanup.
-fn perform(
-  slot: Slot,
-  network: controllers.Controllers,
-  name: String,
-  assignment: queue.Assignment,
-) -> Result(Nil, Fault) {
-  let result =
-    docker.execute(
-      slot.directory,
-      name,
-      assignment,
-      slot.limits,
-      network,
-      fn() { custody.mark_started(slot.db, name) },
-      fn(bytes) { custody.spool(slot.db, bytes) },
-    )
-
-  // Release Docker resources before recording a successful attempt result.
-  case result {
-    Ok(completion) -> {
-      use Nil <- result.try(
-        docker.cleanup(slot.directory, name) |> result.map_error(cleanup_fault),
-      )
-      custody.record(slot.db, name, assignment, completion)
-      |> result.map_error(Stop)
-    }
-    Error(docker.Rejected(reason)) -> {
-      use Nil <- result.try(
-        docker.unstage(slot.directory, name) |> result.map_error(cleanup_fault),
-      )
-      reject(slot, name, assignment, reason)
-    }
-    Error(docker.Unavailable(reason)) -> Error(Retry(reason))
-    Error(docker.JournalFault(reason)) -> Error(Stop(reason))
-  }
-}
-
-/// Stage the reason as a log before making the failure publishable.
-fn reject(
-  slot: Slot,
-  name: String,
-  assignment: queue.Assignment,
-  reason: String,
-) -> Result(Nil, Fault) {
-  use log <- result.try(
-    custody.spool(slot.db, bit_array.from_string(reason))
-    |> result.map_error(Stop),
-  )
-  custody.record(slot.db, name, assignment, queue.Rejected(reason, log))
-  |> result.map_error(Stop)
-}
-
-/// Send journaled bytes before publishing the receipt that refers to them.
-fn publish(
-  slot: Slot,
-  network: controllers.Controllers,
-  name: String,
-  receipt: String,
-) -> Result(Step, Fault) {
-  use digests <- result.try(custody.digests(slot.db) |> result.map_error(Stop))
-  use next <- result.try(
-    list.try_fold(digests, network, fn(network, digest) {
-      use bytes <- result.try(
-        custody.blob(slot.db, digest) |> result.map_error(Stop),
-      )
-      use #(next, status, _) <- result.try(
-        controllers.call(
+  let engine =
+    slot.Engine(
+      execute: fn(name, assignment, network, start, spool) {
+        docker.execute(
+          directory,
+          name,
+          assignment,
+          limits,
           network,
-          http.Put,
-          "/v1/blobs/" <> digest,
-          bytes,
-          "application/octet-stream",
+          start,
+          spool,
         )
-        |> result.map_error(network_fault),
-      )
+      },
+      cleanup: fn(name) { docker.cleanup(directory, name) },
+    )
+  Ok(#(slot.Slot(directory, worker, pool, db, engine), network))
+}
 
-      // Advance publication only after the blob is acknowledged.
-      case status {
-        200 -> Ok(next)
-        _ -> Error(Retry("blob upload returned HTTP " <> int.to_string(status)))
-      }
-    }),
+/// What the slot loop receives: its own timer.
+type Message {
+  Tick
+}
+
+/// The slot, the loop's cursor and the count of consecutive empty polls.
+type Loop {
+  Loop(
+    current: slot.Slot,
+    cursor: slot.Cursor,
+    streak: Int,
+    self: process.Subject(Message),
   )
-  use #(next, status, _) <- result.try(send(
-    next,
-    http.Post,
-    "/v1/results",
-    receipt,
-  ))
+}
 
-  // An accepted or fenced receipt releases this slot for its next claim.
-  case status {
-    200 | 409 ->
-      custody.acknowledge(slot.db, name)
-      |> result.map_error(Stop)
-      |> result.replace(Advance(next))
-    _ -> Error(Retry("completion returned HTTP " <> int.to_string(status)))
+/// Run the slot loop under a supervisor and exit when the supervisor does.
+fn supervise(current: slot.Slot, network: controllers.Controllers) -> Nil {
+  let loop =
+    actor.new_with_initialiser(5000, fn(self) {
+      actor.initialised(Loop(current, slot.Cursor(network, None), 0, self))
+      |> actor.returning(self)
+      |> actor.continuing(Tick)
+      |> Ok
+    })
+    |> actor.on_message(on_message)
+
+  // A loop that keeps crashing exhausts the tolerance and ends the VM, so the
+  // service manager restarts the worker with a clean process state.
+  let tree =
+    supervisor.new(supervisor.OneForOne)
+    |> supervisor.restart_tolerance(intensity: 5, period: 60)
+    |> supervisor.add(actor.supervised(loop))
+
+  // The VM exits with the supervisor, so a dead slot never idles unnoticed.
+  case supervisor.start(tree) {
+    Ok(started) -> {
+      process.new_selector()
+      |> process.select_specific_monitor(
+        process.monitor(started.pid),
+        fn(_down) { Nil },
+      )
+      |> process.selector_receive_forever
+      stop("worker supervisor exited")
+    }
+    Error(_) -> stop("cannot start the worker supervisor")
   }
 }
 
-/// Send one JSON request with the slot's controller credential.
-fn send(
-  network: controllers.Controllers,
-  method: http.Method,
-  path: String,
-  payload: String,
-) -> Result(#(controllers.Controllers, Int, BitArray), Fault) {
-  controllers.call(
-    network,
-    method,
-    path,
-    bit_array.from_string(payload),
-    "application/json",
-  )
-  |> result.map_error(network_fault)
+/// Advance the slot once and schedule the next tick from its verdict.
+fn on_message(state: Loop, _message: Message) -> actor.Next(Loop, Message) {
+  // An empty or failed poll waits out a jittered delay and lengthens the streak.
+  let pause = fn(cursor) {
+    process.send_after(
+      state.self,
+      poll_delay(state.streak, int.random(1000)),
+      Tick,
+    )
+    actor.continue(Loop(..state, cursor:, streak: state.streak + 1))
+  }
+
+  // Only retry temporary faults. Stop when local custody cannot be trusted.
+  case slot.step(state.current, state.cursor) {
+    #(cursor, slot.Advanced) -> {
+      process.send(state.self, Tick)
+      actor.continue(Loop(..state, cursor:, streak: 0))
+    }
+    #(cursor, slot.Idled) -> pause(cursor)
+    #(cursor, slot.Faulted(slot.Retry(reason))) -> {
+      io.println_error("gantry worker: " <> reason)
+      pause(cursor)
+    }
+    #(_, slot.Faulted(slot.Stop(reason))) -> {
+      stop(reason)
+      actor.stop()
+    }
+  }
+}
+
+/// The wait after `streak` consecutive idle or failed polls.
+///
+/// The ceiling is 500 ms, then 1 s, then 2 s for every later poll, and the
+/// wait is somewhere in the upper half of that ceiling. `entropy` is a
+/// number from 0 to 999 that spreads slots so they do not poll in step.
+///
+/// ## Examples
+///
+/// ```gleam
+/// worker.poll_delay(0, 0)
+/// // -> 250
+/// ```
+pub fn poll_delay(streak: Int, entropy: Int) -> Int {
+  // The ceiling doubles once, then stays at its cap.
+  let ceiling = case streak {
+    0 -> first_delay
+    1 -> first_delay * 2
+    _ -> longest_delay
+  }
+
+  let half = ceiling / 2
+  half + half * int.clamp(entropy, 0, 999) / 1000
 }
 
 /// Resolve and protect the directory shared with the Docker mount adapter.
@@ -354,20 +257,6 @@ fn identity(key: String) -> Result(String, String) {
   case graph.valid_path(value) && !string.contains(value, "/") {
     True -> Ok(value)
     False -> Error(key <> " must be a valid worker or pool identifier")
-  }
-}
-
-fn network_fault(fault: controllers.Fault) -> Fault {
-  case fault {
-    controllers.Offline(reason) -> Retry(reason)
-    controllers.Invalid(reason) -> Stop(reason)
-  }
-}
-
-fn cleanup_fault(fault: docker.Fault) -> Fault {
-  case fault {
-    docker.Unavailable(reason) -> Retry(reason)
-    docker.Rejected(reason) | docker.JournalFault(reason) -> Stop(reason)
   }
 }
 

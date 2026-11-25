@@ -54,7 +54,7 @@ to package the OTP release, including ERTS and the SQLite NIF. It writes
 release and installs `gantryd`, `gantry-worker`, and the `gantry` CLI under
 `PREFIX/bin`. The default prefix is `$HOME/.local`. Installed hosts need
 the system commands for the roles they run. Controllers use Git and GNU
-tar, workers use Docker, GNU coreutils, and `flock`. The `gantry` CLI is a
+tar, workers use Docker, `env`, `kill`, and `realpath`. The `gantry` CLI is a
 Gleam program on the bundled runtime, so it needs neither Bash, jq, curl,
 nor OpenSSL. Its onboarding commands also use Git, GNU coreutils, and
 util-linux (`flock` and `setpriv`), as described below. Python is
@@ -405,12 +405,38 @@ From a source checkout, use `gleam run -m gantry/worker` in
 
 Run the worker as a user with access to its Docker daemon and write
 access to its local directory. One worker process runs one action at a
-time. The defaults are two CPUs, 768 MiB of container memory, and
-256 MiB of workspace. Set `GANTRY_WORKER_CPUS`,
-`GANTRY_WORKER_MEMORY_MIB`, and `GANTRY_WORKSPACE_MIB` to size the slot.
-Match capacity and isolation policy across slots in the same named
-pool, and match `GANTRY_POOL` to the controller's repository pool.
+time. Set these variables to size the slot. Each is validated against
+its bounds at startup, and a value outside them stops the worker.
 
+| Variable | Default | Bounds | Limits |
+| --- | --- | --- | --- |
+| `GANTRY_WORKER_CPUS` | 2 | 1 to 1024 | Container CPUs |
+| `GANTRY_WORKER_MEMORY_MIB` | 768 | 128 to 2097152 | Container memory, including `/tmp` |
+| `GANTRY_WORKSPACE_MIB` | 256 | 64 to 1048576 | The `/work` tmpfs volume |
+| `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
+| `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
+| `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The `/tmp` tmpfs size |
+
+The process default matters for BEAM builds. A BEAM starts a scheduler
+thread per core, and on a 32-core host it could not start under 128
+processes. `/tmp` counts against the memory limit, so a larger size
+bounds the file it can hold and does not reserve memory. Match capacity
+and isolation policy across slots in the same named pool, and match
+`GANTRY_POOL` to the controller's repository pool.
+
+At startup the worker takes an exclusive SQLite lock on its journal, so a
+second worker with the same directory exits with an error. It then
+inspects the collector image and exits with the `docker pull` command to
+run if the image is missing. An idle slot polls the controller with a
+jittered delay that grows from about 0.25 s to a 2 s ceiling and resets
+as soon as it receives work. Each HTTP exchange has a 10 s connect
+timeout, a response wait of 30 s plus 4 s per MiB uploaded, and a 30 s
+bound that restarts at every response chunk. A 64 MiB blob therefore
+completes over any link that sustains 256 KiB/s. The worker keeps one
+connection per controller origin.
+
+Infrastructure faults retry while they are safe to retry, and
+[otherwise become a failed action](architecture/runtime.md#worker-faults).
 To add slots, launch one supervisor-managed worker per slot with its own
 deployment-wide ID and directory, for example `linux-02` and
 `/srv/gantry/worker-linux-02`. Size their combined reservations to fit

@@ -158,13 +158,13 @@ fn open(spec: Spec) -> Result(ServicePort, String) {
 /// Apply one event to the child's state. See the transition table.
 fn handle(state: State, message: Message) -> actor.Next(State, Message) {
   case message, state.life {
-    Event(ffi_host.Output(bytes)), _ -> {
+    Event(ffi_host.ServiceOutput(bytes)), _ -> {
       let _ = simplifile.append_bits(state.log, bytes)
       actor.continue(state)
     }
 
     // The leader is gone. Sweep the rest of its group, then answer.
-    Event(ffi_host.Exited(status)), _ -> {
+    Event(ffi_host.ServiceExited(status)), _ -> {
       signal(state.group, "KILL")
       list.each(state.waiting, process.send(_, Exit(state.name, status)))
       list.each(state.stopping, process.send(_, Nil))

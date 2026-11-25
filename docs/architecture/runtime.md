@@ -26,7 +26,7 @@ flowchart TB
         QUEUE["queue.State"]
     end
     subgraph worker["gantry/worker"]
-        SLOT["worker.step / publish"]
+        SLOT["slot.step / publish"]
         CUSTODY["worker/custody"]
         EXEC["worker/docker"]
         NET["worker/controllers / Gun"]
@@ -149,13 +149,13 @@ flowchart TB
     C -->|"no eligible action"| N["claim_reply 204"]
     C -->|"matching Proof"| C
     C -->|"committed Assignment"| J["custody.claim"]
-    J --> S["worker.step"]
+    J --> S["slot.step"]
     S -->|"possible start, no receipt"| K["docker.cleanup"]
     K --> R["custody.record"]
-    S -->|"durable unstarted assignment"| E["worker.perform / docker.execute"]
+    S -->|"durable unstarted assignment"| E["slot.perform / docker.execute"]
     E -->|"pass or failure"| R
     E -->|"uncertain Docker custody"| S
-    R --> U["worker.publish"]
+    R --> U["slot.publish"]
     S -->|"recorded receipt"| U
     U -->|"blob upload and receipt"| F["api.finish / queue.finish"]
     U -->|"controller unavailable"| S
@@ -173,24 +173,49 @@ flowchart TB
    for both edge types. Only `deps` supplies files to the cache key.
    A cache hit reuses the stored proof. A miss creates a lease in the
    same `store.change` that advances the queue serial.
-3. **Execute.** `worker.claim` records the assignment in SQLite.
-   `docker.execute` stages input blobs after `controllers.fetch` verifies
-   their digests, then calls `custody.mark_started` before creating
-   Docker resources. The action receives read-only archives and a private
-   temporary workspace. After the action container exits, the collector
-   reads the declared outputs.
-4. **Publish.** `worker.publish` uploads the spooled bytes before posting
-   its receipt. `api.finish` reads and rehashes the referenced blobs.
+3. **Execute.** `slot.claim` records the assignment in SQLite.
+   `docker.execute` removes any resources left under the attempt's name,
+   stages input blobs after `controllers.fetch` verifies their digests,
+   and creates the volume, collector and action container. It calls
+   `custody.mark_started` immediately before `docker start`, the one
+   effect that runs action code. The action receives read-only archives
+   and a private temporary workspace. `docker start -a` runs as a Weft
+   task with a deadline, whose cancel capability removes the containers.
+   After the action container exits, the collector reads the declared
+   outputs.
+4. **Publish.** `slot.step` journals the finished result first, then
+   removes the Docker resources from the Recorded phase. `slot.publish`
+   uploads the bytes the receipt references, and no others, before
+   posting the receipt. `api.finish` reads and rehashes the referenced
+   blobs.
    `queue.finish` accepts the receipt only for the active action,
    worker, and serial. A passing receipt must also match the declared
    output paths.
 5. **Resume.** `controllers.call` tries the next configured origin
-   after a transport error or a 5xx response. Gun bounds each request
-   and verifies the peer certificate and host name for HTTPS. On restart,
-   the worker publishes a saved receipt or resumes staging an unstarted
-   assignment. If the journal records a possible start with no receipt,
-   the worker removes any remaining Docker resources before reporting
-   failure.
+   after a transport error or a 5xx response. Gun verifies the peer
+   certificate and host name for HTTPS and keeps one connection per
+   origin, replacing it once if it proves dead before a response byte.
+   Each exchange has a connect timeout, a response wait that grows with
+   the declared upload size, and an idle bound that restarts at every
+   response chunk. On restart, the worker publishes a saved receipt or
+   resumes staging an unstarted assignment. If the journal records a
+   possible start with no receipt, the worker removes any remaining
+   Docker resources before reporting failure.
+
+<a id="worker-faults"></a>
+
+Which infrastructure faults reach users as a failed action:
+
+| Fault | Outcome | Why |
+| --- | --- | --- |
+| Controller offline, blob fetch or upload fails, or HTTP 5xx | Retried with backoff, the receipt stays journaled | Nothing about the action is lost |
+| Collector image missing at boot | The worker exits with the `docker pull` command | The first action would fail otherwise |
+| Docker fault while staging or creating resources, before `docker start` | Retried, the same attempt runs again | No action code has run, and `execute` removes leftovers first |
+| Docker fault while removing resources after the action finished | Retried, the recorded result is kept | The result is journaled before cleanup |
+| Worker restart or Docker fault after `docker start` and before the result is recorded | `Rejected: worker interrupted before recording outcome` | The action may have run, so running it again could repeat its effects, and the wire protocol has no worker-reported requeue |
+| Action exit status, wall deadline, or a missing or oversized declared output | `Rejected` with the reason and the log | The action itself failed |
+| Unsafe path or invalid archive in the inputs | `Rejected` | The same input would fail again |
+| Unreadable journal, mismatched assignment, or a controller response the worker cannot trust | The worker halts and the lease stays | Local custody cannot be trusted, so an operator restores it |
 
 The action key combines the prepared recipe digest with the resolved
 dependency file digests. The recipe includes the selected source archive
@@ -296,7 +321,7 @@ erDiagram
         text assignment
         text receipt
         integer started
-        integer acknowledged
+        integer acknowledged "legacy, always 0"
     }
     blobs {
         text sha PK "content digest"
@@ -306,8 +331,8 @@ erDiagram
 
 The journal uses SQLite `synchronous=FULL`. `custody.record` stores
 the receipt after execution or cleanup. After the server returns success
-or reports an inactive lease, `custody.acknowledge` acknowledges the
-receipt and clears the upload spool in one transaction. Both the queue
+or reports an inactive lease, `custody.acknowledge` deletes the
+attempt row and clears the upload spool in one transaction. Both the queue
 and the journaled receipt refer to uploaded bytes by digest.
 [Worker journal schema](../../packages/server/priv/worker-schema.sql)
 
@@ -342,9 +367,11 @@ propose changes concurrently.
 | Static supervisor | The Mist listener and the reconciler. It restarts whichever crashes, and past five restarts in a minute it exits so the VM stops |
 | Weft reconciler per controller | Its periodic `Reconcile` message, its per-intent backoff table, and sequential provider calls for the intents it received |
 | Git mirror lock | One repository's persistent bare mirror, held by one request or reconciler attempt at a time |
-| `gantry/worker` loop | One slot, its journal connection, and outcome publication |
-| Erlang worker FFI | The worker's `flock` process, Docker command execution, and tar operations |
-| Gun connection | One controller request, with bounded response bytes and a deadline |
+| `gantry/worker` slot loop | One slot and its journal connection, run as a Weft actor under a supervisor. A crash restarts it with the same journal |
+| Journal lock | SQLite's exclusive lock on the slot's connection, held while the connection lives and released by the OS at exit |
+| `docker start -a` task | A Weft task with a deadline. Its cancel capability removes the containers on timeout or when the slot loop dies |
+| Erlang host and worker FFI | The shared port runner for Docker and host tools, which kills the child by pid at its deadline, and tar operations |
+| Gun connection | One reused connection per controller origin, owned by the slot loop, with connect, first-byte and idle bounds |
 | Docker daemon | Container execution and temporary volumes |
 | Remote Git server | The target ref and the expected-old-SHA check at update time |
 
@@ -357,11 +384,11 @@ fetched incrementally under a node-local lock. Controllers may
 try the same committed intent concurrently. The queue matches results
 to that intent, and Git rejects a push if the target moved. A storage
 timeout can leave the commit outcome unknown. Use the same run or
-attempt identity when retrying. A worker directory lock covers one
+attempt identity when retrying. The journal lock covers one
 machine's local journal. Operators assign each worker ID to a single
 slot across the deployment.
 [Reconciler](../../packages/server/src/gantry/reconcile.gleam) ·
-[Worker host FFI](../../packages/server/src/gantry_worker_ffi.erl)
+[Host runner FFI](../../packages/server/src/gantry_host_ffi.erl)
 
 ## Known gaps
 

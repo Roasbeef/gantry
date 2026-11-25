@@ -2,7 +2,10 @@
 //// after transport errors or server failures. The caller owns that preference.
 
 import gantry/blobs
-import gantry/internal/ffi_worker_http.{ControllerRequest, TooLarge, Unavailable}
+import gantry/internal/ffi_worker_http.{
+  ControllerRequest, Timeouts, TooLarge, Unavailable,
+}
+import gleam/bit_array
 import gleam/http
 import gleam/http/request
 import gleam/int
@@ -11,6 +14,17 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import gleam/uri
+
+/// Name resolution, connect and TLS handshake each get this long.
+const connect_timeout = 10_000
+
+/// A controller that goes quiet for this long between response chunks, or
+/// before its first byte, is treated as unavailable.
+const idle_timeout = 30_000
+
+/// The slowest link, in bytes per second, a request body is expected to
+/// cross. It sizes the wait for the response to an upload.
+const slowest_bytes_per_second = 262_144
 
 /// A validated set of controller endpoints with one preferred origin.
 pub opaque type Controllers {
@@ -60,6 +74,20 @@ pub fn new(endpoints: String, token: String) -> Result(Controllers, String) {
   |> result.map(fn(origins) { Controllers(origins, token) })
 }
 
+/// The wait for a response head after sending `request_bytes`. The server
+/// answers an upload only after reading it, so the allowance grows with the
+/// declared size: a 64 MiB blob gets about 286 seconds, not a fixed 20.
+///
+/// ## Examples
+///
+/// ```gleam
+/// controllers.first_byte_allowance(0)
+/// // -> 30_000
+/// ```
+pub fn first_byte_allowance(request_bytes: Int) -> Int {
+  idle_timeout + request_bytes * 1000 / slowest_bytes_per_second
+}
+
 /// Call the preferred origin first and retain the responsive replica.
 ///
 /// ## Examples
@@ -105,6 +133,11 @@ pub fn call(
           #("accept-encoding", "identity"),
         ],
         body: bytes,
+        timeouts: Timeouts(
+          connect: connect_timeout,
+          first_byte: first_byte_allowance(bit_array.byte_size(bytes)),
+          idle: idle_timeout,
+        ),
       ),
       blobs.limit,
     )

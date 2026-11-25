@@ -1,7 +1,20 @@
 //// SQLite keeps one worker assignment across restarts. Pending rows move
 //// through ready, interrupted on a possible start, and recorded. A receipt
-//// and its blobs remain publishable until the same transaction acknowledges
-//// the assignment and clears the spool.
+//// and its blobs remain publishable until one transaction deletes the
+//// attempt row and clears the spool, so the journal holds at most the one
+//// attempt the slot is working on.
+////
+//// ```text
+//// claim -> Ready --mark_started--> Interrupted --record--> Recorded
+////            \---------record (rejected before start)------^
+//// Recorded --acknowledge (delete row, clear spool)--> idle
+//// ```
+////
+//// Deleting on acknowledgement is deliberate. The spool is cleared in the
+//// same transaction, so an acknowledged receipt could never be published
+//// again; keeping its row only grew the table and made a re-delivered lease
+//// look like a replay whose blobs no longer exist. A lease the controller
+//// issues again after a store rollback is new work and runs again.
 
 import gantry/blobs
 import gantry/internal/ffi_host
@@ -40,6 +53,7 @@ pub fn open(
   worker: String,
 ) -> Result(sqlight.Connection, String) {
   use db <- result.try(sqlight.open(path) |> result.map_error(sql_fault))
+  use Nil <- result.try(lock(db))
   use ddl <- result.try(
     application.priv_directory("gantry")
     |> result.replace_error("cannot locate the worker journal schema")
@@ -50,6 +64,7 @@ pub fn open(
   )
   use Nil <- result.try(exec(db, "PRAGMA synchronous=FULL;" <> ddl))
   use Nil <- result.try(migrate_attempts(db))
+  use Nil <- result.try(update(db, sql.delete_acknowledged_attempts()))
   use identity <- result.try(query(db, sql.worker_identity()))
 
   // Each slot directory is bound to exactly one worker identity.
@@ -64,6 +79,7 @@ pub fn open(
 fn reopen(path: String, worker: String) -> Result(sqlight.Connection, String) {
   let db_uri = "file:" <> uri.percent_encode(path) <> "?mode=rw"
   use db <- result.try(sqlight.open(db_uri) |> result.map_error(sql_fault))
+  use Nil <- result.try(lock(db))
   use identity <- result.try(
     query(db, sql.worker_identity())
     |> result.replace_error("managed worker journal has no readable identity"),
@@ -78,10 +94,29 @@ fn reopen(path: String, worker: String) -> Result(sqlight.Connection, String) {
           <> "SELECT name, assignment, receipt, acknowledged FROM attempts LIMIT 0;"
           <> "SELECT sha, data FROM blobs LIMIT 0;",
       ))
-      migrate_attempts(db) |> result.replace(db)
+      use Nil <- result.try(migrate_attempts(db))
+      update(db, sql.delete_acknowledged_attempts()) |> result.replace(db)
     }
     _ -> Error("managed worker journal does not contain the saved identity")
   }
+}
+
+/// Take SQLite's exclusive lock for the life of the connection.
+///
+/// In exclusive locking mode SQLite keeps the file lock after the first
+/// transaction instead of releasing it at commit, so no second worker can
+/// open this journal while the connection lives. The owner must keep the
+/// connection referenced, because closing or collecting it ends the lock.
+/// The operating system drops the lock when the process exits, however it
+/// exits, and no helper process or external `flock` is needed. The lock
+/// follows the journal file: a managed profile also keeps its custody
+/// marker, which refuses to start a second worker for an established slot
+/// whose journal went missing.
+fn lock(db: sqlight.Connection) -> Result(Nil, String) {
+  exec(db, "PRAGMA locking_mode=EXCLUSIVE;BEGIN EXCLUSIVE;COMMIT;")
+  |> result.replace_error(
+    "worker journal is locked: another worker already owns GANTRY_WORKER_DIR",
+  )
 }
 
 /// Upgrade old attempt rows conservatively before resuming custody.
@@ -127,7 +162,8 @@ pub fn open_managed(
       Error("managed worker journal directory does not match the profile")
   })
 
-  // The worker owns the slot lock before either opening or marking custody.
+  // The marker only restates this slot's identity, so reading it first is
+  // safe. Opening the journal takes its exclusive lock before any write.
   case simplifile.read(marker) {
     Ok(saved) if saved == identity -> {
       use exists <- result.try(
@@ -221,7 +257,7 @@ pub fn assignment(payload: String) -> Result(queue.Assignment, String) {
   graph.validate_action(value.task.action) |> result.replace(value)
 }
 
-/// Persist a claim and reuse any receipt already recorded for its identity.
+/// Persist a claim before the slot can act on it.
 ///
 /// ## Examples
 ///
@@ -233,39 +269,16 @@ pub fn claim(
   name: String,
   claim: queue.Assignment,
 ) -> Result(Nil, String) {
-  use existing <- result.try(query(
+  update(
     db,
-    sql.find_attempt(
-      serial: queue.lease_serial(claim.lease),
-      run: claim.run,
-      action: claim.task.action.name,
+    sql.insert_attempt(
+      name:,
+      assignment: json.to_string(protocol.encode_assignment(claim)),
     ),
-  ))
-
-  // Re-admission reuses the previous Docker name only for the same assignment.
-  case existing {
-    [] ->
-      update(
-        db,
-        sql.insert_attempt(
-          name:,
-          assignment: json.to_string(protocol.encode_assignment(claim)),
-        ),
-      )
-    [old] -> {
-      use stored <- result.try(assignment(old.assignment))
-
-      // A conflicting claim cannot release or start work from this journal.
-      case stored == claim {
-        True -> update(db, sql.reopen_attempt(name: old.name))
-        False -> Error("worker journal has different inputs for this lease")
-      }
-    }
-    _ -> Error("worker journal has duplicate records for this lease")
-  }
+  )
 }
 
-/// Commit the start marker before any Docker resource could exist.
+/// Commit the start marker before the action's container can start.
 ///
 /// ## Examples
 ///
@@ -318,16 +331,30 @@ pub fn record(
   update(db, sql.save_receipt(receipt: Some(json.to_string(payload)), name:))
 }
 
-/// List the blobs awaiting publication without loading their payloads.
+/// List the distinct digests a saved receipt refers to, log first.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // custody.digests(db)
+/// // custody.referenced(receipt)
 /// ```
-pub fn digests(db: sqlight.Connection) -> Result(List(String), String) {
-  query(db, sql.pending_digests())
-  |> result.map(list.map(_, fn(row) { row.sha }))
+pub fn referenced(receipt: String) -> Result(List(String), String) {
+  let decoder = {
+    use completion <- decode.field("completion", protocol.completion_decoder())
+    decode.success(completion)
+  }
+  use completion <- result.try(
+    json.parse(receipt, decoder)
+    |> result.replace_error("invalid result envelope in the worker journal"),
+  )
+
+  // A rejection references only its log. A pass adds its output files.
+  let digests = case completion {
+    queue.Succeeded(files, log) -> [log, ..list.map(files, fn(f) { f.digest })]
+    queue.Rejected(_, log) -> [log]
+  }
+
+  Ok(list.unique(digests))
 }
 
 /// Read and verify one pending upload.
@@ -354,7 +381,7 @@ pub fn blob(
   }
 }
 
-/// Release the attempt and discard its spool in one transaction.
+/// Delete the attempt and discard its spool in one transaction.
 ///
 /// ## Examples
 ///
@@ -367,7 +394,7 @@ pub fn acknowledge(
 ) -> Result(Nil, String) {
   use Nil <- result.try(exec(db, "BEGIN IMMEDIATE"))
   let done = {
-    use Nil <- result.try(update(db, sql.acknowledge_attempt(name:)))
+    use Nil <- result.try(update(db, sql.delete_attempt(name:)))
     use Nil <- result.try(update(db, sql.clear_spool()))
     exec(db, "COMMIT")
   }

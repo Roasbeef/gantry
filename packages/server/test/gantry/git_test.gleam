@@ -160,3 +160,25 @@ pub fn the_empty_archive_is_ten_zero_blocks_test() {
   assert listing == ""
   let _ = simplifile.delete(root)
 }
+
+pub fn stale_lock_files_from_a_killed_git_are_cleared_test() {
+  let root = directory()
+  let #(remote, _, _) = remote_with_commit(root)
+  let #(cfg, repo) = config_for(root, remote)
+  let assert Ok(_) =
+    git.session(cfg, repo, fn(s) { git.fetch(s, "refs/heads/main") })
+
+  // A killed fetch leaves lock files in the mirror and its ref directories.
+  let mirror = root <> "/data/mirrors/owner/project.git"
+  let ref_lock = mirror <> "/refs/gantry/heads/main.lock"
+  let shallow_lock = mirror <> "/shallow.lock"
+  let assert Ok(Nil) = simplifile.write(ref_lock, "")
+  let assert Ok(Nil) = simplifile.write(shallow_lock, "")
+
+  // Clearing removes them and leaves every other file in place.
+  git.clear_locks(mirror)
+  assert simplifile.is_file(ref_lock) == Ok(False)
+  assert simplifile.is_file(shallow_lock) == Ok(False)
+  assert simplifile.is_file(mirror <> "/HEAD") == Ok(True)
+  let _ = simplifile.delete(root)
+}

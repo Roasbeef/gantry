@@ -41,7 +41,6 @@ import gantry/cli/profile
 import gantry/cli/service.{type Service}
 import gantry/config
 import gantry/internal/ffi_host
-import gantry/internal/ffi_worker
 import gantry/worker/docker
 import gantry_core/protocol
 import gantry_core/queue
@@ -486,7 +485,7 @@ fn open_profile(path: String) -> Result(String, Failure) {
     ))
   })
   use Nil <- result.try(
-    ffi_worker.lock(real <> "/.setup.lock")
+    ffi_host.lock(real <> "/.setup.lock")
     |> result.map_error(fn(_) {
       conflict("profile_busy", "Another Gantry command is using this profile.")
     }),

@@ -34,8 +34,7 @@ pub type PendingAttempts {
 }
 
 pub fn pending_attempts() {
-  let sql =
-    "SELECT name, assignment, receipt, started FROM attempts WHERE acknowledged = 0 LIMIT 2"
+  let sql = "SELECT name, assignment, receipt, started FROM attempts LIMIT 2"
   #(sql, [], pending_attempts_decoder())
 }
 
@@ -47,42 +46,9 @@ pub fn pending_attempts_decoder() -> decode.Decoder(PendingAttempts) {
   decode.success(PendingAttempts(name:, assignment:, receipt:, started:))
 }
 
-pub type FindAttempt {
-  FindAttempt(name: String, assignment: String)
-}
-
-pub fn find_attempt(
-  serial serial: Int,
-  run run: String,
-  action action: String,
-) {
-  let sql =
-    "SELECT name, assignment FROM attempts
-WHERE CAST(json_extract(assignment, '$.lease.serial') AS INTEGER) = CAST(?1 AS INTEGER)
-  AND CAST(json_extract(assignment, '$.run') AS TEXT) = CAST(?2 AS TEXT)
-  AND CAST(json_extract(assignment, '$.task.action.name') AS TEXT) = CAST(?3 AS TEXT)
-LIMIT 2"
-  #(
-    sql,
-    [dev.ParamInt(serial), dev.ParamString(run), dev.ParamString(action)],
-    find_attempt_decoder(),
-  )
-}
-
-pub fn find_attempt_decoder() -> decode.Decoder(FindAttempt) {
-  use name <- decode.field(0, decode.string)
-  use assignment <- decode.field(1, decode.string)
-  decode.success(FindAttempt(name:, assignment:))
-}
-
 pub fn insert_attempt(name name: String, assignment assignment: String) {
   let sql = "INSERT INTO attempts(name, assignment, started) VALUES (?, ?, 0)"
   #(sql, [dev.ParamString(name), dev.ParamString(assignment)])
-}
-
-pub fn reopen_attempt(name name: String) {
-  let sql = "UPDATE attempts SET acknowledged = 0 WHERE name = ?"
-  #(sql, [dev.ParamString(name)])
 }
 
 pub fn mark_started(name name: String) {
@@ -103,20 +69,6 @@ pub fn save_receipt(receipt receipt: Option(String), name name: String) {
   ])
 }
 
-pub type PendingDigests {
-  PendingDigests(sha: String)
-}
-
-pub fn pending_digests() {
-  let sql = "SELECT sha FROM blobs"
-  #(sql, [], pending_digests_decoder())
-}
-
-pub fn pending_digests_decoder() -> decode.Decoder(PendingDigests) {
-  use sha <- decode.field(0, decode.string)
-  decode.success(PendingDigests(sha:))
-}
-
 pub type LoadBlob {
   LoadBlob(data: BitArray)
 }
@@ -131,9 +83,14 @@ pub fn load_blob_decoder() -> decode.Decoder(LoadBlob) {
   decode.success(LoadBlob(data:))
 }
 
-pub fn acknowledge_attempt(name name: String) {
-  let sql = "UPDATE attempts SET acknowledged = 1 WHERE name = ?"
+pub fn delete_attempt(name name: String) {
+  let sql = "DELETE FROM attempts WHERE name = ?"
   #(sql, [dev.ParamString(name)])
+}
+
+pub fn delete_acknowledged_attempts() {
+  let sql = "DELETE FROM attempts WHERE acknowledged = 1"
+  #(sql, [])
 }
 
 pub fn clear_spool() {

@@ -1,6 +1,8 @@
 //// OTP's port primitives launch named host tools without a shell. The
 //// Gleam port module exposes only the type, so the Erlang bridge owns
 //// argument conversion, the wall deadline and bounded output collection.
+//// One runner serves host tools and the worker's Docker adapter. At the
+//// deadline it kills the child by pid and returns the bytes captured so far.
 ////
 //// The CLI needs four host primitives that no Gleam binding provides. An
 //// exit status: `erlang:halt/2` with a flush is the only way to end the VM
@@ -23,6 +25,37 @@
 
 import gleam/dynamic.{type Dynamic}
 
+/// Which environment the child receives. `Inherit` is the VM's environment
+/// with the overrides added or replaced. `Clear` is exactly the `KEY=VALUE`
+/// settings and nothing else, through `env -i`.
+pub type Environment {
+  Inherit(overrides: List(#(String, String)))
+  Clear(settings: List(String))
+}
+
+/// Select which bytes a subprocess may write to the captured stream.
+pub type Stream {
+  Combined
+  Stdout
+}
+
+/// Whether the capture retained every byte written by the subprocess.
+pub type Capture {
+  Complete
+  Clipped
+}
+
+/// How a subprocess ended.
+pub type Exit {
+  Exited(status: Int)
+  TimedOut
+}
+
+/// A bounded stream and how its subprocess ended.
+pub type Command {
+  Command(exit: Exit, bytes: BitArray, capture: Capture)
+}
+
 /// Run a host tool with explicit arguments and environment overrides.
 ///
 /// ## Examples
@@ -37,6 +70,26 @@ pub fn run(
   environment: List(#(String, String)),
   milliseconds: Int,
 ) -> Result(#(Int, String), String)
+
+/// Run a host tool with a chosen environment and stream, keeping at most
+/// `limit` bytes. A command that outlives `milliseconds` is killed and
+/// reported as `TimedOut` with the output it had written. `Clear` takes
+/// `KEY=VALUE` settings.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_host.capture("docker", ["version"], Clear([]), Combined, 4096, 30_000)
+/// ```
+@external(erlang, "gantry_host_ffi", "capture")
+pub fn capture(
+  program: String,
+  arguments: List(String),
+  environment: Environment,
+  stream: Stream,
+  limit: Int,
+  milliseconds: Int,
+) -> Result(Command, String)
 
 /// Exit with failure when the daemon cannot acquire its startup dependencies.
 ///
@@ -111,8 +164,8 @@ pub type ServicePort
 
 /// Output or exit reported by a supervised child.
 pub type ServiceEvent {
-  Output(bytes: BitArray)
-  Exited(status: Int)
+  ServiceOutput(bytes: BitArray)
+  ServiceExited(status: Int)
 }
 
 /// Start a child in `directory` with its output captured as port messages.
@@ -171,3 +224,14 @@ pub fn tcp_open(host: String, port: Int, milliseconds: Int) -> Bool
 /// ```
 @external(erlang, "gantry_host_ffi", "default_terminate")
 pub fn default_terminate() -> Nil
+
+/// Hold an exclusive OS lock on `path` for the life of this VM. The lock
+/// fails at once when another process holds it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_host.lock("/state/gantry/local/.setup.lock")
+/// ```
+@external(erlang, "gantry_host_ffi", "lock")
+pub fn lock(path: String) -> Result(Nil, String)
