@@ -365,7 +365,7 @@ done
 # An action that declares Git metadata gets a shallow .git for its commit and
 # nothing else, and an input over one blob is staged in verified chunks.
 cat > "$tmp/metadata.json" <<JSON
-{"name":"metadata","argv":["sh","-ec","test \"\$(cat .git/HEAD)\" = $candidate; test \"\$(cat .git/shallow)\" = $candidate; test -s .git/index; test ! -e .git/refs/remotes"],"inputs":["source.txt"],"outputs":[],"git":"shallow"}
+{"name":"metadata","argv":["sh","-ec","test \"\$(cat .git/HEAD)\" = $candidate; test \"\$(cat .git/shallow)\" = $candidate; test -s .git/index; test ! -e .git/refs/remotes; test \"\$(stat -c %u .)\" = \"\$(id -u)\""],"inputs":["source.txt"],"outputs":[],"git":"shallow"}
 JSON
 "$cli" run git-metadata fixture/project "$candidate" check "$tmp/metadata.json" > "$tmp/git-metadata.json"
 wait_for 'declared Git metadata action' matches "$GANTRY_URL" git-metadata '.phase == "passed"'
