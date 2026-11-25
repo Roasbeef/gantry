@@ -1,22 +1,42 @@
 # Start Gantry locally and grow a fleet
 
-**Status** · Proposed · 2026-11-22 · Based on `2c15b84`
+**Status** · Partly built · proposed 2026-11-22 on `2c15b84`, status checked 2026-11-24
 
 **Make the first successful build one command on an installed Linux host
 with Docker. Give the deployment a saved profile so adding a worker or
 changing controller topology leaves projects and agents using the same API.**
 
-Today an operator installs a release, writes TOML, sets three role tokens,
-starts `gantryd`, and configures each worker slot. Workers already pull
-work over HTTP and can share one HTTPS gateway origin. Ra persists each
+Before this slice an operator installed a release, wrote TOML, set role
+tokens, started `gantryd`, and configured each worker slot by hand. Workers
+already pull work over HTTP and can share one HTTPS gateway origin. Ra persists each
 controller's node name with its local state. The installed binary can
 switch releases atomically, and a worker's directory carries its custody
 journal across restarts.
 [Runbook](../running.md) · [Runtime architecture](../architecture/runtime.md)
 
+## What's built and what's not
+
+| Piece | State |
+| --- | --- |
+| `gantry init --local`: private profile, loopback controller, one worker, Docker smoke build, repeatable | Built |
+| `gantry local start`: controller and worker as one supervised foreground process | Built |
+| `gantry worker setup HTTPS_URL POOL` and `gantry worker start`: one saved slot per profile, bound to its gateway and pool | Built |
+| Per-worker credentials: `[[worker]]` with `id` and `token_sha256`, identity from the credential | Built, replacing the shared worker token |
+| Managed journal custody: a profile refuses to start when its journal is missing | Built |
+| `gantry init --server`, `gantry connect`, saved remote profiles for a laptop | Not built |
+| `gantry fleet` commands: status, doctor, add, drain, update, rollback | Not built |
+| Several managed slots on one host from one command | Not built. Start one `gantry-worker` per slot |
+| Invitations and short-lived worker enrollment | Not built |
+| Controller enrollment, staged membership, managed cutover from a laptop | Not built |
+| Backup and restore of queue and blobs as a command | Not built. [Operations](../operations.md#back-up-and-restore-the-voter-data) |
+
+The sections below keep the original proposal. Where one disagrees with this
+table, the table is current.
+
 ## The first ten minutes
 
-These command sketches describe the proposed interface.
+These command sketches describe the proposed interface. Only `init --local`
+exists among them.
 Start from a versioned release for the host architecture. A release
 catalogue and verified checksums would let onboarding download and stage
 that release without a compiler. Reuse the current atomic installer.
@@ -64,13 +84,12 @@ the Linux lifecycle is proven.
 
 A worker host can start with one slot, then grow within its host budget.
 Existing slots keep their IDs and journal paths. The first remote setup
-can import an operator-issued profile and use the existing role token
-supplied through stdin or a private credential file. This uses the
-current trust model for an operator's own machines. The controller
-authorizes active lease replay by worker ID, and the worker locks its
-journal directory locally. Reject duplicate slot IDs in managed
+mints a worker ID and token, or takes a token from stdin, and the operator
+registers its digest as a `[[worker]]` entry. The controller authorizes
+active lease replay by worker ID, and the worker locks its journal
+directory locally. Reject duplicate slot IDs in managed
 configuration and keep an existing ID paired with its original journal.
-Per-worker credentials and invitations are a later slice. Each
+Per-worker credentials have shipped. Invitations are a later slice. Each
 invitation should be short-lived, single-use, bound to a
 deployment and pool, and exchangeable for a revocable worker credential.
 The server must enforce that scope on claims and results. Retirement
