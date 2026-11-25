@@ -95,6 +95,16 @@ pub fn sync_directory() -> Result(Nil, Fault)
 @external(erlang, "gantry_khepri_ffi", "ready")
 pub fn ready() -> Result(Nil, Fault)
 
+/// Wait until this replica has applied everything committed so far.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.fence()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "fence")
+pub fn fence() -> Result(Nil, Fault)
+
 /// Read one key from the local replica.
 ///
 /// ## Examples

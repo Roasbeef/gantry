@@ -282,7 +282,7 @@ fn ordered(
   name: String,
   plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
 ) -> Result(a, Fault) {
-  use first <- result.try(plan(reader()) |> result.map_error(fault_of))
+  use first <- result.try(fresh_plan(plan))
   let locked = fn() { ffi_khepri.gated(name, fn() { attempt(plan, attempts) }) }
 
   // A plan with nothing to write is confirmed, and one with writes is not.
@@ -313,7 +313,7 @@ fn attempt(
   plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
   remaining: Int,
 ) -> Result(a, Fault) {
-  use planned <- result.try(plan(reader()) |> result.map_error(fault_of))
+  use planned <- result.try(fresh_plan(plan))
   use outcome <- result.try(commit(planned))
 
   // A competing write invalidates the plan and its receipt.
@@ -322,9 +322,28 @@ fn attempt(
     Stale, 1 ->
       Error(fault.Unavailable("queue contention exceeded retry budget"))
     Stale, _ -> {
+      // A replica that lags would keep reading the older keys, so wait for it.
+      let _ = ffi_khepri.fence()
       process.sleep(pause(remaining))
       attempt(plan, remaining - 1)
     }
+  }
+}
+
+/// Plan from the local replica. A refusal from a replica that lags would be
+/// wrong, such as a result refused as stale because the lease has not reached
+/// this replica, so a refusal waits for the replica to catch up and plans once
+/// more before it is believed.
+fn fresh_plan(
+  plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
+) -> Result(layout.Plan(a), Fault) {
+  // Only a refusal can come from a stale view, so only it is planned twice.
+  case plan(reader()) {
+    Error(layout.Refused(_)) -> {
+      let _ = ffi_khepri.fence()
+      plan(reader()) |> result.map_error(fault_of)
+    }
+    other -> result.map_error(other, fault_of)
   }
 }
 
@@ -497,8 +516,10 @@ fn retain_batches(
   retention: queue.Retention,
   passes: Int,
 ) -> Result(Nil, Fault) {
+  // Retention lowers the count that admission raises, so it takes the same
+  // lock, and a pass cannot lose every attempt to a steady stream of admissions.
   use more <- result.try(
-    transact(Unordered, layout.retain(_, retention, retention_batch)),
+    transact(Admission, layout.retain(_, retention, retention_batch)),
   )
 
   // Stop when the queue is within its bounds or the pass budget is spent.

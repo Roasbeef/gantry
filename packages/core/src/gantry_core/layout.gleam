@@ -111,8 +111,7 @@ pub type Failure {
   /// The store could not be read.
   Unreadable(detail: String)
 
-  /// The store held a record that does not decode or an index that points at
-  /// nothing. This release did not write it.
+  /// The store held a record that does not decode. This release did not write it.
   Corrupt(detail: String)
 }
 
@@ -482,6 +481,7 @@ fn group_writes(
   groups: List(Group),
   cache: List(queue.Remembered),
   next: Int,
+  newest: Option(queue.Remembered),
 ) -> #(List(Write), Int) {
   // Collect the new proofs of each group, newest first as the state has them.
   let wanted_by_key =
@@ -504,7 +504,7 @@ fn group_writes(
       |> result.map(fn(group) { group.proofs })
       |> result.unwrap([])
     let wanted = result.unwrap(dict.get(wanted_by_key, key), [])
-    let #(writes, used) = renumber(key, old, wanted, acc.1)
+    let #(writes, used) = renumber(key, old, wanted, acc.1, newest)
     #(list.append(acc.0, writes), used)
   })
 }
@@ -517,11 +517,17 @@ fn renumber(
   old: List(Numbered),
   wanted: List(queue.Remembered),
   next: Int,
+  newest: Option(queue.Remembered),
 ) -> #(List(Write), Int) {
   let #(numbered, used) =
     list.fold(wanted, #([], next), fn(inner, entry) {
-      // A proof that was already stored keeps its number.
-      case list.find(old, fn(one) { one.remembered == entry }) {
+      // A proof that was already stored keeps its number, unless this finish
+      // published it again, which makes it the newest.
+      let stored = case Some(entry) == newest {
+        True -> Error(Nil)
+        False -> list.find(old, fn(one) { one.remembered == entry })
+      }
+      case stored {
         Ok(one) -> #([one, ..inner.0], inner.1)
         Error(Nil) -> #([Numbered(inner.1 + 1, entry), ..inner.0], inner.1 + 1)
       }
@@ -821,6 +827,13 @@ pub fn claim(
   pool: String,
   now: Int,
 ) -> Result(Plan(Option(queue.Assignment)), Failure) {
+  // The serial is read before the leases. A lease issued after this read
+  // fails the serial expectation below, and one issued before it is already
+  // in the listing, so a worker cannot be given a second lease unseen.
+  use #(serial, serial_text) <- result.try(counter(
+    reader,
+    counter_key("serial"),
+  ))
   use active <- result.try(children(reader, ["active"]))
   use leased <- result.try(
     list.try_map(active, fn(pair) {
@@ -837,18 +850,15 @@ pub fn claim(
   use ready <- result.try(children(reader, ready_prefix))
 
   // Nothing leased to this worker, nothing lapsed, and nothing ready is an
-  // empty poll, which reads no run and no counter.
+  // empty poll, which reads no run.
   use <- bool.lazy_guard(involved == [] && ready == [], fn() {
     plan([Keys(ready_prefix, [])], [], None)
   })
-  use #(serial, serial_text) <- result.try(counter(
-    reader,
-    counter_key("serial"),
-  ))
-  let #(first, rest) = list.split(ids(ready), window)
+  let numbered = list.map(ready, fn(pair) { #(entry_seq(pair.0), pair.1) })
+  let #(first, rest) = list.split(numbered, window)
   use #(loaded, run_expects) <- result.try(load(
     reader,
-    list.append(involved, first),
+    list.append(involved, list.map(first, fn(pair) { pair.1 })),
   ))
   let scan =
     Scan(
@@ -879,9 +889,14 @@ type Scan {
     read: List(Stored),
     current: List(Stored),
     groups: List(Group),
-    rest: List(String),
+    rest: List(#(Int, String)),
     expects: List(Expect),
   )
+}
+
+/// The enrollment number a ready entry's key ends with.
+fn entry_seq(key: Key) -> Int {
+  list.last(key) |> result.try(int.parse) |> result.unwrap(0)
 }
 
 /// Run the claim on the runs read so far. When it leases nothing while ready
@@ -910,11 +925,12 @@ fn claim_from(
   let #(next, assignment) =
     queue.claim(state, scan.ask.worker, scan.ask.pool, scan.ask.now)
 
-  // Read the next window only when nothing leased and ready runs remain.
+  // Read the next window when nothing leased and ready runs remain. Also read
+  // it when the lease went to a run enrolled after a ready run that is still
+  // unread, because the oldest ready run comes first.
   case assignment, scan.rest {
     None, [_, ..] -> {
-      let #(first, rest) = list.split(scan.rest, window)
-      use #(more, more_expects) <- result.try(load(reader, first))
+      use #(more, rest, more_expects) <- result.try(next_window(reader, scan))
       claim_from(
         reader,
         Scan(
@@ -928,8 +944,52 @@ fn claim_from(
         ),
       )
     }
+    Some(job), [_, ..] ->
+      case overtook_unread(scan, job) {
+        True -> {
+          use #(more, rest, more_expects) <- result.try(next_window(
+            reader,
+            scan,
+          ))
+          claim_from(
+            reader,
+            Scan(
+              ..scan,
+              read: by_seq(list.append(scan.read, more)),
+              current: by_seq(list.append(scan.current, more)),
+              groups: groups,
+              rest: rest,
+              expects: list.append(expects, more_expects),
+            ),
+          )
+        }
+        False -> Ok(finish_claim(scan, next, assignment, expects))
+      }
     _, _ -> Ok(finish_claim(scan, next, assignment, expects))
   }
+}
+
+/// Load the next window of ready runs. Returns the runs, the entries still
+/// unread, and the expectations the load adds.
+fn next_window(
+  reader: Reader,
+  scan: Scan,
+) -> Result(#(List(Stored), List(#(Int, String)), List(Expect)), Failure) {
+  let #(first, rest) = list.split(scan.rest, window)
+  use #(more, expects) <- result.map(load(
+    reader,
+    list.map(first, fn(pair) { pair.1 }),
+  ))
+  #(more, rest, expects)
+}
+
+/// Whether a lease went to a run enrolled after some ready run still unread.
+fn overtook_unread(scan: Scan, job: queue.Assignment) -> Bool {
+  let leased =
+    list.find(scan.current, fn(stored) { stored.run.id == job.run })
+    |> result.map(fn(stored) { stored.seq })
+    |> result.unwrap(0)
+  list.any(scan.rest, fn(unread) { unread.0 < leased })
 }
 
 /// Turn the last state of a claim into its plan.
@@ -995,8 +1055,16 @@ pub fn finish(
   completion: queue.Completion,
 ) -> Result(Plan(Nil), Failure) {
   use #(loaded, run_expects) <- result.try(load(reader, [id]))
+
+  // Only a verified result publishes a proof, so only it touches a group.
+  let published = case completion {
+    queue.Succeeded(_, _) -> True
+    queue.Rejected(_, _) -> False
+  }
   let wanted =
-    list.flat_map(loaded, fn(stored) { leased_group(stored.run, action) })
+    bool.guard(!published, [], fn() {
+      list.flat_map(loaded, fn(stored) { leased_group(stored.run, action) })
+    })
   use #(groups, group_expects) <- result.try(load_groups(reader, wanted))
   use #(proofs, proofs_text) <- result.try(counter(
     reader,
@@ -1013,7 +1081,11 @@ pub fn finish(
     )
     |> result.map_error(Refused),
   )
-  let #(proof_writes, used) = group_writes(groups, next.cache, proofs)
+  let newest =
+    bool.guard(!published, None, fn() {
+      option.from_result(list.first(next.cache))
+    })
+  let #(proof_writes, used) = group_writes(groups, next.cache, proofs, newest)
 
   // A new proof takes a number, so the counter must still be what was read.
   let counter_expects =
@@ -1086,16 +1158,14 @@ fn lane_names(waiting: List(#(Key, String))) -> List(#(String, String)) {
 
 /// The name a path component stands for, undoing `name`.
 fn unname(component: String) -> Result(String, Nil) {
-  use hex <- result.try(
-    string.remove_prefix(component, "x") |> option_of_changed(component),
-  )
-  use bytes <- result.try(bit_array.base16_decode(hex))
-  bit_array.to_string(bytes)
-}
-
-/// The text after a prefix was removed, or an error if nothing was removed.
-fn option_of_changed(removed: String, original: String) -> Result(String, Nil) {
-  bool.guard(removed == original, Error(Nil), fn() { Ok(removed) })
+  // A name is `x` and its hex.
+  case component {
+    "x" <> hex -> {
+      use bytes <- result.try(bit_array.base16_decode(hex))
+      bit_array.to_string(bytes)
+    }
+    _ -> Error(Nil)
+  }
 }
 
 /// Record a preparation exactly as `queue.record_preparation` does, against

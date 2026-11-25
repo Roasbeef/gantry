@@ -16,7 +16,7 @@
 %% every follower's empty poll, so every voter must run this release.
 -module(gantry_khepri_ffi).
 -export([start_system/1, local_node/0, directory_known/0, start_store/0,
-         join/1, sync_directory/0, ready/0, get/1, many/1, list/1,
+         join/1, sync_directory/0, ready/0, fence/0, get/1, many/1, list/1,
          commit/2, legacy/0, forget_legacy/0, gated/2, check_query/2]).
 
 -define(SYSTEM, gantry_queue_ra).
@@ -102,7 +102,26 @@ get(Key) ->
 
 %% Read several keys from the local replica, in the order asked.
 many(Keys) ->
-    read_call(fun() -> {ok, [element(2, one(path(Key))) || Key <- Keys]} end).
+    read_call(fun() -> many_values(Keys, []) end).
+
+%% Read each key in turn, stopping at the first read that fails.
+many_values([], Values) -> {ok, lists:reverse(Values)};
+many_values([Key | Rest], Values) ->
+    case one(path(Key)) of
+        {ok, Value} -> many_values(Rest, [Value | Values]);
+        {error, _} = Error -> Error
+    end.
+
+%% Wait until this replica has applied everything committed so far, so a read
+%% that follows sees the effects of operations that finished on any voter.
+fence() ->
+    with_deadline(fun() ->
+        try khepri:fence(?STORE, ?TIMEOUT) of
+            ok -> {ok, nil};
+            Other -> failure(Other)
+        catch Class:Why -> failure({Class, Why})
+        end
+    end).
 
 %% Every key below Prefix that holds a value, with that value.
 list(Prefix) ->

@@ -297,3 +297,80 @@ pub fn a_prepared_candidate_is_admitted_only_into_a_free_lane_test() {
     )
   assert image.keys(unchanged) == image.keys(store)
 }
+
+/// A task of a run with its own pool and recipe, for scenarios that need two.
+fn task_in(
+  id: String,
+  name: String,
+  recipe: String,
+  pool: String,
+) -> queue.Task {
+  queue.Task(action(name, []), id, recipe, pool, "image")
+}
+
+fn claim_in(
+  both: Both,
+  worker: String,
+  pool: String,
+  now: Int,
+) -> #(Both, option.Option(queue.Assignment)) {
+  let #(next, assignment) = queue.claim(both.state, worker, pool, now)
+  #(replay(both, audit.Claim(worker, pool, now), next), assignment)
+}
+
+pub fn a_lapsed_run_beyond_the_window_does_not_jump_the_ready_queue_test() {
+  // One run proves the shared recipe, so the next eight runs are all reuses.
+  let both = admit(start(), "s0", True)
+  let #(both, first) = claim(both, "w0", 0)
+  let assert Some(job) = first
+  let both = finish(both, job)
+  let both =
+    numbers(1, 8)
+    |> list.fold(both, fn(both, n) {
+      admit(both, "x" <> int.to_string(n), True)
+    })
+  let both = admit(both, "y9", False)
+
+  // The last run has one action in another pool, leased and then lapsed, so
+  // a claim loads it for the expiry although it is far from the front.
+  let work = [
+    task_in("z10", "side", "z10-side", "other"),
+    task_in("z10", "build", "z10-build", "pool"),
+  ]
+  let assert Ok(#(state, _)) =
+    queue.admit(both.state, "z10", "repo", "z10", "check", queue.Build, work)
+  let assert Ok(store) =
+    audit.admit(
+      both.store,
+      both.state,
+      "z10",
+      "repo",
+      "z10",
+      "check",
+      queue.Build,
+      work,
+    )
+  let both = Both(state, store)
+  let #(both, _) = claim_in(both, "wo", "other", 1)
+
+  // The oldest ready run that no reuse consumed is y9, not z10.
+  let #(_, offered) = claim_in(both, "w", "pool", 100_000)
+  let assert Some(job) = offered
+  assert job.run == "y9"
+}
+
+pub fn a_republished_proof_becomes_the_newest_test() {
+  // Two runs share a recipe and are both leased before either finishes.
+  let both =
+    ["a", "b", "c"]
+    |> list.fold(start(), fn(both, id) { admit(both, id, id != "c") })
+  let #(both, first) = claim(both, "w1", 0)
+  let #(both, second) = claim(both, "w2", 0)
+  let #(both, third) = claim(both, "w3", 0)
+  let assert #(Some(a), Some(b), Some(c)) = #(first, second, third)
+
+  // The second run publishes an identical proof last, which `queue` moves to
+  // the front, so retention would drop the others first.
+  let both = finish(both, a) |> finish(c) |> finish(b)
+  assert list.length(both.state.cache) == 2
+}

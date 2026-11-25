@@ -86,7 +86,7 @@ pub fn replay(
   case op {
     Claim(worker, pool, now) -> {
       let #(after, receipt) = queue.claim(state, worker, pool, now)
-      planned(store, layout.claim(reader, worker, pool, now), "claim", fn(plan) {
+      planned(layout.claim(reader, worker, pool, now), "claim", fn(plan) {
         case layout.receipt(plan) == receipt {
           True -> {
             use next <- result.try(conclude(store, plan, True, after, "claim"))
@@ -113,7 +113,6 @@ pub fn replay(
       let after = queue.expire(state, now)
       let pool = "\u{0}pool"
       planned(
-        store,
         layout.claim(reader, "\u{0}expire", pool, now),
         "expire",
         fn(plan) {
@@ -137,7 +136,7 @@ pub fn replay(
       )
     Landings -> {
       let #(after, intents) = queue.landings(state)
-      planned(store, layout.landings(reader), "landings", fn(plan) {
+      planned(layout.landings(reader), "landings", fn(plan) {
         conclude(
           store,
           plan,
@@ -156,21 +155,15 @@ pub fn replay(
       )
     Retain(retention) -> {
       let after = queue.retain(state, retention)
-      planned(
-        store,
-        layout.retain(reader, retention, 1_000_000),
-        "retain",
-        fn(plan) {
-          conclude(store, plan, !layout.receipt(plan), after, "retain")
-        },
-      )
+      planned(layout.retain(reader, retention, 1_000_000), "retain", fn(plan) {
+        conclude(store, plan, !layout.receipt(plan), after, "retain")
+      })
     }
   }
 }
 
 /// Turn a planning failure into a difference, or continue with the plan.
 fn planned(
-  _store: Image,
   outcome: Result(layout.Plan(a), layout.Failure),
   label: String,
   then: fn(layout.Plan(a)) -> Result(Image, String),
@@ -219,7 +212,7 @@ fn conclude(
     layout.materialize(image.reader(next))
     |> result.map_error(fn(_) { label <> ": image does not decode" }),
   )
-  case receipt_matches, found == after, indexed(next, after) {
+  case receipt_matches, found == after, indexed(next) {
     False, _, _ -> Error(label <> ": receipts differ")
     True, False, _ -> Error(label <> ": state differs")
     True, True, False -> Error(label <> ": index differs from runs")
@@ -228,12 +221,11 @@ fn conclude(
 }
 
 /// Whether the index keys of the image are exactly those the runs derive.
-fn indexed(store: Image, state: queue.State) -> Bool {
+fn indexed(store: Image) -> Bool {
   let numbered = result.unwrap(layout.numbered(image.reader(store)), [])
   let wanted =
     list.flat_map(numbered, fn(pair) { layout.entries(pair.0, pair.1) })
     |> dict.from_list
-  let _ = state
   let present =
     image.keys(store)
     |> list.filter(fn(key) {

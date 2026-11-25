@@ -109,8 +109,8 @@ The old snapshot also capped how many runs the queue could hold, because a
 mutation past 4 MiB was refused. The cap goes with it, so admission now checks
 `counter/runs` against `layout.max_runs` (10,000) and refuses a new run as
 unavailable past that. Retention lowers the counter. The bound limits the
-memory a flood of admissions can take, and it is a limit on state and not on
-throughput.
+number of runs a flood of admissions can add, and it is a limit on the count,
+not on bytes or throughput. A run's size is bounded by request validation.
 
 ### What the plans owe
 
@@ -121,6 +121,12 @@ indexes as running the same operation on the whole state, and must return the
 same receipt. The simulations run both paths in lockstep and count a mismatch
 as a safety violation. A mutation that makes an index entry skip a run, or
 drops an expectation, must fail them.
+
+Reads come from the local replica, which can lag the leader. A commit compares
+what a plan read, so a stale read costs a retry and never a wrong write. A
+refusal has no such check, so the store waits for the replica to catch up and
+plans again before it believes one, and a stale plan waits the same way before
+it retries.
 
 One ordering rule is weaker than before and is written down here. A claim
 reads the ready index and then the runs, so a run that becomes ready between
