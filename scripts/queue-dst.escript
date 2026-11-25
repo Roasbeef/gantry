@@ -14,6 +14,19 @@ run(["swarm", S, C, E]) ->
     {Micros, ok} = timer:tc(fun() -> swarm(Seed, 1, Count, Events) end),
     io:format("swarm seed=~B schedules=~B events=~B seconds=~.3f schedules_per_second=~.1f~n",
         [Seed, Count, Events, Micros / 1000000, Count * 1000000 / max(1, Micros)]);
+run(["sweep", F, C, E]) ->
+    First = number(F, 1, 2147483646),
+    Count = number(C, 1, 1000000),
+    Events = number(E, 1, 4096),
+    {Micros, Violations} = timer:tc(fun() -> queue_churn_dst:sweep(First, Count, Events) end),
+    io:format("sweep first=~B seeds=~B events=~B seconds=~.3f safety_violations=~B~n",
+        [First, Count, Events, Micros / 1000000, Violations]),
+    case Violations of
+        0 -> ok;
+        _ -> halt(1)
+    end;
+run(["churn", S, E]) ->
+    queue_churn_dst:describe(number(S, 1, 2147483646), number(E, 1, 4096));
 run(["replay", S, E]) ->
     io:format("~tp~n", [queue_dst:replay_seed(number(S, 1, 2147483646), number(E, 1, 4096))]);
 run(["ops", Mask | Ops]) when length(Ops) =< 4096 ->
@@ -36,7 +49,7 @@ run(["guided", S, C]) ->
         [Seed, Count, length(Corpus), length(Seen), Micros / 1000000]);
 run(_) ->
     io:format(standard_error,
-        "Usage: scripts/queue-dst.sh swarm SEED COUNT EVENTS | replay SEED EVENTS | ops MASK [BYTE ...] | guided SEED COUNT~n", []),
+        "Usage: scripts/queue-dst.sh swarm SEED COUNT EVENTS | replay SEED EVENTS | ops MASK [BYTE ...] | guided SEED COUNT | sweep FIRST COUNT EVENTS | churn SEED EVENTS~n", []),
     halt(2).
 
 number(Text, Low, High) ->
