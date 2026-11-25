@@ -39,7 +39,9 @@ gantry init --local
 ```
 
 Init creates a private profile, runs a Docker smoke build, and reports its
-run ID and artifact digest. Use `gantry local start` to keep the local
+run ID and artifact digest. The installed `gantry` CLI, onboarding
+included, runs on the bundled BEAM runtime and needs no jq, curl, or
+OpenSSL. Use `gantry local start` to keep the local
 services running, and `gantry skill` to give an agent the CLI instructions.
 [Local and remote setup](docs/running.md#verify-a-local-installation)
 
@@ -73,6 +75,7 @@ controller. From your project checkout, use a commit available on the
 registered remote. Set `GANTRY_URL` and `GANTRY_TOKEN` for the controller.
 
 ```sh
+# The installed `gantry`, or the source shim, which needs Gleam and Erlang.
 gantry=/path/to/gantry/scripts/gantry
 revision=$(git rev-parse HEAD)
 run_id="check-$(date +%s)"

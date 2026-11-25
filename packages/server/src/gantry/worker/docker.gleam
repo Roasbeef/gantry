@@ -2,6 +2,8 @@
 //// Cleanup looks up persisted names. Starting an action uses its immutable
 //// container ID so a delayed request cannot start a replacement.
 //// The transfer_fault boundary rejects bad evidence and retries offline reads.
+//// Onboarding uses `probe` and `prepare_image` to check a host with the same
+//// cleared Docker environment and image rules the worker runs with.
 
 import envoy
 import gantry/blobs
@@ -75,6 +77,74 @@ pub fn limits() -> Result(Limits, String) {
     1_048_576,
   ))
   Ok(Limits(cpus, memory, workspace))
+}
+
+/// Check that the Docker daemon answers within ten seconds.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.probe()
+/// ```
+pub fn probe() -> Result(Nil, String) {
+  let reply =
+    ffi_worker.docker(
+      ["info", "--format", "{{.ServerVersion}}"],
+      10_000,
+      4096,
+      ffi_worker.Combined,
+    )
+
+  // Any answer other than a clean exit leaves the host unready.
+  case reply {
+    Ok(ffi_worker.Command(status: 0, ..)) -> Ok(Nil)
+    Ok(_) -> Error("Docker did not answer docker info")
+    Error(reason) -> Error(reason)
+  }
+}
+
+/// Make a pinned image available locally, pulling it once if needed. A
+/// failed pull returns its output so a caller can keep it as a log.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.prepare_image("alpine@sha256:...")
+/// ```
+pub fn prepare_image(image: String) -> Result(Nil, String) {
+  use Nil <- result.try(
+    validate_image(image) |> result.replace_error("invalid image reference"),
+  )
+  let inspect =
+    ffi_worker.docker(
+      ["image", "inspect", image],
+      10_000,
+      4096,
+      ffi_worker.Combined,
+    )
+
+  // A local copy is enough. Otherwise one bounded pull fetches it.
+  case inspect {
+    Ok(ffi_worker.Command(status: 0, ..)) -> Ok(Nil)
+    Ok(_) | Error(_) -> {
+      use pulled <- result.try(ffi_worker.docker(
+        ["pull", image],
+        120_000,
+        65_536,
+        ffi_worker.Combined,
+      ))
+
+      // The pull output explains a failure better than its status.
+      case pulled.status {
+        0 -> Ok(Nil)
+        _ ->
+          Error(
+            bit_array.to_string(pulled.bytes)
+            |> result.unwrap("docker pull failed"),
+          )
+      }
+    }
+  }
 }
 
 /// Remove all resources associated with a previously started attempt.

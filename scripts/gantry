@@ -3,5 +3,5 @@
 set -euo pipefail
 server=$(CDPATH= cd -- "$(dirname -- "$0")/../packages/server" && pwd -P)
 (cd -- "$server" && gleam build --no-print-progress) >&2
-exec erl -pa "$server"/build/dev/erlang/*/ebin -noshell \
+exec erl +Bd -pa "$server"/build/dev/erlang/*/ebin -noshell \
   -eval "'gantry@@main':run('gantry@cli')" -extra "$@"

@@ -95,6 +95,13 @@ gantry watch check-123 --output json
 gantry blob "$digest" --output raw > artifact.bin
 ```
 
+`gantry init --local`, `gantry local start`, `gantry worker setup`, and
+`gantry worker start` run in the same program. Their profiles, processes,
+and exit codes are described in the [deployment runbook](running.md).
+`--token-stdin` reads the worker token as one line up to end of input, so
+an interactive user types the token, Enter, and Ctrl-D. The token is
+echoed on a terminal, so prefer redirecting it from a private file.
+
 Plan, run, submit, status, and describe produce one JSON object. Watch emits
 changed run states as NDJSON and ends on a terminal outcome. Failed and
 blocked terminal states are included in the stream before exit 1. If the

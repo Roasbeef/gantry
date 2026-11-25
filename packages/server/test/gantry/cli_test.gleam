@@ -3,6 +3,7 @@
 //// and response processing stay live while no controller runs.
 
 import gantry/cli
+import gantry/cli/failure
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
@@ -442,8 +443,11 @@ pub fn schema_exit_codes_match_the_cli_test() {
   let documented =
     list.sort(
       list.map(
-        [cli.Failed, cli.Invalid, cli.Unauthorized, cli.Missing, cli.Conflict],
-        fn(exit) { string.inspect(cli.exit_code(exit)) },
+        [
+          failure.Failed, failure.Invalid, failure.Unauthorized, failure.Missing,
+          failure.Conflict,
+        ],
+        fn(exit) { string.inspect(failure.exit_code(exit)) },
       ),
       string.compare,
     )
@@ -531,7 +535,7 @@ fn invoke(fake: Fake, arguments: List(String)) -> Outcome {
           cli.Version -> Ok("Gantry test")
         }
       },
-      onboard: fn(_) { Error("onboarding is not part of this test") },
+      release: fn() { Error(Nil) },
     )
   let code = cli.run(host, arguments)
   let events = drain(events, [])

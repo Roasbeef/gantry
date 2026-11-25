@@ -28,15 +28,22 @@
 ////
 //// `Host` carries every effect: environment reads, the HTTP transport, file
 //// and stdin reads, stdout and stderr writes, the clock, sleeping, bundled
-//// resources, and the onboarding helper. Tests substitute each one. The real
+//// resources, and the release location. Tests substitute each one. The real
 //// host in `host` sends through `http_send`, reads its files through
 //// `bundled`, and reaches the stdout bytes and the exit status through
-//// `gantry/internal/ffi_host`.
+//// `gantry/internal/ffi_host`. Onboarding runs the CLI inside this VM
+//// through `embedded`, which captures output with `drain`.
 
 import argv
 import envoy
 import gantry/blobs
 import gantry/cli/document.{type Document, type Fields}
+import gantry/cli/failure.{
+  type Failure, Conflict, Failed, Failure, Invalid, Missing, Reported,
+  Unauthorized, failed, invalid, invalid_input,
+}
+import gantry/cli/onboarding
+import gantry/cli/origin
 import gantry/internal/ffi_host
 import gantry_core/protocol
 import gantry_core/queue
@@ -83,8 +90,9 @@ pub type Host {
     sleep: fn(Int) -> Nil,
     /// Read a bundled resource.
     resource: fn(Resource) -> Result(String, Nil),
-    /// Run an onboarding command and return its exit status.
-    onboard: fn(Onboarding) -> Result(Int, String),
+    /// Locate the release's `bin` directory, which holds the controller
+    /// and worker launchers onboarding starts.
+    release: fn() -> Result(String, Nil),
   )
 }
 
@@ -100,43 +108,10 @@ pub type Resource {
   Version
 }
 
-/// An onboarding command after argument checks.
-pub type Onboarding {
-  Onboarding(
-    command: String,
-    arguments: List(String),
-    fields: Option(String),
-    token_stdin: Flag,
-  )
-}
-
 /// Whether a flag appeared on the command line.
 pub type Flag {
   Set
   Unset
-}
-
-/// The exit status classes of a failed invocation.
-pub type Exit {
-  Failed
-  Invalid
-  Unauthorized
-  Missing
-  Conflict
-
-  /// A child already reported its own failure with this status.
-  Reported(status: Int)
-}
-
-/// A failed invocation and the JSON envelope it reports on stderr.
-pub type Failure {
-  Failure(
-    exit: Exit,
-    code: String,
-    message: String,
-    field: Option(String),
-    http_status: Option(Int),
-  )
 }
 
 /// A CLI command.
@@ -234,6 +209,9 @@ const commands = [
 /// gantry status build-1 --fields id,phase
 /// ```
 pub fn main() -> Nil {
+  // A signalled CLI stops at once with the shell's 128 + signal status.
+  // Supervised children follow through their death signal.
+  ffi_host.default_terminate()
   let code = run(host(), argv.load().arguments)
   ffi_host.exit(code)
 }
@@ -262,55 +240,10 @@ pub fn run(host: Host, arguments: List(String)) -> Int {
     Ok(Nil) -> 0
     Error(Failure(exit: Reported(status), ..)) -> status
     Error(failure) -> {
-      host.report(json.to_string(envelope(failure)))
-      exit_code(failure.exit)
+      host.report(json.to_string(failure.envelope(failure)))
+      failure.exit_code(failure.exit)
     }
   }
-}
-
-/// Map an exit class to its documented status.
-///
-/// ## Examples
-///
-/// ```gleam
-/// assert cli.exit_code(cli.Conflict) == 6
-/// ```
-pub fn exit_code(exit: Exit) -> Int {
-  case exit {
-    Failed -> 1
-    Invalid -> 2
-    Unauthorized -> 3
-    Missing -> 4
-    Conflict -> 6
-    Reported(status) -> status
-  }
-}
-
-/// Encode a failure as the stderr envelope.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // cli.envelope(failure) |> json.to_string
-/// // -> {"error":{"code":"not_found","message":"unknown run","http_status":404}}
-/// ```
-pub fn envelope(failure: Failure) -> json.Json {
-  let optional = [
-    option.map(failure.field, fn(field) { #("field", json.string(field)) }),
-    option.map(failure.http_status, fn(status) {
-      #("http_status", json.int(status))
-    }),
-  ]
-  json.object([
-    #(
-      "error",
-      json.object([
-        #("code", json.string(failure.code)),
-        #("message", json.string(failure.message)),
-        ..option.values(optional)
-      ]),
-    ),
-  ])
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +682,7 @@ fn online(
 ) -> Result(Nil, Failure) {
   // Onboarding owns its own endpoints. The rest talk to GANTRY_URL.
   case command {
-    Init | Local | Worker -> onboarding(host, command, options)
+    Init | Local | Worker -> onboarding(host, command, options, fields)
     Plan | RunBuild | Submit -> {
       use base <- result.try(controller_url(host))
       admit(host, command, options, base, fields)
@@ -761,12 +694,13 @@ fn online(
   }
 }
 
-/// Check an onboarding command line, then hand it to the helper. The
-/// helper reports its own failures, so its status passes through as is.
+/// Check an onboarding command line, then run it in `gantry/cli/onboarding`
+/// with effects drawn from this host.
 fn onboarding(
   host: Host,
   command: Command,
   options: Options,
+  fields: Option(Fields),
 ) -> Result(Nil, Failure) {
   let name = command_name(command)
   let usage = "Run gantry describe " <> name <> " for usage."
@@ -778,30 +712,104 @@ fn onboarding(
     options.fields == None
     && options.output == None
     && options.token_stdin == Unset
+  let effects = fn() {
+    use bin <- result.map(
+      host.release()
+      |> result.map_error(fn(_) {
+        failed(
+          "missing_release",
+          "Run this command with the installed Linux release.",
+        )
+      }),
+    )
+    onboarding.Effects(
+      environment: host.environment,
+      transport: host.transport,
+      read_stdin: host.read_stdin,
+      write: host.write,
+      report: host.report,
+      clock: host.clock,
+      sleep: host.sleep,
+      client: fn(arguments, overrides) { embedded(host, arguments, overrides) },
+      bin:,
+    )
+  }
 
   // Each subcommand has a fixed shape. Anything else names its usage.
-  use Nil <- result.try(case command, options.arguments {
-    Init, [] if options.local == Set -> Ok(Nil)
+  case command, options.arguments {
+    Init, [] if options.local == Set -> {
+      use effects <- result.try(effects())
+      onboarding.init_local(effects, fields)
+    }
+    Local, ["start"] if starting -> {
+      use effects <- result.try(effects())
+      onboarding.local_start(effects)
+    }
+    Worker, ["start"] if starting -> {
+      use effects <- result.try(effects())
+      use status <- result.try(onboarding.worker_start(effects))
+
+      // The worker reported its own failure on this terminal.
+      case status {
+        0 -> Ok(Nil)
+        status -> Error(Failure(Reported(status), "", "", None, None))
+      }
+    }
+    Worker, ["setup", endpoint, pool] -> {
+      use effects <- result.try(effects())
+
+      // The flag picks stdin. Otherwise the environment supplies the token.
+      let source = case options.token_stdin {
+        Set -> onboarding.FromStdin
+        Unset -> onboarding.FromEnvironment
+      }
+
+      onboarding.worker_setup(effects, endpoint, pool, source, fields)
+    }
     Init, _ -> Error(invalid_input("Use gantry init --local."))
-    Local, ["start"] | Worker, ["start"] if starting -> Ok(Nil)
     Local, ["start"] | Worker, ["start"] ->
       Error(invalid_input("Use gantry " <> name <> " start."))
-    Worker, ["setup", _, _] -> Ok(Nil)
     Worker, ["setup", ..] ->
       Error(invalid_input(
         "Use gantry worker setup HTTPS_URL POOL [--token-stdin].",
       ))
     _, _ -> Error(invalid_input(usage))
-  })
+  }
+}
 
-  let job =
-    Onboarding(name, options.arguments, options.fields, options.token_stdin)
+/// Run the CLI inside this VM with environment overrides and captured
+/// output, as onboarding's smoke build does for run, watch, and blob. The
+/// captured messages are collected once the run returns.
+fn embedded(
+  host: Host,
+  arguments: List(String),
+  overrides: List(#(String, String)),
+) -> #(Int, BitArray, String) {
+  let output = process.new_subject()
+  let errors = process.new_subject()
+  let outer = host.environment
+  let inner =
+    Host(
+      ..host,
+      environment: fn(name) {
+        list.key_find(overrides, name) |> result.lazy_or(fn() { outer(name) })
+      },
+      write: process.send(output, _),
+      report: process.send(errors, _),
+    )
+  let status = run(inner, arguments)
+  #(
+    status,
+    bit_array.concat(drain(output, [])),
+    string.join(drain(errors, []), "\n"),
+  )
+}
 
-  // The helper already wrote its own envelope when it fails.
-  case host.onboard(job) {
-    Ok(0) -> Ok(Nil)
-    Ok(status) -> Error(Failure(Reported(status), "", "", None, None))
-    Error(reason) -> Error(failed("missing_helper", reason))
+/// Collect every message already in a subject's mailbox, oldest first.
+fn drain(subject: process.Subject(a), acc: List(a)) -> List(a) {
+  case process.receive(subject, 0) {
+    Ok(item) -> drain(subject, [item, ..acc])
+    Error(Nil) -> list.reverse(acc)
   }
 }
 
@@ -1227,10 +1235,12 @@ fn controller_url(host: Host) -> Result(String, Failure) {
   }
 
   // The path may hold only unreserved characters and slashes.
-  use port <- result.try(authority_port(authority) |> result.map_error(bad))
+  use port <- result.try(
+    origin.parse_authority(authority) |> result.map_error(bad),
+  )
   let clean =
     list.all(string.to_graphemes(path), fn(c) {
-      alphanumeric(c) || string.contains("._~/-", c)
+      origin.alphanumeric(c) || string.contains("._~/-", c)
     })
   use <- bool.lazy_guard(!clean, fn() { Error(bad(Nil)) })
 
@@ -1240,67 +1250,6 @@ fn controller_url(host: Host) -> Result(String, Failure) {
       Error(invalid("Controller port must be at most 65535.", "GANTRY_URL"))
     _ -> Ok(url)
   }
-}
-
-/// Split a host and an optional port of one to five digits.
-fn authority_port(authority: String) -> Result(Option(Int), Nil) {
-  // A bracketed IPv6 literal may itself contain colons.
-  let #(host, port) = case authority {
-    "[" <> rest ->
-      case string.split_once(rest, "]") {
-        Ok(#(address, "")) -> #("[" <> address <> "]", Ok(None))
-        Ok(#(address, ":" <> port)) -> #("[" <> address <> "]", Ok(Some(port)))
-        _ -> #("", Error(Nil))
-      }
-    _ ->
-      case string.split_once(authority, ":") {
-        Ok(#(name, port)) -> #(name, Ok(Some(port)))
-        Error(Nil) -> #(authority, Ok(None))
-      }
-  }
-
-  use port <- result.try(port)
-  use <- bool.guard(!valid_host(host), Error(Nil))
-
-  // A port is one to five digits.
-  case port {
-    None -> Ok(None)
-    Some(digits) ->
-      case string.drop_start(digits, 5) {
-        "" -> decimal(digits) |> result.map(Some)
-        _ -> Error(Nil)
-      }
-  }
-}
-
-/// Check a host name of letters, digits, dots, dashes, and underscores, or
-/// a bracketed IPv6 literal of hex digits, colons, and dots.
-fn valid_host(host: String) -> Bool {
-  case host {
-    "" -> False
-    "[" <> address ->
-      case string.ends_with(address, "]") {
-        True -> {
-          let address = string.drop_end(address, 1)
-          address != ""
-          && list.all(string.to_graphemes(address), fn(c) {
-            string.contains("0123456789abcdefABCDEF:.", c)
-          })
-        }
-        False -> False
-      }
-    _ ->
-      list.all(string.to_graphemes(host), fn(c) {
-        alphanumeric(c) || string.contains("._-", c)
-      })
-  }
-}
-
-fn alphanumeric(c: String) -> Bool {
-  string.contains(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-    c,
-  )
 }
 
 /// Read the first non-empty credential among the accepted variables. A
@@ -1440,18 +1389,6 @@ fn write_line(host: Host, line: String) -> Nil {
   host.write(bit_array.from_string(line <> "\n"))
 }
 
-fn invalid(message: String, field: String) -> Failure {
-  Failure(Invalid, "invalid_input", message, Some(field), None)
-}
-
-fn invalid_input(message: String) -> Failure {
-  Failure(Invalid, "invalid_input", message, None, None)
-}
-
-fn failed(code: String, message: String) -> Failure {
-  Failure(Failed, code, message, None, None)
-}
-
 // ---------------------------------------------------------------------------
 // The process host
 // ---------------------------------------------------------------------------
@@ -1484,7 +1421,7 @@ fn host() -> Host {
     },
     sleep: process.sleep,
     resource: bundled,
-    onboard: onboard_helper,
+    release: fn() { release_root() |> result.map(fn(root) { root <> "/bin" }) },
   )
 }
 
@@ -1551,31 +1488,4 @@ fn bundled(resource: Resource) -> Result(String, Nil) {
       |> result.try(fn(root) { read(root <> "/releases/gantry-version") })
       |> result.map(string.trim)
   }
-}
-
-/// Run the release's onboarding helper attached to this terminal.
-fn onboard_helper(job: Onboarding) -> Result(Int, String) {
-  let missing = "Could not find the Gantry onboarding helper."
-  use root <- result.try(release_root() |> result.replace_error(missing))
-  let helper = root <> "/share/gantry/gantry-onboard"
-  use <- bool.guard(simplifile.is_file(helper) != Ok(True), Error(missing))
-
-  // The helper reads its flags as Bash words.
-  let token_stdin = case job.token_stdin {
-    Set -> "true"
-    Unset -> "false"
-  }
-
-  ffi_host.run_attached(
-    "bash",
-    [
-      helper,
-      root <> "/bin",
-      job.command,
-      option.unwrap(job.fields, ""),
-      token_stdin,
-      ..job.arguments
-    ],
-    [],
-  )
 }

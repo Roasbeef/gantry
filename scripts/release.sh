@@ -58,16 +58,18 @@ for launcher in gantryd gantry-worker gantry; do
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
       'root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)'
     # The CLI reads its arguments after -extra and serves --version itself.
+    # Its +Bd lets Ctrl-C end the VM instead of opening the BREAK menu.
+    flags=
     if [[ $launcher != gantry ]]; then
       printf '%s\n' "if [[ \"\${1:-}\" == --version ]]; then printf '%s\\n' 'Gantry $version ($commit)'; exit 0; fi"
+    else
+      flags='+Bd '
     fi
-    printf '%s\n' "exec \"\$root/$erts_dir\" -noshell -boot \"\$root/releases/$version/start\" -s '$module' main -extra \"\$@\""
+    printf '%s\n' "exec \"\$root/$erts_dir\" $flags-noshell -boot \"\$root/releases/$version/start\" -s '$module' main -extra \"\$@\""
   } > "$dist/bin/$launcher"
   chmod +x "$dist/bin/$launcher"
 done
 install -D -m 0644 packages/server/priv/gantry-schema.json "$dist/share/gantry/cli-schema.json"
-install -m 0755 scripts/gantry-onboard "$dist/share/gantry/gantry-onboard"
-install -D -m 0644 scripts/gantry-onboarding "$dist/share/gantry/gantry-onboarding"
 install -D -m 0644 skills/gantry/SKILL.md "$dist/share/gantry/skill/SKILL.md"
 printf 'Gantry %s (%s)\n' "$version" "$commit" > "$dist/releases/gantry-version"
 chmod -R u+rwX,go+rX "$dist"

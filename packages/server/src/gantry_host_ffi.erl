@@ -1,6 +1,8 @@
 %% Keep host arguments structured and redact the environment from errors.
 -module(gantry_host_ffi).
--export([run/4, sync_path/1, write_stdout/1, read_stdin/0, run_attached/3, halt/1]).
+-export([run/4, sync_path/1, write_stdout/1, read_stdin/0, run_attached/3, halt/1,
+         open_service/4, service_pid/1, service_event/1, tcp_open/3,
+         default_terminate/0]).
 
 -define(LOG_LIMIT, 16384).
 
@@ -125,3 +127,47 @@ attached(Port) ->
 %% Flush buffered port output, then stop the VM with the given status.
 halt(Status) ->
     erlang:halt(Status, [{flush, true}]).
+
+%% Start a supervised child whose standard output and error arrive as port
+%% messages. The child inherits a fresh session from erl_child_setup, so its
+%% pid is also its process group ID.
+open_service(Program, Args, Env, Directory) ->
+    case os:find_executable(chars(Program)) of
+        false -> {error, <<Program/binary, " executable not found">>};
+        Executable ->
+            try
+                {ok, open_port({spawn_executable, Executable}, [
+                    binary, exit_status, use_stdio, stderr_to_stdout, hide,
+                    {args, lists:map(fun chars/1, Args)},
+                    {env, [{chars(Key), chars(Value)} || {Key, Value} <- Env]},
+                    {cd, chars(Directory)}
+                ])}
+            catch
+                error:badarg -> {error, <<"could not start ", Program/binary>>};
+                error:system_limit -> {error, <<"host port limit reached">>}
+            end
+    end.
+
+service_pid(Port) ->
+    case erlang:port_info(Port, os_pid) of
+        {os_pid, Pid} -> {ok, Pid};
+        undefined -> {error, nil}
+    end.
+
+%% Translate a port message into the Gleam ServiceEvent variants.
+service_event({Port, {data, Data}}) when is_port(Port) -> {ok, {output, Data}};
+service_event({Port, {exit_status, Status}}) when is_port(Port) -> {ok, {exited, Status}};
+service_event(_) -> {error, nil}.
+
+%% Report whether something accepts TCP connections at the address.
+tcp_open(Host, Port, Milliseconds) ->
+    case gen_tcp:connect(chars(Host), Port, [], Milliseconds) of
+        {ok, Socket} -> gen_tcp:close(Socket), true;
+        {error, _} -> false
+    end.
+
+%% Restore the operating system's action for SIGTERM, so the VM ends with
+%% status 143 at once instead of running init:stop and exiting 0.
+default_terminate() ->
+    os:set_signal(sigterm, default),
+    nil.
