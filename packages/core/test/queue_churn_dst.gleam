@@ -17,6 +17,7 @@
 //// reassigned for the queue to finish.
 
 import gantry_core/graph
+import gantry_core/image.{type Image}
 import gantry_core/protocol
 import gantry_core/queue
 import gleam/dict.{type Dict}
@@ -27,6 +28,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import layout_audit as audit
 
 /// The reconciler's view of one observed ref, as in `submit.reconcile`.
 type Decision {
@@ -61,6 +63,7 @@ type Worker {
 type World {
   World(
     durable: queue.State,
+    store: Image,
     controllers: List(Controller),
     workers: List(Worker),
     ghosts: List(queue.Assignment),
@@ -92,7 +95,7 @@ pub const safety = [
   "landed_without_write", "codec_mismatches", "nondeterministic",
   "lane_overlaps", "waiting_built", "out_of_order_preparations",
   "pending_in_failed", "uncapped_reasons", "retention_dropped_live",
-  "retention_lost_proofs",
+  "retention_lost_proofs", "layout_mismatches",
 ]
 
 /// Counters that report liveness after the heal phase.
@@ -387,27 +390,35 @@ fn start() -> World {
     #("build-only", None),
     #("c", Some("main")),
   ]
-  let durable =
-    list.fold(specs, queue.empty(), fn(state, spec) {
+  let #(durable, store, mismatches) =
+    list.fold(specs, #(queue.empty(), image.empty(), 0), fn(acc, spec) {
+      let #(state, store, bad) = acc
       let #(id, lane) = spec
-      let assert Ok(#(next, _)) = case lane {
-        None ->
-          queue.admit(state, id, "repo", id, "check", queue.Build, tasks(id))
-        Some(branch) ->
-          queue.admit(
-            state,
-            id,
-            "repo",
-            "",
-            "check",
-            queue.Waiting(branch, [queue.Member(1, id)]),
-            [],
-          )
+      let #(revision, submission, work) = case lane {
+        None -> #(id, queue.Build, tasks(id))
+        Some(branch) -> #("", queue.Waiting(branch, [queue.Member(1, id)]), [])
       }
-      next
+      let assert Ok(#(next, _)) =
+        queue.admit(state, id, "repo", revision, "check", submission, work)
+      case
+        audit.admit(
+          store,
+          state,
+          id,
+          "repo",
+          revision,
+          "check",
+          submission,
+          work,
+        )
+      {
+        Ok(stored) -> #(next, stored, bad)
+        Error(_) -> #(next, audit.import_state(next), bad + 1)
+      }
     })
   World(
     durable:,
+    store:,
     controllers: [Controller(Idle, None), Controller(Idle, None)],
     workers: [Worker("build", 0, None), Worker("test", 0, None)],
     ghosts: [],
@@ -420,7 +431,10 @@ fn start() -> World {
     writes: [],
     issued: dict.new(),
     fresh: 0,
-    counts: dict.new(),
+    counts: case mismatches {
+      0 -> dict.new()
+      n -> dict.from_list([#("layout_mismatches", n)])
+    },
     samples: [],
     event: 0,
     clock: 0,
@@ -561,7 +575,8 @@ fn current_lease(
 
 /// Commit a proposal through controller `k`. A changed state is a committed
 /// transition: check new leases and close any pending recovery sample.
-fn commit(world: World, k: Int, next: queue.State) -> World {
+fn commit(world: World, k: Int, op: audit.Op, next: queue.State) -> World {
+  let world = shadow(world, op, next)
   case next == world.durable {
     True -> world
     False -> {
@@ -579,6 +594,21 @@ fn commit(world: World, k: Int, next: queue.State) -> World {
           )
       }
       World(..world, durable: next)
+    }
+  }
+}
+
+/// Run the operation through the indexed layout on the reference store. The
+/// layout must leave the runs, proofs, serial, and index exactly as the whole
+/// state transition did. After a difference the store resynchronizes, so one
+/// bug counts once.
+fn shadow(world: World, op: audit.Op, next: queue.State) -> World {
+  case audit.replay(world.store, world.durable, op) {
+    Ok(store) -> World(..world, store:)
+    Error(detail) -> {
+      io.println("LAYOUT MISMATCH " <> detail)
+      World(..world, store: audit.import_state(next))
+      |> bump("layout_mismatches")
     }
   }
 }
@@ -803,7 +833,7 @@ fn prepare(world: World, k: Int, refuse: Bool) -> World {
           |> bump("prepared_groups")
         Error(_) -> bump(world, "preparation_refusals")
       }
-      commit(world, k, next)
+      commit(world, k, audit.Prepare(offer, outcome), next)
     }
   }
 }
@@ -820,7 +850,12 @@ fn offer_placeholder(offers: List(queue.Preparation)) -> queue.Preparation {
 fn elapse(world: World, k: Int) -> World {
   // The jump outlasts the lease slack plus the fixture's action timeout.
   let world = World(..world, clock: world.clock + 1000)
-  commit(world, k, queue.expire(world.durable, world.clock))
+  commit(
+    world,
+    k,
+    audit.Expire(world.clock),
+    queue.expire(world.durable, world.clock),
+  )
 }
 
 /// Let leases lapse at the end of an expiring heal round.
@@ -852,7 +887,7 @@ fn retention(world: World, k: Int) -> World {
   |> flag("retention_lost_proofs", after.cache != list.take(before.cache, 6))
   |> tally(dropped)
   |> bump_by("retained_dropped", list.length(dropped))
-  |> commit(k, after)
+  |> commit(k, audit.Retain(queue.Retention(1, 6)), after)
 }
 
 /// Poll through controller `k`. A lost reply leaves the lease committed.
@@ -863,7 +898,8 @@ fn poll(world: World, k: Int, pool: String, lose: Bool) -> World {
     None -> {
       let #(next, assignment) =
         queue.claim(world.durable, worker_id(w), pool, world.clock)
-      let world = commit(world, k, next)
+      let world =
+        commit(world, k, audit.Claim(worker_id(w), pool, world.clock), next)
       let held = case lose {
         True -> None
         False -> assignment
@@ -931,7 +967,15 @@ fn report(
         True -> world
         False -> bump(world, "stale_acceptances")
       }
-      #(commit(world, k, next), True)
+      let op =
+        audit.Finish(
+          job.run,
+          action,
+          queue.lease_worker(job.lease),
+          queue.lease_serial(job.lease),
+          completion,
+        )
+      #(commit(world, k, op, next), True)
     }
   }
 }
@@ -1099,7 +1143,7 @@ fn step(world: World, k: Int) -> World {
       // Each reconcile tick prepares the heads of free lanes before landing.
       let world = prepare(world, k, False)
       let #(next, intents) = queue.landings(world.durable)
-      let world = commit(world, k, next)
+      let world = commit(world, k, audit.Landings, next)
       let other = held_intents(controller(world, 1 - k).program)
       let world = case
         list.any(intents, fn(i) {
@@ -1193,8 +1237,10 @@ fn step(world: World, k: Int) -> World {
         Error(_) -> world
         Ok(next) ->
           case open {
-            True -> commit(world, k, next)
-            False -> bump(world, "double_resolutions") |> commit(k, next)
+            True -> commit(world, k, audit.RecordLanding(intent, outcome), next)
+            False ->
+              bump(world, "double_resolutions")
+              |> commit(k, audit.RecordLanding(intent, outcome), next)
           }
       }
       set_program(world, k, Replying(rest))

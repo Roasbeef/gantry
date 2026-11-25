@@ -225,7 +225,7 @@ pub fn encode_completion(value: queue.Completion) -> json.Json {
 }
 
 /// Encode a run exactly as the durable image stores it.
-fn encode_stored_run(value: queue.Run) -> json.Json {
+pub fn encode_stored_run(value: queue.Run) -> json.Json {
   json.object([
     #("id", json.string(value.id)),
     #("repo", json.string(value.repo)),
@@ -564,14 +564,14 @@ fn encode_proof(value: queue.Proof) -> json.Json {
 }
 
 /// Decode a proof remembered for one repository.
-fn remembered_decoder() -> decode.Decoder(queue.Remembered) {
+pub fn remembered_decoder() -> decode.Decoder(queue.Remembered) {
   use repo <- decode.field("repo", decode.string)
   use proof <- decode.field("proof", proof_decoder())
   decode.success(queue.Remembered(repo, proof))
 }
 
 /// Encode a proof remembered for one repository.
-fn encode_remembered(value: queue.Remembered) -> json.Json {
+pub fn encode_remembered(value: queue.Remembered) -> json.Json {
   json.object([
     #("repo", json.string(value.repo)),
     #("proof", encode_proof(value.proof)),

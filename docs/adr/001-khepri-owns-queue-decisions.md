@@ -71,7 +71,7 @@ sorted listing is in enrollment order.
 
 | Key | Holds | Answers |
 | --- | --- | --- |
-| `serial`, `seq`, `proofs` | A counter each | The next lease serial, enrollment number, and proof number |
+| `counter/serial`, `counter/seq`, `counter/proofs` | A counter each | The next lease serial, enrollment number, and proof number |
 | `run/<id>` | The run and its enrollment number | Lookup by identity |
 | `ready/<pool>/<seq>` | The run's ID | The oldest run with an action a slot in `pool` can take now |
 | `active/<seq>` | The earliest lease deadline and the workers holding leases | Which leases lapsed, and whether a worker already holds one |
