@@ -172,6 +172,8 @@ fn agent_or_worker(
   then: fn() -> Reply,
 ) -> Reply {
   let worker = bearer(req) |> result.try(config.worker_for(cfg, _))
+
+  // The agent token or any registered worker credential may read.
   case accepts(req, cfg.agent_token), worker {
     True, _ | False, Ok(_) -> then()
     False, Error(Nil) ->

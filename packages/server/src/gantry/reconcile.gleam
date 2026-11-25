@@ -4,12 +4,13 @@
 ////
 //// ## Flow
 ////
-//// Every second the actor runs `maintain_queue`, then reads the landing
-//// intents from the queue. For each intent that is due it asks
-//// `submit.reconcile` for the observed outcome and records a definite one
-//// through the queue. Any error is logged and moves the intent's next
-//// attempt later. A resolved intent leaves the table, and so does an intent
-//// that another controller resolved first.
+//// Every second the actor runs `maintain_queue`, then `tick` reads the
+//// landing intents from the queue. For each intent that is `due`, `attempt`
+//// asks `submit.reconcile` for the observed outcome and records a definite
+//// one through the queue. Any error is logged, and `failed` moves the
+//// intent's next attempt later. `resolved` removes an intent that reached a
+//// decision, and `tick` drops an intent that another controller resolved
+//// first.
 ////
 //// | Event for an intent | Retry table |
 //// | --- | --- |
@@ -89,6 +90,8 @@ fn maintain_queue(state: State) -> State {
 
 /// Reconcile faults outside the HTTP path. Unknown outcomes retain authority.
 fn tick(state: State, now: Int) -> State {
+  // An unreadable queue changes nothing. Otherwise each due intent gets an
+  // attempt, and intents that left the queue lose their retry entries.
   case store.change(fn(snapshot) { Ok(queue.landings(snapshot)) }) {
     Error(reason) -> {
       log_failure("cannot read landing intents", reason)
@@ -114,9 +117,12 @@ fn attempt(
   now: Int,
 ) -> Dict(String, Retry) {
   let name = key(intent)
+
+  // An intent inside its backoff window waits for a later tick.
   case due(retries, name, now) {
     False -> retries
     True ->
+      // A decision clears the entry, and an error doubles the wait.
       case reconcile_one(cfg, intent) {
         Ok(Nil) -> resolved(retries, name)
         Error(reason) -> {
@@ -161,10 +167,12 @@ pub fn failed(
   name: String,
   now: Int,
 ) -> Dict(String, Retry) {
+  // A first failure waits the base delay. Later ones double the last wait.
   let delay = case dict.get(retries, name) {
     Ok(previous) -> int.min(previous.delay * 2, longest_delay)
     Error(Nil) -> first_delay
   }
+
   dict.insert(retries, name, Retry(not_before: now + delay, delay:))
 }
 
@@ -198,6 +206,7 @@ fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
     submit.Landed -> Ok(Nil)
     submit.Refused(reason) -> Error(reason)
   }
+
   store.change(fn(state) {
     queue.record_landing(state, intent, recorded)
     |> result.map(fn(next) { #(next, Nil) })
@@ -209,9 +218,16 @@ fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
 /// that is down, or a record another controller already wrote, is a
 /// warning. Anything else needs an operator.
 fn log_failure(context: String, reason: Fault) -> Nil {
+  // Dependency failures clear themselves, and the fault kinds below describe
+  // a request or durable state that an operator must look at.
   let level = case reason {
     fault.Unavailable(_) | fault.Conflict(_) -> logging.Warning
-    _ -> logging.Error
+    fault.Invalid(_)
+    | fault.Unauthorized(_)
+    | fault.Forbidden(_)
+    | fault.NotFound(_)
+    | fault.Internal(_) -> logging.Error
   }
+
   logging.log(level, "reconciler: " <> context <> ": " <> fault.detail(reason))
 }

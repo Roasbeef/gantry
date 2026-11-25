@@ -92,10 +92,12 @@ pub fn new_worker(
   worker_token: String,
   journal: String,
 ) -> Result(Worker, Nil) {
+  // Setup supplies no token when the operator has none to bring.
   let worker_token = case worker_token {
     "" -> token(32)
     supplied -> supplied
   }
+
   use <- bool.guard(
     !request.valid_id(pool) || !credential(worker_token),
     Error(Nil),

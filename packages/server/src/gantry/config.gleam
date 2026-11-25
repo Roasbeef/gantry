@@ -226,6 +226,8 @@ fn validate_workers(
   let ids = list.map(workers, fn(worker) { worker.id })
   let digests = list.map(workers, fn(worker) { worker.token_sha256 })
   let roles = [token_digest(secrets.agent), token_digest(secrets.submit)]
+
+  // No entry at all is the earlier shared-token format.
   case workers {
     [] -> Error(legacy_format)
     _ ->

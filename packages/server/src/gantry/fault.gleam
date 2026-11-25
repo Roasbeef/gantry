@@ -2,12 +2,14 @@
 //// kinds, so the HTTP layer picks a status from the variant and never from
 //// the wording of a message.
 ////
-//// ## Flow
+//// ## Kinds
 ////
 //// A lower layer (store, Git, GitHub, blobs) classifies a failure where it
 //// happens, because only that layer knows whether a retry can help. The
-//// request layer passes the value through unchanged, and `http_api` maps it
-//// to a status once.
+//// request layer passes the value through unchanged. The HTTP layer calls
+//// `status` once to pick the response code, and `detail` supplies the
+//// message. The table below lists each kind. Nothing else inspects a fault
+//// to decide what to do with it.
 ////
 //// | Kind | Meaning | Caller response | Status |
 //// | --- | --- | --- | --- |
@@ -19,10 +21,10 @@
 //// | `Unavailable` | A dependency failed or timed out. | Retry later. | 503 |
 //// | `Internal` | Durable state or a promised invariant is broken. | Operator action. | 500 |
 ////
-//// The Erlang Khepri bridge builds `Unavailable` and `Internal` values as
-//// `{unavailable, Detail}` and `{internal, Detail}`, which is how Gleam
-//// represents these variants on the BEAM. Renaming either variant requires
-//// the same change in `gantry_khepri_ffi.erl`.
+//// The Erlang Khepri bridge builds Unavailable and Internal values as the
+//// tuples `{unavailable, Detail}` and `{internal, Detail}`, which is how
+//// Gleam represents these variants on the BEAM. Renaming either variant
+//// requires the same change in the bridge.
 
 /// Why a controller operation failed, and who can fix it.
 pub type Fault {

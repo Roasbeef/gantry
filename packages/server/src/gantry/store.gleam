@@ -10,7 +10,9 @@
 //// The Erlang bridge performs single Khepri, Ra and ETS calls. This module
 //// decides what to do with them: whether a node bootstraps or joins, which
 //// marker it trusts, how large a snapshot may be, and when a remembered
-//// quiet snapshot may answer a poll.
+//// quiet snapshot may answer a poll. The remembered snapshot and every
+//// leader comparison use the SHA-256 `digest` of its bytes, so a poll
+//// sends 32 bytes to the leader and receives a boolean.
 ////
 //// | Marker file | Seed | Decision |
 //// | --- | --- | --- |
@@ -125,6 +127,7 @@ fn open_replica(directory: String, seed: String) -> Result(Nil, Fault) {
     opening(identity, node, seed) |> result.map_error(fault.Internal),
   )
 
+  // Each way of opening ends with a started store server.
   use Nil <- result.try(case how {
     // Khepri creates a new singleton if Ra cannot find the server. An
     // established voter must refuse that fallback after disk loss.
@@ -196,6 +199,7 @@ fn snapshot() -> Result(#(String, queue.State), Fault) {
     True -> Error(fault.Internal("invalid durable queue snapshot"))
     False -> Ok(Nil)
   })
+
   use state <- result.try(
     json.parse(bytes, protocol.state_decoder())
     |> result.replace_error(fault.Internal("invalid durable queue snapshot")),
@@ -267,10 +271,13 @@ pub fn claim(
 /// Ask the leader whether the remembered quiet snapshot is still current.
 /// A changed snapshot drops the hint, and the poll takes the full path.
 fn confirm_quiet() -> Result(QuietCheck, Fault) {
+  // With nothing remembered there is nothing to confirm.
   case ffi_khepri.hint_read() {
     Error(Nil) -> Ok(NeedsClaim)
     Ok(remembered) -> {
       use outcome <- result.try(ffi_khepri.matches(remembered))
+
+      // The leader's answer decides whether the poll may stop here.
       case outcome {
         Accepted -> Ok(ConfirmedQuiet)
         SnapshotChanged -> {

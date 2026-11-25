@@ -1,5 +1,9 @@
 //// Source archives, logs and outputs are immutable content-addressed bytes.
 //// Queue transitions reference objects after their atomic publication.
+////
+//// `put` stages the bytes under a random name, flushes the file and each
+//// directory above it with `sync`, and renames the file into place, so a
+//// reader sees the whole object or none of it.
 
 import gantry/fault.{type Fault}
 import gantry/internal/ffi_host
@@ -137,6 +141,9 @@ pub fn get(root: String, id: String) -> Result(BitArray, Fault) {
 /// ```
 pub fn require(root: String, id: String) -> Result(Nil, Fault) {
   use Nil <- result.try(check_digest(id))
+
+  // A missing path and a damaged one are different failures. Only a regular
+  // file within the limit can be a published object.
   case simplifile.file_info(root <> "/objects/" <> id) {
     Ok(info) ->
       case simplifile.file_info_type(info), info.size <= limit {

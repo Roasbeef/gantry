@@ -4,9 +4,10 @@
 ////
 //// ## Flow
 ////
-//// Admission reads a pull over REST and `validate_submission` checks it.
-//// Landing reads the same pull over GraphQL, because GraphQL reports the
-//// merge state authoritatively, and `landing_verdict` judges it. Both
+//// Admission calls `read_pull` for a REST response and `validate_submission`
+//// to check it. Landing calls `read_landing_pull` for the same pull over
+//// GraphQL, because GraphQL reports the merge state authoritatively, and
+//// `landing_verdict` judges it. Both
 //// decoders produce one `Pull`, so state and mergeability have one
 //// spelling in the controller. Network and decoding failures are `Fault`s
 //// that leave a landing intent open. A policy refusal is a `Verdict`, so
@@ -197,6 +198,8 @@ fn graphql_decoder() -> decode.Decoder(Pull) {
 /// REST spells states in lowercase and GraphQL in uppercase.
 fn state_decoder() -> decode.Decoder(PullState) {
   use text <- decode.then(decode.string)
+
+  // An unknown state is a decoding failure and never a guess.
   case string.lowercase(text) {
     "open" -> decode.success(Open)
     "closed" -> decode.success(Closed)
@@ -208,6 +211,8 @@ fn state_decoder() -> decode.Decoder(PullState) {
 /// Convert the wire boolean into a domain variant at the boundary.
 fn readiness_decoder() -> decode.Decoder(Readiness) {
   use draft <- decode.then(decode.bool)
+
+  // The wire boolean becomes a named state.
   case draft {
     True -> decode.success(Draft)
     False -> decode.success(Ready)
@@ -217,6 +222,8 @@ fn readiness_decoder() -> decode.Decoder(Readiness) {
 /// REST spells merge states in lowercase and GraphQL in uppercase.
 fn mergeability_decoder() -> decode.Decoder(Mergeability) {
   use text <- decode.then(decode.string)
+
+  // An unknown merge state is a decoding failure and never a guess.
   case string.lowercase(text) {
     "clean" -> decode.success(Clean)
     "behind" -> decode.success(Behind)

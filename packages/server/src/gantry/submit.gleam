@@ -7,8 +7,9 @@
 //// `reconcile` fetches the target and the stored bundle, then decides from
 //// history alone whether the candidate already landed, the target moved
 //// away from the tested base, or the same update can still be replayed.
-//// Before a replay it checks policy, and it dispatches the push only when
-//// every member passes.
+//// Before a replay, `check_members` asks `check_member` for each pull's
+//// verdict, and the push is dispatched only when every member passes.
+//// `confirm_refusal` looks at the target once more before a refusal stands.
 ////
 //// | Observation | Result |
 //// | --- | --- |
@@ -95,6 +96,9 @@ pub fn reconcile(
     False, False -> Ok(Refused(advanced))
     False, True -> {
       use verdict <- result.try(check_members(cfg, repo, s, c))
+
+      // Only a permitted pull reaches the push. A refusal is checked once
+      // more, and an unknown merge state leaves the intent open.
       case verdict {
         github.Permitted -> {
           use _ <- result.try(
@@ -130,6 +134,8 @@ fn confirm_refusal(
 ) -> Result(Outcome, Fault) {
   use observed <- result.try(git.fetch(s, target))
   use landed <- result.try(git.ancestor(s, c.commit, observed))
+
+  // The second look can show a landing, an advance, or the same base.
   case landed, observed == c.base {
     True, _ -> Ok(Landed)
     False, False -> Ok(Refused(advanced))
@@ -162,6 +168,7 @@ fn check_member(
   c: queue.Candidate,
   m: queue.Member,
 ) -> Result(github.Verdict, Fault) {
+  // The provider decides where the pull's current state comes from.
   case repo.provider {
     config.GitHub(target) -> {
       use pull <- result.try(github.read_landing_pull(
@@ -173,6 +180,8 @@ fn check_member(
     }
     config.Local(_) -> {
       use actual <- result.try(prepare.member(cfg, repo, s, m.pull))
+
+      // The pin must still name the head that was tested.
       case actual == m {
         True -> Ok(github.Permitted)
         False ->

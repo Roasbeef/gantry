@@ -3,13 +3,14 @@
 ////
 //// ## Flow
 ////
-//// `start` loads configuration and opens the Khepri replica, which has its
-//// own OTP supervision under the Ra system. It then starts one supervisor
-//// with two children, the HTTP listener and the submit reconciler. The
-//// children are independent, so the supervisor restarts only the one that
-//// crashes. Weft provides the reconciler's actor but has no supervisor of
-//// its own, so the tree uses `gleam_otp`'s static supervisor, which accepts
-//// Weft's `supervised` child specification and Mist's.
+//// `main` calls `start`, which loads configuration and opens the Khepri
+//// replica, which has its own OTP supervision under the Ra system. `start`
+//// then calls `supervise` to start one supervisor with two children, the
+//// HTTP listener and the submit reconciler. The children are independent, so
+//// the supervisor restarts only the one that crashes. Weft provides the
+//// reconciler's actor but has no supervisor of its own, so the tree uses the
+//// static supervisor from the OTP package, which accepts the child
+//// specifications of both Weft and Mist.
 ////
 //// A child that crashes more than five times in a minute exceeds the
 //// supervisor's restart tolerance. The supervisor then exits, `main` sees

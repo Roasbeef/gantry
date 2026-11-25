@@ -296,11 +296,12 @@ pub fn worker_setup(
       |> result.map_error(local_io)
     False -> Ok(Nil)
   })
+
   use Nil <- result.try(check_remote(
     effects,
     endpoint,
     profile.worker_token(slot),
-    worker_entry_for(slot),
+    worker_stanza(profile.worker_id(slot), profile.worker_token(slot)),
   ))
 
   emit(
@@ -678,22 +679,25 @@ pub fn controller_config(directory: String, local: profile.Local) -> String {
   )
 }
 
-/// Write the controller configuration and cookie once, and the client
-/// environment every time, through atomic saves.
-fn write_local_files(
+/// Write the controller configuration once, so an operator's edits survive.
+/// A file from an earlier release lists no worker and would fail to load, so
+/// the local worker is appended to it once.
+fn write_controller_config(
   directory: String,
   local: profile.Local,
-  endpoint: String,
 ) -> Result(Nil, String) {
-  let config = controller_config(directory, local)
-
-  // The configuration is written once, so an operator's edits survive. A
-  // file from an earlier release lists no worker and would fail to load, so
-  // the local worker is appended to it once.
   let path = directory <> "/controller.toml"
-  use Nil <- result.try(case simplifile.read(path) {
-    Error(_) -> profile.save(directory, "controller.toml", config)
+
+  // A missing file is new, and a saved one is kept unless it lacks workers.
+  case simplifile.read(path) {
+    Error(_) ->
+      profile.save(
+        directory,
+        "controller.toml",
+        controller_config(directory, local),
+      )
     Ok(saved) ->
+      // Only the earlier format needs the worker appended.
       case string.contains(saved, "[[worker]]") {
         True -> Ok(Nil)
         False ->
@@ -703,7 +707,17 @@ fn write_local_files(
             string.trim_end(saved) <> "\n\n" <> worker_entry(local),
           )
       }
-  })
+  }
+}
+
+/// Write the controller configuration and cookie once, and the client
+/// environment every time, through atomic saves.
+fn write_local_files(
+  directory: String,
+  local: profile.Local,
+  endpoint: String,
+) -> Result(Nil, String) {
+  use Nil <- result.try(write_controller_config(directory, local))
 
   // The controller's HOME holds its distribution cookie, readable only by
   // this user.
@@ -1373,11 +1387,6 @@ fn worker_entry(local: profile.Local) -> String {
     profile.local_worker_id(local),
     profile.local_worker_token(local),
   )
-}
-
-/// The `controller.toml` entry that registers a remote slot.
-fn worker_entry_for(slot: profile.Worker) -> String {
-  worker_stanza(profile.worker_id(slot), profile.worker_token(slot))
 }
 
 /// A `[[worker]]` table naming a worker and the digest of its token. The

@@ -265,6 +265,7 @@ fn archive(
         ["."] -> []
         other -> other
       }
+
       let path = git.scratch(s, "source.tar")
       let read = {
         use _ <- result.try(git.command(
@@ -295,6 +296,7 @@ fn archive(
           False ->
             Error(fault.Invalid("source archive exceeds worker transfer limit"))
         })
+
         simplifile.read_bits(path)
         |> result.replace_error(fault.Unavailable("cannot read Git archive"))
       }

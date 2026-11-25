@@ -5,8 +5,10 @@
 ////
 //// ## Flow
 ////
-//// `session` takes the repository's lock, creates the mirror on first use,
-//// and runs the caller's work against it. The lock is a node-local OTP
+//// `session` takes the repository's lock, creates the mirror on first use
+//// with `open`, and runs the caller's work against it. `fetch` resolves a
+//// ref or object to a commit, `command` and `ancestor` read it, and
+//// `preserve` publishes a candidate bundle. The lock is a node-local OTP
 //// global lock keyed by repository name. It serializes the shared state
 //// that concurrent Git processes would corrupt: `FETCH_HEAD`, the
 //// `refs/heads/candidate` name, the attributes file and the archive scratch
@@ -18,6 +20,9 @@
 //// | Mirror | `<data>/mirrors/<owner>/<name>.git` | Persists. Deleting it is safe, and the next request refetches. |
 //// | Tracking refs | `refs/gantry/...` in the mirror | Persist, so a fetch advertises what it already has. |
 //// | Scratch files | Beside the mirror, random names | Deleted by the call that made them. |
+////
+//// `preserve` writes a candidate bundle under a random name in shared
+//// storage, flushes it with `sync`, and renames it into place.
 
 import gantry/blobs
 import gantry/config
@@ -70,6 +75,7 @@ pub fn session(
       ])
     }
   }
+
   let s = Session(mirror(cfg, repo), url, environment(configuration))
 
   ffi_lock.with_lock(repo.name, fn() {
@@ -112,6 +118,7 @@ fn mirror(cfg: config.Config, repo: config.Repository) -> String {
 /// finished initializing, so a crash midway leaves a directory that the
 /// next call initializes again.
 fn open(s: Session) -> Result(Nil, Fault) {
+  // A finished initialization is the only state worth reusing.
   case simplifile.is_file(s.dir <> "/HEAD") {
     Ok(True) -> Ok(Nil)
     Ok(False) | Error(_) -> {
@@ -174,6 +181,7 @@ pub fn command(s: Session, args: List(String)) -> Result(String, Fault) {
 /// // git.fetch(s, "refs/heads/main")
 /// ```
 pub fn fetch(s: Session, reference: String) -> Result(String, Fault) {
+  // A ref moves, so it is tracked and refetched. An object ID is fixed.
   case string.starts_with(reference, "refs/") {
     True -> {
       let tracking = "refs/gantry/" <> string.drop_start(reference, 5)
