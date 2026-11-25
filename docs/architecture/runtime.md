@@ -376,13 +376,15 @@ and the journaled receipt refer to uploaded bytes by digest.
 
 `store.change` computes a pure proposal from a fenced local snapshot.
 A mutation compares and swaps the exact snapshot bytes through Khepri.
-An unchanged proposal asks a Ra leader query, after the leader confirms
-its authority with a majority, whether its copy hashes to the SHA-256 of
-the expected bytes. Only that answer returns to the caller. A conflict causes
+An unchanged proposal reads the tree through a Ra consistent query, which
+the leader answers only after it confirms its authority with a majority, and
+the controller compares the snapshot's SHA-256 with the expected bytes. The
+query names only Khepri's own `get_tree`, so a leader running an older
+Gantry build can answer it during a rolling upgrade. A conflict causes
 the store to rebuild the proposal, with up to eight total attempts.
 When every action in a snapshot is terminal, a controller can remember
 its digest locally. A worker poll first checks that digest through the
-same leader query. A match proves there is no lease to issue or
+same consistent query. A match proves there is no lease to issue or
 replay. A miss runs the normal claim decision.
 The controller allows up to 64 MiB per blob. It syncs object bytes
 before atomic rename and syncs the containing directory before
@@ -401,7 +403,8 @@ where the queue records it. The reconciler on every controller then trims the
 snapshot once a minute (`queue.retain`): it drops the oldest terminal runs
 beyond `[retention] keep_runs` and the oldest remembered proofs beyond
 `keep_proofs` in `controller.toml`. The defaults are 200 and 1000, and the
-accepted ranges are 1 to 5000 and 1 to 20000. A run that is not terminal, that
+accepted ranges are 1 to 1000 and 1 to 5000, which keep a full
+snapshot of typical runs under the 4 MiB ceiling. A run that is not terminal, that
 holds a lane, or that waits for one is never dropped. A dropped run loses its
 status, and reuse continues from the proof index until its proofs are
 dropped too.

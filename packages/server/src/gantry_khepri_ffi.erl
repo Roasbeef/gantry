@@ -11,8 +11,7 @@
 -module(gantry_khepri_ffi).
 -export([start_system/1, local_node/0, directory_known/0, start_store/0,
          join/1, sync_directory/0, create/1, ready/0, read/0, matches/1,
-         swap/2, hint_open/0, hint_read/0, hint_remember/1, hint_forget/1,
-         query_matches/2]).
+         swap/2, hint_open/0, hint_read/0, hint_remember/1, hint_forget/1]).
 
 -define(SYSTEM, gantry_queue_ra).
 -define(STORE, gantry_queue).
@@ -108,32 +107,30 @@ read() ->
         end
     end).
 
-%% Ask the Ra leader, after it confirms its authority with a quorum, whether
-%% the snapshot hashes to Digest. Only the answer crosses the network.
+%% Ask the Ra leader, after it confirms its authority with a quorum, for the
+%% tree, then compare the snapshot's hash here. The query names only
+%% khepri_machine:get_tree/1, which every voter's Khepri exports, so a leader
+%% still running an older Gantry build answers it. A Gantry function run on the
+%% leader would crash an older leader's Ra server, because Ra applies the query
+%% without a catch.
 matches(Digest) ->
     with_deadline(fun() ->
         try ra:consistent_query(
-              {?STORE, node()}, {?MODULE, query_matches, [Digest]}, ?TIMEOUT) of
-            {ok, true, _Leader} -> {ok, accepted};
-            {ok, false, _Leader} -> {ok, snapshot_changed};
-            {ok, invalid, _Leader} -> corrupt(<<"invalid durable queue snapshot">>);
+              {?STORE, node()}, {khepri_machine, get_tree, []}, ?TIMEOUT) of
+            {ok, Tree, _Leader} ->
+                case khepri_tree:find_matching_nodes(Tree, ?PATH, #{props_to_return => [payload]}) of
+                    {ok, #{?PATH := #{data := Bytes}}} when is_binary(Bytes) ->
+                        case crypto:hash(sha256, Bytes) =:= Digest of
+                            true -> {ok, accepted};
+                            false -> {ok, snapshot_changed}
+                        end;
+                    _ -> corrupt(<<"invalid durable queue snapshot">>)
+                end;
             {timeout, _} -> unavailable(<<"queue quorum read timed out">>);
             Other -> failure(Other)
         catch Class:Why -> failure({Class, Why})
         end
     end).
-
-%% Runs on the Ra leader against Khepri 0.19.3's machine state. This
-%% adapter owns the dependency on that version's tree interface. Every
-%% voter that can lead must export it, so a rolling upgrade moves leadership
-%% to an upgraded voter before quiet polls can be confirmed.
-query_matches(Digest, MachineState) ->
-    Tree = khepri_machine:get_tree(MachineState),
-    case khepri_tree:find_matching_nodes(Tree, ?PATH, #{props_to_return => [payload]}) of
-        {ok, #{?PATH := #{data := Bytes}}} when is_binary(Bytes) ->
-            crypto:hash(sha256, Bytes) =:= Digest;
-        _ -> invalid
-    end.
 
 %% Replace Expected with Proposed if the stored bytes are still Expected.
 %% A deadline leaves the outcome unknown, because the command may commit
