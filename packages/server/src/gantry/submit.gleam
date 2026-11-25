@@ -126,9 +126,15 @@ pub fn reconcile(
           )
 
           // The remote can decline the update outright, as a protected branch
-          // hook does. That is a definite answer, so it goes through the same
-          // second look as a policy refusal. Transport failures stay open.
-          case status, string.contains(out, "[remote rejected]") {
+          // hook or repository rule does. That is a definite answer, so it goes
+          // through the same second look as a policy refusal. A lock or ref
+          // update failure, which a concurrent push from another controller
+          // causes, and transport failures stay open.
+          case
+            status,
+            string.contains(out, "[remote rejected]")
+            && string.contains(out, "declined")
+          {
             0, _ -> Ok(Landed)
             _, True ->
               confirm_refusal(
