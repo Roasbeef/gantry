@@ -3,12 +3,18 @@
 //// controller can crash at any point of the landing sequence and restart from
 //// the persisted codec bytes. Both can reconcile the same intent at once.
 //// Workers can vanish while holding a lease, restart under the same ID, and
-//// deliver late results. The fixture shares one recipe across two runs so a
-//// proof is reused, and a fault can reject a completion.
+//// deliver late results. Leases lapse and are reassigned under a new serial,
+//// so a late result is stale and a poisoned action fails its run. Submissions
+//// wait for their lane, are prepared in order as it frees, and a preparation
+//// can be refused. The provider can deny a landing. Retention drops finished
+//// runs while the proof index keeps reuse working. The fixture shares one
+//// recipe across two runs so a proof is reused, and a fault can reject a
+//// completion with an oversized reason.
 ////
 //// Violations are counted rather than asserted so a sweep reports numbers.
 //// The heal phase restores reliable delivery to live workers and controllers
-//// only. A vanished worker never returns, so a lease it held stays visible.
+//// only. A vanished worker never returns, so its lease must expire and be
+//// reassigned for the queue to finish.
 
 import gantry_core/graph
 import gantry_core/protocol
@@ -19,12 +25,14 @@ import gleam/io
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 
 /// The reconciler's view of one observed ref, as in `submit.reconcile`.
 type Decision {
   AlreadyLanded
   Advanced
+  Denied
   Push
 }
 
@@ -35,7 +43,7 @@ type Program {
   Decided(intent: queue.Intent, decision: Decision, rest: List(queue.Intent))
   Recording(
     intent: queue.Intent,
-    outcome: Result(Nil, String),
+    outcome: Result(Nil, queue.Block),
     pushed: Bool,
     rest: List(queue.Intent),
   )
@@ -59,6 +67,9 @@ type World {
     vanished: List(String),
     refs: Dict(String, String),
     parents: Dict(String, String),
+    mask: Int,
+    prepared: List(String),
+    expired: List(Int),
     writes: List(#(String, String, String)),
     issued: Dict(Int, #(String, String, String)),
     fresh: Int,
@@ -79,13 +90,16 @@ pub const safety = [
   "duplicate_admissions", "stale_acceptances", "double_writes",
   "double_resolutions", "untested_writes", "unauthorized_writes",
   "landed_without_write", "codec_mismatches", "nondeterministic",
+  "lane_overlaps", "waiting_built", "out_of_order_preparations",
+  "pending_in_failed", "uncapped_reasons", "retention_dropped_live",
+  "retention_lost_proofs",
 ]
 
 /// Counters that report liveness after the heal phase.
 pub const liveness = [
   "stuck_active_seeds", "stuck_active_vanished_seeds",
-  "stuck_active_other_seeds", "stuck_landing_seeds", "nonterminal_runs",
-  "nonterminal_lanes",
+  "stuck_active_other_seeds", "stuck_landing_seeds", "stuck_runs",
+  "nonterminal_runs", "nonterminal_lanes",
 ]
 
 /// Counters that show each fault class was exercised.
@@ -96,7 +110,10 @@ pub const coverage = [
   "push_lease_failures", "external_advances", "force_pushes",
   "vanished_with_lease", "replayed_claims", "late_accepted", "late_rejected",
   "cache_hits", "rejected_runs", "landed_runs", "blocked_runs",
-  "recovery_censored",
+  "recovery_censored", "expiries", "reassignments", "expired_results_rejected",
+  "returned_after_expiry", "poisoned_runs", "poison_drops", "skipped_actions",
+  "prepared_groups", "preparation_refusals", "policy_denials",
+  "retained_dropped", "oversized_reasons",
 ]
 
 /// Expand a seed with the same Park–Miller stream as `queue_dst`.
@@ -120,7 +137,7 @@ pub fn run_seed(seed: Int, events: Int) -> Report {
 /// ```
 pub fn run(mask: Int, ops: List(Int)) -> Report {
   let world =
-    list.fold(ops, start(), fn(world, op) {
+    list.fold(ops, World(..start(), mask:), fn(world, op) {
       let world = tick(world, mask, op)
       World(
         ..world,
@@ -128,7 +145,7 @@ pub fn run(mask: Int, ops: List(Int)) -> Report {
         clock: world.clock + 5 + op * 13 % 41,
       )
     })
-  Report(classify(heal(world, 0, 40)))
+  Report(classify(heal(world, 0, 60)))
 }
 
 /// Read the counters of one report.
@@ -267,7 +284,7 @@ pub fn describe(seed: Int, events: Int) -> Nil {
     io.println(
       run.id
       <> " "
-      <> queue.phase(run)
+      <> string.inspect(queue.phase(run))
       <> " "
       <> string.inspect(list.map(run.work, fn(w) { w.step })),
     )
@@ -301,7 +318,7 @@ fn schedule(seed: Int, events: Int) -> #(Int, List(Int)) {
       let next = next_seed(state.0)
       #(next, [next % 256, ..state.1])
     })
-  #(mask % 128, list.reverse(ops))
+  #(mask % 1024, list.reverse(ops))
 }
 
 fn next_seed(seed: Int) -> Int {
@@ -324,34 +341,42 @@ fn add(counts: Dict(String, Int), name: String, by: Int) -> Dict(String, Int) {
   })
 }
 
+fn bump_by(world: World, name: String, by: Int) -> World {
+  World(..world, counts: add(world.counts, name, by))
+}
+
 fn bump(world: World, name: String) -> World {
   World(..world, counts: add(world.counts, name, 1))
 }
 
-/// Admit two candidates on `main`, one on `release`, and a build that shares
-/// the first candidate's producer recipe.
+/// Admit waiting groups on `main` and `release` and a build that shares the
+/// first group's producer recipe. A group is prepared when its lane frees.
 fn start() -> World {
   let specs = [
-    #("a", Some(#("main", "main-0")), "producer-shared"),
-    #("r", Some(#("release", "rel-0")), "producer-r"),
-    #("b", Some(#("main", "main-0")), "producer-b"),
-    #("build-only", None, "producer-shared"),
+    #("a", Some("main")),
+    #("r", Some("release")),
+    #("b", Some("main")),
+    #("s", Some("release")),
+    #("build-only", None),
+    #("c", Some("main")),
   ]
   let durable =
     list.fold(specs, queue.empty(), fn(state, spec) {
-      let #(id, lane, recipe) = spec
-      let submission = case lane {
-        None -> queue.Build
-        Some(#(branch, base)) ->
-          queue.Queued(queue.Candidate(branch, base, id, [queue.Member(1, id)]))
+      let #(id, lane) = spec
+      let assert Ok(#(next, _)) = case lane {
+        None ->
+          queue.admit(state, id, "repo", id, "check", queue.Build, tasks(id))
+        Some(branch) ->
+          queue.admit(
+            state,
+            id,
+            "repo",
+            "",
+            "check",
+            queue.Waiting(branch, [queue.Member(1, id)]),
+            [],
+          )
       }
-      let producer = graph.Action("build", ["build"], [], ["out"], [], [], 10)
-      let consumer = graph.Action("test", ["test"], [], [], ["build"], [], 10)
-      let assert Ok(#(next, _)) =
-        queue.admit(state, id, "repo", id, "check", submission, [
-          queue.Task(producer, id, recipe, "build", "image"),
-          queue.Task(consumer, id, "consumer-" <> id, "test", "image"),
-        ])
       next
     })
   World(
@@ -361,11 +386,10 @@ fn start() -> World {
     ghosts: [],
     vanished: [],
     refs: dict.from_list([#("main", "main-0"), #("release", "rel-0")]),
-    parents: dict.from_list([
-      #("a", "main-0"),
-      #("b", "main-0"),
-      #("r", "rel-0"),
-    ]),
+    parents: dict.new(),
+    mask: 0,
+    prepared: [],
+    expired: [],
     writes: [],
     issued: dict.new(),
     fresh: 0,
@@ -376,34 +400,71 @@ fn start() -> World {
   )
 }
 
+/// The recipe a run's producer uses decides whether a proof is shared.
+fn recipe_of(id: String) -> String {
+  case id {
+    "a" | "build-only" -> "producer-shared"
+    _ -> "producer-" <> id
+  }
+}
+
+/// The two-action graph of one run.
+fn tasks(id: String) -> List(queue.Task) {
+  let producer = graph.Action("build", ["build"], [], ["out"], [], [], 10)
+  let consumer = graph.Action("test", ["test"], [], [], ["build"], [], 10)
+  [
+    queue.Task(producer, id, recipe_of(id), "build", "image"),
+    queue.Task(consumer, id, "consumer-" <> id, "test", "image"),
+  ]
+}
+
+/// The provider's verdict on a run is fixed, so every controller agrees.
+fn denial_key(id: String) -> Int {
+  list.fold(string.to_utf_codepoints(id), 0, fn(sum, point) {
+    sum + string.utf_codepoint_to_int(point)
+  })
+}
+
 /// Mask bits: 0 lost claim replies, 1 lost result replies, 2 controller
 /// crashes, 3 outside ref writes, 4 vanishing workers, 5 same-ID restarts and
-/// late results, 6 rejected completions. A disabled fault runs the honest op.
+/// late results, 6 rejected completions, 7 refused preparations, 8 provider
+/// policy denials, 9 poison actions that never report. A disabled fault runs the honest op.
 fn tick(world: World, mask: Int, op: Int) -> World {
   let k = op / 16 % 2
   let pool = case op / 32 % 2 {
     0 -> "build"
     _ -> "test"
   }
-  let on = fn(bit) { mask / bit % 2 == 1 }
+  let lose_result = mask / 2 % 2 == 1
+  let crash_on = mask / 4 % 2 == 1
+  let outside_on = mask / 8 % 2 == 1
+  let vanish_on = mask / 16 % 2 == 1
+  let restart_on = mask / 32 % 2 == 1
+  let reject_on = mask / 64 % 2 == 1
+  let refuse_on = mask / 128 % 2 == 1
   case op % 16 {
     0 | 1 -> poll(world, k, pool, False)
-    2 -> poll(world, k, pool, on(1))
+    2 -> poll(world, k, pool, mask % 2 == 1)
     3 | 4 -> complete(world, k, pool, False, False)
-    5 -> complete(world, k, pool, on(2), False)
-    6 -> complete(world, k, pool, False, on(64) && op / 64 == 0)
+    5 -> complete(world, k, pool, lose_result, False)
+    6 -> complete(world, k, pool, False, reject_on && op / 64 == 0)
     7 | 8 | 9 -> step(world, k)
-    10 if mask / 4 % 2 == 1 -> crash(world, k)
+    10 if crash_on -> crash(world, k)
     10 -> step(world, k)
-    11 if mask / 8 % 2 == 1 -> outside_write(world, pool, op / 64 % 2 == 0)
+    11 if outside_on -> outside_write(world, pool, op / 64 % 2 == 0)
     11 -> step(world, k)
-    12 if mask / 16 % 2 == 1 -> vanish(world, pool)
+    12 if vanish_on -> vanish(world, pool)
     12 -> poll(world, k, pool, False)
-    13 if mask / 32 % 2 == 1 -> restart_worker(world, k, pool)
+    13 if restart_on -> restart_worker(world, k, pool)
     13 -> poll(world, k, pool, False)
-    14 if mask / 32 % 2 == 1 || mask / 16 % 2 == 1 -> late(world, k)
+    14 if restart_on || vanish_on -> late(world, k)
     14 -> complete(world, k, pool, False, False)
-    _ -> world
+    _ ->
+      case op / 64 % 4 {
+        1 -> elapse(world, k)
+        3 -> retention(world, k)
+        _ -> prepare(world, k, refuse_on && op / 4 % 2 == 1)
+      }
   }
 }
 
@@ -477,7 +538,7 @@ fn commit(world: World, k: Int, next: queue.State) -> World {
   case next == world.durable {
     True -> world
     False -> {
-      let world = admissions(world, next)
+      let world = admissions(world, next) |> lapses(next) |> audit(next)
       let c = controller(world, k)
       let world = case c.restarted {
         None -> world
@@ -506,32 +567,256 @@ fn admissions(world: World, next: queue.State) -> World {
       True -> world
       False -> {
         let replaced =
-          list.any(before, fn(old) { old.0 == run && old.1 == action })
-        let reissued = case dict.get(world.issued, lease.serial) {
-          Ok(identity) -> identity != #(run, action, lease.worker)
+          list.any(before, fn(old) {
+            old.0 == run
+            && old.1 == action
+            && queue.lease_until(old.2) >= world.clock
+          })
+        let reissued = case dict.get(world.issued, queue.lease_serial(lease)) {
+          Ok(identity) -> identity != #(run, action, queue.lease_worker(lease))
           Error(Nil) -> False
         }
         let doubled =
           list.count(after, fn(other) {
             let #(_, _, held) = other
-            held.worker == lease.worker
+            queue.lease_worker(held) == queue.lease_worker(lease)
           })
           > 1
+        let world = case queue.lease_attempt(lease) > 1 {
+          True -> bump(world, "reassignments")
+          False -> world
+        }
         let world = case replaced || reissued || doubled {
           True -> bump(world, "duplicate_admissions")
           False -> world
         }
         World(
           ..world,
-          issued: dict.insert(world.issued, lease.serial, #(
+          issued: dict.insert(world.issued, queue.lease_serial(lease), #(
             run,
             action,
-            lease.worker,
+            queue.lease_worker(lease),
           )),
         )
       }
     }
   })
+}
+
+/// A lease that left `Active` for `Pending`, a lease failure or a skip lapsed.
+fn lapses(world: World, next: queue.State) -> World {
+  list.fold(active_leases(world.durable), world, fn(world, entry) {
+    let #(run, action, lease) = entry
+    let step = case queue.find(next, run) {
+      Ok(found) ->
+        list.find(found.work, fn(work) { work.task.action.name == action })
+        |> result.map(fn(work) { work.step })
+      Error(Nil) -> Error(Nil)
+    }
+    let lapsed = case step {
+      Ok(queue.Pending(_)) | Ok(queue.Skipped) -> True
+      Ok(queue.Failed(queue.LeaseExpired(_), _)) -> True
+      _ -> False
+    }
+    let world = case step {
+      Ok(queue.Failed(queue.LeaseExpired(_), _)) -> bump(world, "poisoned_runs")
+      _ -> world
+    }
+    case lapsed {
+      False -> world
+      True ->
+        World(..world, expired: [queue.lease_serial(lease), ..world.expired])
+        |> bump("expiries")
+    }
+  })
+}
+
+/// Safety audit of a committed state: lanes, graphs, failures and text.
+fn audit(world: World, next: queue.State) -> World {
+  let runs = next.runs
+  let holders =
+    list.filter_map(runs, fn(run) {
+      case holds_lane(run) {
+        Ok(branch) -> Ok(#(run.repo, branch))
+        Error(Nil) -> Error(Nil)
+      }
+    })
+  let world = case list.length(list.unique(holders)) == list.length(holders) {
+    True -> world
+    False -> bump(world, "lane_overlaps")
+  }
+  list.fold(runs, world, fn(world, run) {
+    let flag = fn(world, name, condition) {
+      case condition {
+        True -> bump(world, name)
+        False -> world
+      }
+    }
+    let failed =
+      list.any(run.work, fn(work) {
+        case work.step {
+          queue.Failed(_, _) -> True
+          _ -> False
+        }
+      })
+    let pending =
+      list.any(run.work, fn(work) {
+        case work.step {
+          queue.Pending(_) -> True
+          _ -> False
+        }
+      })
+    let waiting_built = case run.submission {
+      queue.Waiting(_, _) | queue.Unprepared(_, _, _) -> run.work != []
+      _ -> False
+    }
+    let long = fn(text) { string.byte_size(text) > queue.max_detail_bytes }
+    let uncapped =
+      list.any(run.work, fn(work) {
+        case work.step {
+          queue.Failed(queue.Reported(detail), _) -> long(detail)
+          _ -> False
+        }
+      })
+      || case run.submission {
+        queue.Blocked(_, queue.PolicyDenied(detail)) -> long(detail)
+        queue.Unprepared(_, _, queue.Unmergeable(detail))
+        | queue.Unprepared(_, _, queue.Refused(detail)) -> long(detail)
+        _ -> False
+      }
+    world
+    |> flag("pending_in_failed", failed && pending)
+    |> flag("waiting_built", waiting_built)
+    |> flag("uncapped_reasons", uncapped)
+    |> flag("out_of_order_preparations", out_of_order(runs, run))
+  })
+}
+
+/// A prepared run with an earlier waiting run in its lane skipped the line.
+fn out_of_order(runs: List(queue.Run), run: queue.Run) -> Bool {
+  case lane_of(run) {
+    Error(Nil) -> False
+    Ok(branch) ->
+      case run.submission {
+        queue.Waiting(_, _) -> False
+        _ ->
+          list.take_while(runs, fn(other) { other.id != run.id })
+          |> list.any(fn(other) {
+            lane_of(other) == Ok(branch)
+            && case other.submission {
+              queue.Waiting(_, _) -> True
+              _ -> False
+            }
+          })
+      }
+  }
+}
+
+/// The branch a submission targets.
+fn lane_of(run: queue.Run) -> Result(String, Nil) {
+  case run.submission {
+    queue.Build -> Error(Nil)
+    queue.Waiting(branch, _) | queue.Unprepared(branch, _, _) -> Ok(branch)
+    queue.Queued(c)
+    | queue.Landing(c)
+    | queue.Landed(c)
+    | queue.Blocked(c, _) -> Ok(queue.candidate_branch(c))
+  }
+}
+
+/// A queued run with live work or a landing run reserves its branch.
+fn holds_lane(run: queue.Run) -> Result(String, Nil) {
+  case run.submission {
+    queue.Queued(c) ->
+      case
+        list.any(run.work, fn(work) {
+          case work.step {
+            queue.Failed(_, _) -> True
+            _ -> False
+          }
+        })
+      {
+        True -> Error(Nil)
+        False -> Ok(queue.candidate_branch(c))
+      }
+    queue.Landing(c) -> Ok(queue.candidate_branch(c))
+    _ -> Error(Nil)
+  }
+}
+
+/// Prepare one waiting group the core offers, or refuse it as a fault.
+fn prepare(world: World, k: Int, refuse: Bool) -> World {
+  case queue.preparations(world.durable) {
+    [] -> world
+    offers -> {
+      let offer = case list.drop(offers, world.event % list.length(offers)) {
+        [picked, ..] -> picked
+        [] -> list.first(offers) |> result.unwrap(offer_placeholder(offers))
+      }
+      let id = queue.preparation_run(offer)
+      let branch = queue.preparation_branch(offer)
+      let base = ref(world, branch)
+      let outcome = case refuse {
+        True -> Error(queue.MemberMoved(1))
+        False ->
+          Ok(#(
+            queue.candidate(branch, base, id, queue.preparation_members(offer)),
+            tasks(id),
+          ))
+      }
+      let assert Ok(next) =
+        queue.record_preparation(world.durable, offer, outcome)
+      let world = case outcome {
+        Ok(_) ->
+          World(
+            ..world,
+            parents: dict.insert(world.parents, id, base),
+            prepared: [id, ..world.prepared],
+          )
+          |> bump("prepared_groups")
+        Error(_) -> bump(world, "preparation_refusals")
+      }
+      commit(world, k, next)
+    }
+  }
+}
+
+/// The first offer of a non-empty list, for the total fallback branch.
+fn offer_placeholder(offers: List(queue.Preparation)) -> queue.Preparation {
+  case offers {
+    [first, ..] -> first
+    [] -> panic as "offers are never empty here"
+  }
+}
+
+/// Let time pass and run the controller's expiry tick.
+fn elapse(world: World, k: Int) -> World {
+  let world = World(..world, clock: world.clock + 300)
+  commit(world, k, queue.expire(world.durable, world.clock))
+}
+
+/// Drop finished runs and check the survivors against an independent oracle.
+fn retention(world: World, k: Int) -> World {
+  let before = world.durable
+  let after = queue.retain(before, queue.Retention(3, 6))
+  let kept = list.map(after.runs, fn(run) { run.id })
+  let dropped =
+    list.filter(before.runs, fn(run) { !list.contains(kept, run.id) })
+  let flag = fn(world, name, condition) {
+    case condition {
+      True -> bump(world, name)
+      False -> world
+    }
+  }
+  world
+  |> flag(
+    "retention_dropped_live",
+    list.any(dropped, fn(run) { !finished(run) }),
+  )
+  |> flag("retention_lost_proofs", after.cache != list.take(before.cache, 6))
+  |> tally(dropped)
+  |> bump_by("retained_dropped", list.length(dropped))
+  |> commit(k, after)
 }
 
 /// Poll through controller `k`. A lost reply leaves the lease committed.
@@ -554,7 +839,11 @@ fn poll(world: World, k: Int, pool: String, lose: Bool) -> World {
 
 fn completion(job: queue.Assignment, reject: Bool) -> queue.Completion {
   case reject {
-    True -> queue.Rejected("planted rejection", job.run <> "-rejected")
+    True ->
+      queue.Rejected(
+        "planted rejection " <> string.repeat("x", 3000),
+        job.run <> "-rejected",
+      )
     False ->
       queue.Succeeded(
         list.map(job.task.action.outputs, queue.Artifact(_, job.run <> "-out")),
@@ -577,16 +866,29 @@ fn report(
       world.durable,
       job.run,
       action,
-      job.lease.worker,
-      job.lease.serial,
+      queue.lease_worker(job.lease),
+      queue.lease_serial(job.lease),
       completion,
     )
   {
-    Error(_) -> #(world, False)
+    Error(_) ->
+      case list.contains(world.expired, queue.lease_serial(job.lease)) {
+        True -> #(bump(world, "expired_results_rejected"), False)
+        False -> #(world, False)
+      }
     Ok(next) -> {
+      let world = case completion {
+        queue.Rejected(reason, _) ->
+          case string.byte_size(reason) > 1024 {
+            True -> bump(world, "oversized_reasons")
+            False -> world
+          }
+        queue.Succeeded(_, _) -> world
+      }
       let live = case current {
         Some(lease) ->
-          lease.serial == job.lease.serial && lease.worker == job.lease.worker
+          queue.lease_serial(lease) == queue.lease_serial(job.lease)
+          && queue.lease_worker(lease) == queue.lease_worker(job.lease)
         None -> False
       }
       let world = case live {
@@ -607,9 +909,17 @@ fn complete(
   reject: Bool,
 ) -> World {
   let w = worker(world, pool)
-  case w.held {
-    None -> world
-    Some(job) -> {
+  let poison = case w.held {
+    Some(job) ->
+      world.mask / 512 % 2 == 1 && { world.mask + denial_key(job.run) } % 4 == 0
+    None -> False
+  }
+  case w.held, poison {
+    None, _ -> world
+    // A poison action kills its worker every time, so it never reports.
+    Some(_), True ->
+      set_worker(bump(world, "poison_drops"), Worker(..w, held: None))
+    Some(job), False -> {
       let #(world, accepted) = report(world, k, job, completion(job, reject))
       let held = case accepted && lose {
         True -> Some(job)
@@ -628,7 +938,7 @@ fn vanish(world: World, pool: String) -> World {
   let holds =
     list.any(active_leases(world.durable), fn(entry) {
       let #(_, _, lease) = entry
-      lease.worker == id
+      queue.lease_worker(lease) == id
     })
   case holds {
     False -> world
@@ -660,7 +970,15 @@ fn restart_worker(world: World, k: Int, pool: String) -> World {
       case worker(world, pool).held {
         Some(again) if again.lease == job.lease && world.durable == before ->
           bump(world, "replayed_claims")
-        _ -> world
+        Some(again) ->
+          case
+            again.lease != job.lease
+            && list.contains(world.expired, queue.lease_serial(job.lease))
+          {
+            True -> bump(world, "returned_after_expiry")
+            False -> world
+          }
+        None -> world
       }
     }
   }
@@ -743,11 +1061,15 @@ fn held_intents(program: Program) -> List(queue.Intent) {
 fn step(world: World, k: Int) -> World {
   case controller(world, k).program {
     Idle -> {
+      // Each reconcile tick prepares the heads of free lanes before landing.
+      let world = prepare(world, k, False)
       let #(next, intents) = queue.landings(world.durable)
       let world = commit(world, k, next)
       let other = held_intents(controller(world, 1 - k).program)
       let world = case
-        list.any(intents, fn(i) { list.any(other, fn(o) { o.run == i.run }) })
+        list.any(intents, fn(i) {
+          list.any(other, fn(o) { queue.intent_run(o) == queue.intent_run(i) })
+        })
       {
         True -> bump(world, "concurrent_reconciles")
         False -> world
@@ -759,15 +1081,22 @@ fn step(world: World, k: Int) -> World {
     }
     Holding([]) -> set_program(world, k, Idle)
     Holding([intent, ..rest]) -> {
-      let c = intent.candidate
-      let observed = ref(world, c.branch)
+      let c = queue.intent_candidate(intent)
+      let observed = ref(world, queue.candidate_branch(c))
       let decision = case
-        ancestor(world.parents, c.commit, observed),
-        observed == c.base
+        ancestor(world.parents, queue.candidate_commit(c), observed),
+        observed == queue.candidate_base(c)
       {
         True, _ -> AlreadyLanded
         False, False -> Advanced
-        False, True -> Push
+        False, True ->
+          case
+            world.mask / 256 % 2 == 1
+            && { world.mask + denial_key(queue.intent_run(intent)) } % 3 == 0
+          {
+            True -> Denied
+            False -> Push
+          }
       }
       set_program(world, k, Decided(intent, decision, rest))
     }
@@ -777,16 +1106,22 @@ fn step(world: World, k: Int) -> World {
       set_program(
         world,
         k,
+        Recording(intent, Error(queue.TargetAdvanced), False, rest),
+      )
+    Decided(intent, Denied, rest) ->
+      set_program(
+        world,
+        k,
         Recording(
           intent,
-          Error("target advanced outside the tested candidate"),
+          Error(queue.PolicyDenied("pull request is not mergeable")),
           False,
           rest,
         ),
       )
     Decided(intent, Push, rest) -> {
-      let c = intent.candidate
-      case ref(world, c.branch) == c.base {
+      let c = queue.intent_candidate(intent)
+      case ref(world, queue.candidate_branch(c)) == queue.candidate_base(c) {
         // The expected-old-object lease rejects the push. The intent stays open.
         False ->
           bump(world, "push_lease_failures")
@@ -795,16 +1130,28 @@ fn step(world: World, k: Int) -> World {
           let world = audit_write(world, intent)
           World(
             ..world,
-            refs: dict.insert(world.refs, c.branch, c.commit),
-            writes: [#(c.branch, intent.run, c.commit), ..world.writes],
+            refs: dict.insert(
+              world.refs,
+              queue.candidate_branch(c),
+              queue.candidate_commit(c),
+            ),
+            writes: [
+              #(
+                queue.candidate_branch(c),
+                queue.intent_run(intent),
+                queue.candidate_commit(c),
+              ),
+              ..world.writes
+            ],
           )
           |> set_program(k, Recording(intent, Ok(Nil), True, rest))
         }
       }
     }
     Recording(intent, outcome, _, rest) -> {
-      let open = case queue.find(world.durable, intent.run) {
-        Ok(run) -> run.submission == queue.Landing(intent.candidate)
+      let open = case queue.find(world.durable, queue.intent_run(intent)) {
+        Ok(run) ->
+          run.submission == queue.Landing(queue.intent_candidate(intent))
         Error(Nil) -> False
       }
       let world = case queue.record_landing(world.durable, intent, outcome) {
@@ -824,10 +1171,12 @@ fn step(world: World, k: Int) -> World {
 /// A ref write must come from an open intent for a fully tested candidate,
 /// and an intent may write the ref only once.
 fn audit_write(world: World, intent: queue.Intent) -> World {
-  let c = intent.candidate
-  let #(tested, open) = case queue.find(world.durable, intent.run) {
+  let c = queue.intent_candidate(intent)
+  let #(tested, open) = case
+    queue.find(world.durable, queue.intent_run(intent))
+  {
     Ok(run) -> #(
-      run.revision == c.commit
+      run.revision == queue.candidate_commit(c)
         && list.all(run.work, fn(work) { passing(work.step) }),
       run.submission == queue.Landing(c),
     )
@@ -841,7 +1190,7 @@ fn audit_write(world: World, intent: queue.Intent) -> World {
     True -> world
     False -> bump(world, "unauthorized_writes")
   }
-  case list.any(world.writes, fn(w) { w.1 == intent.run }) {
+  case list.any(world.writes, fn(w) { w.1 == queue.intent_run(intent) }) {
     True -> bump(world, "double_writes")
     False -> world
   }
@@ -880,21 +1229,39 @@ fn crash(world: World, k: Int) -> World {
   |> set_controller(k, Controller(Idle, Some(#(world.event, world.clock))))
 }
 
-fn terminal(run: queue.Run) -> Bool {
-  case run.submission, queue.phase(run) {
-    queue.Build, "passed" -> True
-    _, "failed" | _, "landed" | _, "blocked" -> True
-    _, _ -> False
+/// An independent oracle: no action can still change and no lane is held.
+fn finished(run: queue.Run) -> Bool {
+  let open =
+    list.any(run.work, fn(work) {
+      case work.step {
+        queue.Pending(_) | queue.Active(_) -> True
+        _ -> False
+      }
+    })
+  let failed =
+    list.any(run.work, fn(work) {
+      case work.step {
+        queue.Failed(_, _) -> True
+        _ -> False
+      }
+    })
+  case run.submission {
+    queue.Landed(_) | queue.Blocked(_, _) | queue.Unprepared(_, _, _) -> True
+    queue.Waiting(_, _) | queue.Landing(_) -> False
+    queue.Build -> !open
+    queue.Queued(_) -> !open && failed
   }
 }
 
 /// Restore reliable delivery to live workers and both controllers.
 fn heal(world: World, round: Int, rounds: Int) -> World {
-  case round == rounds || list.all(world.durable.runs, terminal) {
+  case round == rounds || list.all(world.durable.runs, finished) {
     True -> world
     False -> {
       let k = round % 2
       world
+      |> event(prepare(_, k, False))
+      |> event(prepare(_, k, False))
       |> event(poll(_, k, "build", False))
       |> event(complete(_, k, "build", False, False))
       |> event(poll(_, k, "test", False))
@@ -930,32 +1297,17 @@ fn classify(world: World) -> World {
       False -> world
     }
   }
-  let count = fn(world, name, n) {
-    World(..world, counts: add(world.counts, name, n))
-  }
+  let count = fn(world, name, n) { bump_by(world, name, n) }
   let ghostly = fn(entry: #(String, String, queue.Lease)) {
     let #(_, _, lease) = entry
-    list.contains(world.vanished, lease.worker)
+    list.contains(world.vanished, queue.lease_worker(lease))
   }
-  let landed =
-    list.filter_map(runs, fn(run) {
-      case run.submission {
-        queue.Landed(c) -> Ok(#(c.branch, run.id, c.commit))
-        _ -> Error(Nil)
-      }
-    })
   let lanes =
     list.filter(["main", "release"], fn(branch) {
-      list.any(runs, fn(run) {
-        case run.submission {
-          queue.Queued(c)
-          | queue.Landing(c)
-          | queue.Landed(c)
-          | queue.Blocked(c, _) -> c.branch == branch && !terminal(run)
-          queue.Build -> False
-        }
-      })
+      list.any(runs, fn(run) { lane_of(run) == Ok(branch) && !finished(run) })
     })
+  let stuck =
+    list.filter(runs, fn(run) { !finished(run) && !behind_holder(runs, run) })
   let world =
     world
     |> flag("stuck_active_seeds", leases != [])
@@ -963,43 +1315,171 @@ fn classify(world: World) -> World {
     |> flag("stuck_active_other_seeds", list.any(leases, fn(e) { !ghostly(e) }))
     |> flag(
       "stuck_landing_seeds",
-      list.any(runs, fn(run) { queue.phase(run) == "landing" }),
-    )
-    |> count("nonterminal_runs", list.count(runs, fn(run) { !terminal(run) }))
-    |> count("nonterminal_lanes", list.length(lanes))
-    |> count(
-      "landed_without_write",
-      list.count(landed, fn(l) { !list.contains(world.writes, l) }),
-    )
-    |> count("landed_runs", list.length(landed))
-    |> count(
-      "blocked_runs",
-      list.count(runs, fn(run) { queue.phase(run) == "blocked" }),
-    )
-    |> count(
-      "rejected_runs",
-      list.count(runs, fn(run) {
-        list.any(run.work, fn(w) {
-          case w.step {
-            queue.Failed(_, _) -> True
-            _ -> False
-          }
-        })
-      }),
-    )
-    |> count(
-      "cache_hits",
-      list.count(list.flat_map(runs, fn(run) { run.work }), fn(w) {
-        case w.step {
-          queue.Reused(_) -> True
+      list.any(runs, fn(run) {
+        case run.submission {
+          queue.Landing(_) -> True
           _ -> False
         }
       }),
     )
+    |> count("stuck_runs", list.length(stuck))
+    |> count("nonterminal_runs", list.count(runs, fn(run) { !finished(run) }))
+    |> count("nonterminal_lanes", list.length(lanes))
+    |> tally(runs)
   list.fold(world.controllers, world, fn(world, c) {
     case c.restarted {
       Some(_) -> bump(world, "recovery_censored")
       None -> world
     }
   })
+}
+
+/// A waiting run is explained by an unfinished run ahead of it in its lane.
+fn behind_holder(runs: List(queue.Run), run: queue.Run) -> Bool {
+  case run.submission {
+    queue.Waiting(branch, _) ->
+      list.take_while(runs, fn(other) { other.id != run.id })
+      |> list.any(fn(other) { lane_of(other) == Ok(branch) && !finished(other) })
+    _ -> False
+  }
+}
+
+/// Count the outcomes of runs that reached a final state.
+fn tally(world: World, runs: List(queue.Run)) -> World {
+  let count = fn(world, name, n) { bump_by(world, name, n) }
+  let landed =
+    list.filter_map(runs, fn(run) {
+      case run.submission {
+        queue.Landed(c) ->
+          Ok(#(queue.candidate_branch(c), run.id, queue.candidate_commit(c)))
+        _ -> Error(Nil)
+      }
+    })
+  let steps = list.flat_map(runs, fn(run) { run.work })
+  world
+  |> count(
+    "landed_without_write",
+    list.count(landed, fn(l) { !list.contains(world.writes, l) }),
+  )
+  |> count("landed_runs", list.length(landed))
+  |> count(
+    "blocked_runs",
+    list.count(runs, fn(run) {
+      case run.submission {
+        queue.Blocked(_, _) | queue.Unprepared(_, _, _) -> True
+        _ -> False
+      }
+    }),
+  )
+  |> count(
+    "policy_denials",
+    list.count(runs, fn(run) {
+      case run.submission {
+        queue.Blocked(_, queue.PolicyDenied(_)) -> True
+        _ -> False
+      }
+    }),
+  )
+  |> count(
+    "rejected_runs",
+    list.count(runs, fn(run) {
+      list.any(run.work, fn(w) {
+        case w.step {
+          queue.Failed(queue.Reported(_), _) -> True
+          _ -> False
+        }
+      })
+    }),
+  )
+  |> count(
+    "poisoned_runs_final",
+    list.count(steps, fn(w) {
+      case w.step {
+        queue.Failed(queue.LeaseExpired(_), _) -> True
+        _ -> False
+      }
+    }),
+  )
+  |> count(
+    "cache_hits",
+    list.count(steps, fn(w) {
+      case w.step {
+        queue.Reused(_) -> True
+        _ -> False
+      }
+    }),
+  )
+  |> count(
+    "skipped_actions",
+    list.count(steps, fn(w) {
+      case w.step {
+        queue.Skipped -> True
+        _ -> False
+      }
+    }),
+  )
+}
+
+/// Drive a long stream of builds through the core with retention after every
+/// transition. Return the largest encoded state in bytes, the runs still held,
+/// and the proofs reused. Every fifth run is rejected with a 256 KiB reason.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue_churn_dst.growth(400)
+/// ```
+pub fn growth(runs: Int) -> #(Int, Int, Int) {
+  let retention = queue.Retention(8, 16)
+  let #(state, largest) =
+    int.range(0, runs, #(queue.empty(), 0), fn(acc, i) {
+      let #(state, largest) = acc
+      let id = "g" <> int.to_string(i)
+      let action = graph.Action("build", ["build"], [], ["out"], [], [], 10)
+      let task =
+        queue.Task(
+          action,
+          id,
+          "recipe-" <> int.to_string(i % 7),
+          "build",
+          "image",
+        )
+      let assert Ok(#(state, _)) =
+        queue.admit(state, id, "repo", id, "check", queue.Build, [task])
+      let #(state, claimed) = queue.claim(state, "w", "build", i * 1000)
+      let done = case claimed {
+        None -> state
+        Some(job) -> {
+          let completion = case i % 5 {
+            4 -> queue.Rejected(string.repeat("r", 262_144), id)
+            _ ->
+              queue.Succeeded(
+                list.map(action.outputs, queue.Artifact(_, id <> "-out")),
+                id,
+              )
+          }
+          let assert Ok(next) =
+            queue.finish(
+              state,
+              id,
+              "build",
+              "w",
+              queue.lease_serial(job.lease),
+              completion,
+            )
+          next
+        }
+      }
+      let state = queue.retain(done, retention)
+      let size = string.byte_size(json.to_string(protocol.encode_state(state)))
+      #(state, int.max(largest, size))
+    })
+  let reused =
+    list.count(list.flat_map(state.runs, fn(run) { run.work }), fn(work) {
+      case work.step {
+        queue.Reused(_) -> True
+        _ -> False
+      }
+    })
+  #(largest, list.length(state.runs), reused)
 }
