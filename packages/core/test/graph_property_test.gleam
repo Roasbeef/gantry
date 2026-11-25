@@ -43,7 +43,7 @@ pub fn generated_invalid_graphs_are_rejected_test() {
     // Appended fixtures keep the original target and graph valid while
     // testing validation of declarations beyond the selected closure.
     let assert [first, ..] = actions
-    let spare = graph.Action("spare", ["true"], ["."], [], [], [], 60)
+    let spare = graph.action("spare", ["true"], ["."], [], [], [], 60)
     let cycle = graph.Action(..spare, after: [first.name])
     let circles =
       list.map(actions, fn(action) {
@@ -116,7 +116,7 @@ fn dag() -> qcheck.Generator(#(List(graph.Action), List(String))) {
         })
       let name = action_name(index)
       #(
-        graph.Action(name, ["true"], ["."], ["out/" <> name], deps, after, 60),
+        graph.action(name, ["true"], ["."], ["out/" <> name], deps, after, 60),
         rank,
         root || index == size - 1,
       )

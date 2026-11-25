@@ -11,8 +11,15 @@ import gleam/option.{None, Some}
 import gleam/string
 
 fn task(name: String, needs: List(String), pool: String) -> queue.Task {
-  let action = graph.Action(name, [name], [], [], needs, [], 60)
-  queue.Task(action, "source", "recipe-" <> name, pool, "image", sandbox.Strict)
+  let action = graph.action(name, [name], [], [], needs, [], 60)
+  queue.whole_task(
+    action,
+    "source",
+    "recipe-" <> name,
+    pool,
+    "image",
+    sandbox.Strict,
+  )
 }
 
 /// A build `fan` with one root and `width` leaves that depend on it.

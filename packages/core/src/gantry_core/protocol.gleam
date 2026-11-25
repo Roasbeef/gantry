@@ -5,7 +5,8 @@
 //// attempt below one, a negative counter, a repeated run ID, and a repeated
 //// action name inside a run. The durable image holds no derived data, so
 //// `encode_state` omits the phase that `encode_run` adds for status output.
-//// `phase_label` is the one spelling of a phase. The helper codecs cover one
+//// `phase_label` is the one spelling of a phase, and `layout_label` is the one
+//// spelling of how an input archive is stored. The helper codecs cover one
 //// action (`work_decoder`, `encode_work`), the proof index entry
 //// (`remembered_decoder`, `encode_remembered`), and each tagged variant type.
 
@@ -15,6 +16,7 @@ import gantry_core/sandbox
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
+import gleam/option.{type Option, None}
 import gleam/set
 
 /// Decode the fields of a queue artifact.
@@ -634,6 +636,8 @@ fn encode_key(value: queue.Key) -> json.Json {
 fn task_decoder() -> decode.Decoder(queue.Task) {
   use action <- decode.field("action", graph.action_decoder())
   use source <- decode.field("source", decode.string)
+  use layout <- decode.optional_field("source_layout", "blob", decode.string)
+  use git <- decode.optional_field("git", None, git_input_decoder())
   use recipe <- decode.field("recipe", decode.string)
   use pool <- decode.field("pool", decode.string)
   use image <- decode.field("image", decode.string)
@@ -644,17 +648,77 @@ fn task_decoder() -> decode.Decoder(queue.Task) {
     sandbox.Strict,
     sandbox.decoder(),
   )
-  decode.success(queue.Task(action, source, recipe, pool, image, profile))
+
+  // The layout tag picks how the source digest is read, and only two exist.
+  case input_of(layout, source) {
+    Ok(input) ->
+      decode.success(queue.Task(
+        action,
+        input,
+        git,
+        recipe,
+        pool,
+        image,
+        profile,
+      ))
+    Error(Nil) ->
+      decode.failure(
+        queue.whole_task(action, source, recipe, pool, image, profile),
+        "a known source layout",
+      )
+  }
 }
 
 /// Encode an immutable task.
 fn encode_task(value: queue.Task) -> json.Json {
   json.object([
     #("action", graph.encode_action(value.action)),
-    #("source", json.string(value.source)),
+    #("source", json.string(queue.input_digest(value.source))),
+    #("source_layout", json.string(layout_label(value.source))),
+    #(
+      "git",
+      json.nullable(value.git, fn(input) {
+        json.object([
+          #("digest", json.string(queue.input_digest(input))),
+          #("layout", json.string(layout_label(input))),
+        ])
+      }),
+    ),
     #("recipe", json.string(value.recipe)),
     #("pool", json.string(value.pool)),
     #("image", json.string(value.image)),
     #("sandbox", json.string(sandbox.name(value.sandbox))),
   ])
+}
+
+/// Spell how an input is stored.
+fn layout_label(input: queue.Input) -> String {
+  case input {
+    queue.Whole(_) -> "blob"
+    queue.Chunked(_) -> "chunks"
+  }
+}
+
+/// Read a digest under its layout tag.
+fn input_of(layout: String, digest: String) -> Result(queue.Input, Nil) {
+  case layout {
+    "blob" -> Ok(queue.Whole(digest))
+    "chunks" -> Ok(queue.Chunked(digest))
+    _ -> Error(Nil)
+  }
+}
+
+/// Decode an optional Git metadata input, where null and absent are none.
+fn git_input_decoder() -> decode.Decoder(Option(queue.Input)) {
+  decode.optional({
+    use digest <- decode.field("digest", decode.string)
+    use layout <- decode.field("layout", decode.string)
+
+    // A metadata input names its layout the same way a source does.
+    case input_of(layout, digest) {
+      Ok(input) -> decode.success(input)
+      Error(Nil) ->
+        decode.failure(queue.Whole(digest), "a known metadata layout")
+    }
+  })
 }

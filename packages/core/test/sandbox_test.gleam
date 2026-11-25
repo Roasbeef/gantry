@@ -12,10 +12,10 @@ import gleam/result
 import gleam/string
 
 fn assignment(profile: sandbox.Profile) -> queue.Assignment {
-  let action = graph.Action("check", ["true"], [], [], [], [], 1)
+  let action = graph.action("check", ["true"], [], [], [], [], 1)
   queue.Assignment(
     "run-1",
-    queue.Task(action, "source", "recipe", "pool", "image", profile),
+    queue.whole_task(action, "source", "recipe", "pool", "image", profile),
     queue.unleased,
   )
 }

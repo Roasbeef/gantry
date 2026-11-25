@@ -5,12 +5,11 @@ import gantry/config
 import gantry/fault.{type Fault}
 import gantry/git
 import gantry/github
+import gantry_core/chunks
 import gantry_core/graph
 import gantry_core/queue
 import gantry_core/request
-import gantry_core/sandbox
 import gleam/int
-import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -337,34 +336,38 @@ fn tasks(
 
   list.try_map(actions, fn(action) {
     use bytes <- result.try(archive(s, revision, action.inputs))
-    use source <- result.try(blobs.put(cfg.blobs, bytes))
+    use source <- result.try(blobs.put_input(cfg.blobs, bytes))
 
-    // A strict task keeps the identity it had before profiles existed, so
-    // its proofs stay valid. Any wider profile is part of the key, so its
-    // proofs can never satisfy a strict task.
-    let profile = case repo.sandbox {
-      sandbox.Strict -> []
-      sandbox.Userns -> [json.string(sandbox.name(repo.sandbox))]
-    }
+    // Only an action that declared metadata pays for a `.git` archive.
+    use git_input <- result.try(case action.git {
+      graph.NoGit -> Ok(None)
+      graph.Shallow -> {
+        use metadata <- result.try(git.shallow_metadata(s, revision))
+        blobs.put_input(cfg.blobs, metadata) |> result.map(Some)
+      }
+    })
 
-    let identity =
-      json.to_string(
-        json.array(
-          [
-            json.string("gantry-action-v1"),
-            json.string(scope),
-            json.string(repo.name),
-            json.string(repo.pool),
-            json.string(repo.image),
-            json.string(source),
-            graph.encode_action(action),
-            ..profile
-          ],
-          fn(i) { i },
-        ),
+    let recipe =
+      graph.identity(
+        scope,
+        repo.name,
+        repo.pool,
+        repo.image,
+        queue.input_digest(source),
+        action,
+        repo.sandbox,
+        revision,
       )
-    let recipe = blobs.digest(<<identity:utf8>>)
-    Ok(queue.Task(action, source, recipe, repo.pool, repo.image, repo.sandbox))
+      |> fn(text) { blobs.digest(<<text:utf8>>) }
+    Ok(queue.Task(
+      action,
+      source,
+      git_input,
+      recipe,
+      repo.pool,
+      repo.image,
+      repo.sandbox,
+    ))
   })
 }
 
@@ -414,11 +417,12 @@ fn archive(
           )),
         )
 
-        // Check the protocol transfer bound before allocating the archive in memory.
-        use Nil <- result.try(case info.size <= blobs.limit {
+        // Check the input bound before allocating the archive in memory. An
+        // archive over one blob is stored as chunks.
+        use Nil <- result.try(case info.size <= chunks.input_limit {
           True -> Ok(Nil)
           False ->
-            Error(fault.Invalid("source archive exceeds worker transfer limit"))
+            Error(fault.Invalid("source archive exceeds worker input limit"))
         })
 
         simplifile.read_bits(path)

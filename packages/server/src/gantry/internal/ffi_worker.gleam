@@ -45,15 +45,31 @@ pub fn docker(
   )
 }
 
-/// Inspect source members without extracting them on the worker host.
+/// Inspect the members of an archive file without extracting it on the
+/// worker host.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_worker.entries(source_tar)
+/// // ffi_worker.entries("/work/source.tar")
 /// ```
 @external(erlang, "gantry_worker_ffi", "entries")
-pub fn entries(bytes: BitArray) -> Result(List(Entry), String)
+pub fn entries(path: String) -> Result(List(Entry), String)
+
+/// Add a directory and everything under it to an open archive, naming it
+/// `name` inside the archive. Empty directories are kept.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_worker.archive_add_tree(archive, "/scratch/repo/.git", ".git")
+/// ```
+@external(erlang, "gantry_worker_ffi", "archive_add_tree")
+pub fn archive_add_tree(
+  archive: Archive,
+  directory: String,
+  name: String,
+) -> Result(Nil, String)
 
 /// Open a fresh archive for verified upstream files.
 ///

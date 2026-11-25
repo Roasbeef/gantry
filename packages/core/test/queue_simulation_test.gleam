@@ -22,8 +22,8 @@ fn candidate(id: String) -> queue.Candidate {
 }
 
 fn task(id: String) -> queue.Task {
-  queue.Task(
-    graph.Action("check", ["check"], [], [], [], [], 1),
+  queue.whole_task(
+    graph.action("check", ["check"], [], [], [], [], 1),
     id,
     id,
     "pool",

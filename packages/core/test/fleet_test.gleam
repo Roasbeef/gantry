@@ -11,8 +11,8 @@ import gleam/option.{None, Some}
 import gleam/string
 
 fn task(name: String, dependencies: List(String)) -> queue.Task {
-  let action = graph.Action(name, [name], [], [], dependencies, [], 30)
-  queue.Task(
+  let action = graph.action(name, [name], [], [], dependencies, [], 30)
+  queue.whole_task(
     action,
     "source",
     "recipe-" <> name,
@@ -135,8 +135,8 @@ fn agrees(state: queue.State) -> Bool {
 
 pub fn ready_agrees_with_the_core_claim_rule_test() {
   let pooled = fn(name, needs, pool) {
-    let action = graph.Action(name, [name], [], [], needs, [], 30)
-    queue.Task(
+    let action = graph.action(name, [name], [], [], needs, [], 30)
+    queue.whole_task(
       action,
       "source",
       "recipe-" <> name,

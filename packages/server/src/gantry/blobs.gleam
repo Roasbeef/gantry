@@ -7,6 +7,8 @@
 
 import gantry/fault.{type Fault}
 import gantry/internal/ffi_host
+import gantry_core/chunks
+import gantry_core/queue
 import gleam/bit_array
 import gleam/crypto
 import gleam/list
@@ -106,6 +108,50 @@ pub fn put(root: String, bytes: BitArray) -> Result(String, Fault) {
   }
   let _ = simplifile.delete_file(temporary)
   published
+}
+
+/// Publish an input archive as one blob when it fits, and otherwise as
+/// ordered chunks and a manifest that names them. Every chunk is an ordinary
+/// blob, so it is written, addressed and bounded exactly like any other.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // blobs.put_input(shared_root, archive_bytes)
+/// ```
+pub fn put_input(root: String, bytes: BitArray) -> Result(queue.Input, Fault) {
+  let size = bit_array.byte_size(bytes)
+
+  // An archive that fits keeps its legacy single-blob form and digest.
+  case size <= limit {
+    True -> put(root, bytes) |> result.map(queue.Whole)
+    False -> {
+      use lengths <- result.try(
+        chunks.plan(size)
+        |> result.map_error(fn(violation) {
+          fault.Invalid(chunks.describe(violation))
+        }),
+      )
+      use #(listed, _) <- result.try(
+        list.try_fold(lengths, #([], 0), fn(state, length) {
+          let #(done, offset) = state
+          use slice <- result.try(
+            bit_array.slice(bytes, offset, length)
+            |> result.replace_error(fault.Internal("chunk range out of bounds")),
+          )
+          use id <- result.try(put(root, slice))
+          Ok(#([chunks.Chunk(id, length), ..done], offset + length))
+        }),
+      )
+      use manifest <- result.try(
+        chunks.manifest(digest(bytes), list.reverse(listed))
+        |> result.map_error(fn(violation) {
+          fault.Internal(chunks.describe(violation))
+        }),
+      )
+      put(root, <<chunks.encode(manifest):utf8>>) |> result.map(queue.Chunked)
+    }
+  }
 }
 
 /// Fetch and verify one immutable object.

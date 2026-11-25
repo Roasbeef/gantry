@@ -661,8 +661,8 @@ fn reply(status: Int, body: String) -> Result(Response(BitArray), Nil) {
 }
 
 fn task() -> queue.Task {
-  queue.Task(
-    graph.Action("check", ["true"], ["."], [], [], [], 60),
+  queue.whole_task(
+    graph.action("check", ["true"], ["."], [], [], [], 60),
     blob,
     blob,
     "default",

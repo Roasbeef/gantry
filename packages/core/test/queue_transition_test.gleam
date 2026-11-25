@@ -10,11 +10,11 @@ import gleam/option.{None, Some}
 import gleam/string
 
 fn action(name: String, dependencies: List(String)) -> graph.Action {
-  graph.Action(name, [name], [], [], dependencies, [], 10)
+  graph.action(name, [name], [], [], dependencies, [], 10)
 }
 
 fn task(id: String, name: String, dependencies: List(String)) -> queue.Task {
-  queue.Task(
+  queue.whole_task(
     action(name, dependencies),
     id,
     id <> name,
@@ -200,7 +200,7 @@ pub fn a_provider_denial_blocks_the_landing_with_a_typed_reason_test() {
 
 pub fn retention_keeps_reuse_working_after_the_run_is_dropped_test() {
   let first_task =
-    queue.Task(
+    queue.whole_task(
       action("build", []),
       "s",
       "shared",

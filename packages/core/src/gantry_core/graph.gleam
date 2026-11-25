@@ -1,6 +1,7 @@
 //// Compile declared targets into an ordered action closure. An ordering edge
 //// gates dispatch, while an input edge also supplies upstream output bytes.
 
+import gantry_core/sandbox
 import gleam/dict
 import gleam/dynamic/decode
 import gleam/json
@@ -8,6 +9,15 @@ import gleam/list
 import gleam/result
 import gleam/set
 import gleam/string
+
+/// The Git metadata an action reads from its workspace. `Shallow` stages a
+/// `.git` holding the action's commit with its parents cut off. The default,
+/// `NoGit`, stages none and leaves the action's cache key as it was before
+/// this field existed.
+pub type Metadata {
+  NoGit
+  Shallow
+}
 
 /// An action before source inputs and executor policy have been resolved.
 pub type Action {
@@ -19,7 +29,27 @@ pub type Action {
     dependencies: List(String),
     after: List(String),
     timeout: Int,
+    git: Metadata,
   )
+}
+
+/// An action that stages no Git metadata.
+///
+/// ## Examples
+///
+/// ```gleam
+/// graph.action("check", ["make"], ["."], [], [], [], 60).git == graph.NoGit
+/// ```
+pub fn action(
+  name name: String,
+  argv argv: List(String),
+  inputs inputs: List(String),
+  outputs outputs: List(String),
+  dependencies dependencies: List(String),
+  after after: List(String),
+  timeout timeout: Int,
+) -> Action {
+  Action(name, argv, inputs, outputs, dependencies, after, timeout, NoGit)
 }
 
 /// Compile the closure of a named target from a manifest.
@@ -154,6 +184,7 @@ pub fn action_decoder() -> decode.Decoder(Action) {
   )
   use after <- decode.optional_field("after", [], decode.list(decode.string))
   use timeout <- decode.optional_field("timeout", 300, decode.int)
+  use git <- decode.optional_field("git", NoGit, metadata_decoder())
   decode.success(Action(
     name,
     argv,
@@ -162,10 +193,82 @@ pub fn action_decoder() -> decode.Decoder(Action) {
     dependencies,
     after,
     timeout,
+    git,
   ))
 }
 
-/// Encode an action with explicit defaults for reproducible identity.
+/// The text whose SHA-256 is an action's recipe, the cache key's first part.
+///
+/// A strict action that asks for no Git metadata hashes exactly the array it
+/// did before profiles and metadata existed, so its key moves only when its
+/// source or policy does. A wider sandbox profile is appended by name, so a
+/// proof made under it can never satisfy a strict task. An action that asks
+/// for `Shallow` also hashes the commit it is built from, since the commit
+/// object (parents, message, dates) is what the staged `.git` exposes. The
+/// pack bytes are not hashed, because Git may encode the same objects
+/// differently from run to run.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // graph.identity("declared", "o/r", "linux", "img", source, action,
+/// //   sandbox.Strict, commit)
+/// ```
+pub fn identity(
+  scope: String,
+  repo: String,
+  pool: String,
+  image: String,
+  source: String,
+  action: Action,
+  profile: sandbox.Profile,
+  commit: String,
+) -> String {
+  let base = [
+    json.string("gantry-action-v1"),
+    json.string(scope),
+    json.string(repo),
+    json.string(pool),
+    json.string(image),
+    json.string(source),
+    encode_action(action),
+  ]
+
+  // A strict task keeps the identity it had before profiles existed.
+  let profiled = case profile {
+    sandbox.Strict -> base
+    sandbox.Userns -> list.append(base, [json.string(sandbox.name(profile))])
+  }
+
+  // Only a declared metadata request makes the commit part of the identity.
+  let parts = case action.git {
+    NoGit -> profiled
+    Shallow ->
+      list.append(profiled, [
+        json.string("git-shallow-v1"),
+        json.string(commit),
+      ])
+  }
+
+  json.to_string(json.preprocessed_array(parts))
+}
+
+/// Decode the spelling of a metadata request. Only the two known words
+/// decode, so a misspelling cannot silently stage nothing.
+fn metadata_decoder() -> decode.Decoder(Metadata) {
+  use word <- decode.then(decode.string)
+
+  // Only the two documented spellings name a request.
+  case word {
+    "none" -> decode.success(NoGit)
+    "shallow" -> decode.success(Shallow)
+    _ -> decode.failure(NoGit, "\"none\" or \"shallow\"")
+  }
+}
+
+/// Encode an action with explicit defaults for reproducible identity. The
+/// `git` key is written only when it asks for metadata, so an action that
+/// does not hashes to the same recipe it did before the key existed.
 ///
 /// ## Examples
 ///
@@ -173,15 +276,24 @@ pub fn action_decoder() -> decode.Decoder(Action) {
 /// // graph.encode_action(action) |> json.to_string
 /// ```
 pub fn encode_action(action: Action) -> json.Json {
-  json.object([
-    #("name", json.string(action.name)),
-    #("argv", json.array(action.argv, json.string)),
-    #("inputs", json.array(action.inputs, json.string)),
-    #("outputs", json.array(action.outputs, json.string)),
-    #("deps", json.array(action.dependencies, json.string)),
-    #("after", json.array(action.after, json.string)),
-    #("timeout", json.int(action.timeout)),
-  ])
+  // An absent key and `NoGit` encode alike, which keeps old recipes valid.
+  let git = case action.git {
+    NoGit -> []
+    Shallow -> [#("git", json.string("shallow"))]
+  }
+
+  json.object(list.append(
+    [
+      #("name", json.string(action.name)),
+      #("argv", json.array(action.argv, json.string)),
+      #("inputs", json.array(action.inputs, json.string)),
+      #("outputs", json.array(action.outputs, json.string)),
+      #("deps", json.array(action.dependencies, json.string)),
+      #("after", json.array(action.after, json.string)),
+      #("timeout", json.int(action.timeout)),
+    ],
+    git,
+  ))
 }
 
 /// Reject ambiguous ownership and references before topological sorting.

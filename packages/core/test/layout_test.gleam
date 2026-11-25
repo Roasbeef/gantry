@@ -14,11 +14,18 @@ import gleam/option.{None, Some}
 import layout_audit as audit
 
 fn action(name: String, dependencies: List(String)) -> graph.Action {
-  graph.Action(name, [name], [], [name <> ".out"], dependencies, [], 10)
+  graph.action(name, [name], [], [name <> ".out"], dependencies, [], 10)
 }
 
 fn task(id: String, name: String, recipe: String, deps: List(String)) {
-  queue.Task(action(name, deps), id, recipe, "pool", "image", sandbox.Strict)
+  queue.whole_task(
+    action(name, deps),
+    id,
+    recipe,
+    "pool",
+    "image",
+    sandbox.Strict,
+  )
 }
 
 fn tasks(id: String, shared: Bool) -> List(queue.Task) {
@@ -306,7 +313,7 @@ fn task_in(
   recipe: String,
   pool: String,
 ) -> queue.Task {
-  queue.Task(action(name, []), id, recipe, pool, "image", sandbox.Strict)
+  queue.whole_task(action(name, []), id, recipe, pool, "image", sandbox.Strict)
 }
 
 fn claim_in(

@@ -190,10 +190,10 @@ fn start() -> World {
 
 /// The two-action graph of one run, with a cross-pool dependency.
 fn tasks(id: String) -> List(queue.Task) {
-  let producer = graph.Action("build", ["build"], [], ["out"], [], [], 10)
-  let consumer = graph.Action("test", ["test"], [], [], ["build"], [], 10)
+  let producer = graph.action("build", ["build"], [], ["out"], [], [], 10)
+  let consumer = graph.action("test", ["test"], [], [], ["build"], [], 10)
   [
-    queue.Task(
+    queue.whole_task(
       producer,
       id,
       "producer-" <> id,
@@ -201,7 +201,7 @@ fn tasks(id: String) -> List(queue.Task) {
       "image",
       pool_profile("build"),
     ),
-    queue.Task(
+    queue.whole_task(
       consumer,
       id,
       "consumer-" <> id,

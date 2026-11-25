@@ -105,7 +105,7 @@ const build_keys = ["id", "repo", "revision", "target", "action"]
 const submit_keys = ["id", "repo", "pulls"]
 
 const action_keys = [
-  "name", "argv", "inputs", "outputs", "deps", "after", "timeout",
+  "name", "argv", "inputs", "outputs", "deps", "after", "timeout", "git",
 ]
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ pub fn submit(
 /// ## Examples
 ///
 /// ```gleam
-/// // request.check_action(graph.Action("a", ["make"], ["."], [], ["b"], [], 60))
+/// // request.check_action(graph.action("a", ["make"], ["."], [], ["b"], [], 60))
 /// // -> Error(request.AdHocDependencies)
 /// ```
 pub fn check_action(action: graph.Action) -> Result(Nil, Rejection) {

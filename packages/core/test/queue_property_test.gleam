@@ -177,7 +177,7 @@ fn pending_run(
       )
     })
   let action =
-    graph.Action(
+    graph.action(
       "action-" <> suffix,
       ["make", suffix],
       ["."],
@@ -187,7 +187,7 @@ fn pending_run(
       number % 3600 + 1,
     )
   let task =
-    queue.Task(
+    queue.whole_task(
       action,
       "tree-" <> suffix,
       "recipe-" <> suffix,

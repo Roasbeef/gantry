@@ -45,8 +45,8 @@ pub fn assignment(serial: Int) -> queue.Assignment {
     queue.lease(serial, "w1", 0, 1, queue.Key(recipe: digest, dependencies: []))
   queue.Assignment(
     run: "run-1",
-    task: queue.Task(
-      action: graph.Action(
+    task: queue.whole_task(
+      action: graph.action(
         name: "build",
         argv: ["true"],
         inputs: ["."],

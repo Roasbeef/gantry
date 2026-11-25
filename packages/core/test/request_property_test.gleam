@@ -116,7 +116,7 @@ pub fn generated_ad_hoc_edges_are_rejected_test() {
     let #(deps, after) = counts
     let names = fn(count) { numbered("edge-", count) }
     let action =
-      graph.Action("adhoc", ["true"], [], [], names(deps), names(after), 60)
+      graph.action("adhoc", ["true"], [], [], names(deps), names(after), 60)
     let result = request.check_action(action)
     case deps + after {
       0 -> {
@@ -206,7 +206,7 @@ fn build_input() -> qcheck.Generator(
     let id = "run-" <> int.to_string(number)
     let action = case adhoc {
       True ->
-        Some(graph.Action(
+        Some(graph.action(
           "adhoc",
           ["sh", "-ec", "echo " <> int.to_string(number)],
           ["."],

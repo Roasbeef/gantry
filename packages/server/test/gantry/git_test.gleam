@@ -3,6 +3,7 @@ import gantry/git
 import gantry/internal/ffi_host
 import gantry/prepare
 import gantry_core/queue
+import gantry_core/request
 import gantry_core/sandbox
 import gleam/bit_array
 import gleam/crypto
@@ -10,6 +11,7 @@ import gleam/dict
 import gleam/erlang/process
 import gleam/list
 import gleam/option
+import gleam/result
 import gleam/string
 import simplifile
 
@@ -185,4 +187,102 @@ pub fn stale_lock_files_from_a_killed_git_are_cleared_test() {
   assert simplifile.is_file(shallow_lock) == Ok(False)
   assert simplifile.is_file(mirror <> "/HEAD") == Ok(True)
   let _ = simplifile.delete(root)
+}
+
+pub fn shallow_metadata_makes_a_checkout_a_clean_shallow_repository_test() {
+  let root = directory()
+  let #(remote, work, first) = remote_with_commit(root)
+  let assert Ok(Nil) = simplifile.write(work <> "/b", "b")
+  run_git(work, ["add", "b"])
+  run_git(work, ["commit", "-q", "-m", "b"])
+  run_git(work, ["push", "--quiet", remote, "main"])
+  let second = run_git(work, ["rev-parse", "HEAD"])
+  let #(cfg, repo) = config_for(root, remote)
+
+  let assert Ok(archive) =
+    git.session(cfg, repo, fn(s) {
+      use sha <- result.try(git.fetch(s, "refs/heads/main"))
+      assert sha == second
+      git.shallow_metadata(s, sha)
+    })
+
+  // Check out the tree as the worker does, then lay the metadata over it.
+  let checkout = root <> "/checkout"
+  let assert Ok(Nil) = simplifile.create_directory_all(checkout)
+  let assert Ok(Nil) = simplifile.write_bits(root <> "/git.tar", archive)
+  let assert Ok(Nil) = simplifile.write(checkout <> "/a", "a")
+  let assert Ok(Nil) = simplifile.write(checkout <> "/b", "b")
+  let assert Ok(#(0, _)) =
+    ffi_host.run("tar", ["xf", root <> "/git.tar", "-C", checkout], [], 30_000)
+
+  assert run_git(checkout, ["rev-parse", "--verify", "HEAD^{commit}"]) == second
+  assert run_git(checkout, ["rev-parse", "--is-shallow-repository"]) == "true"
+  assert run_git(checkout, ["rev-list", "--count", "HEAD"]) == "1"
+  assert run_git(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
+    == ""
+  assert run_git(checkout, ["cat-file", "-p", "HEAD:b"]) == "b"
+
+  // Git exits 1 when no key matches, so no remote or promisor is configured.
+  let assert Ok(#(1, "")) =
+    ffi_host.run(
+      "git",
+      ["-C", checkout, "config", "--get-regexp", "remote|promisor"],
+      [],
+      30_000,
+    )
+  // The parent exists in the mirror but must not be in the archive.
+  let assert Ok(#(status, _)) =
+    ffi_host.run(
+      "git",
+      ["-C", checkout, "cat-file", "-e", first <> "^{commit}"],
+      [],
+      30_000,
+    )
+  assert status != 0
+}
+
+pub fn only_an_action_that_declares_git_changes_key_with_the_commit_test() {
+  let root = directory()
+  let #(remote, work, _) = remote_with_commit(root)
+  let manifest =
+    "{\"actions\":["
+    <> "{\"name\":\"plain\",\"argv\":[\"true\"],\"inputs\":[\"a\"]},"
+    <> "{\"name\":\"meta\",\"argv\":[\"true\"],\"inputs\":[\"a\"],\"git\":\"shallow\"}"
+    <> "],\"targets\":{\"all\":[\"plain\",\"meta\"]}}"
+  let assert Ok(Nil) = simplifile.write(work <> "/gantry.json", manifest)
+  run_git(work, ["add", "gantry.json"])
+  run_git(work, ["commit", "-q", "-m", "manifest"])
+  let first = run_git(work, ["rev-parse", "HEAD"])
+
+  // The next commit changes a file neither action reads.
+  let assert Ok(Nil) = simplifile.write(work <> "/unrelated", "x")
+  run_git(work, ["add", "unrelated"])
+  run_git(work, ["commit", "-q", "-m", "unrelated"])
+  let second = run_git(work, ["rev-parse", "HEAD"])
+  run_git(work, ["push", "--quiet", remote, "main"])
+
+  let #(cfg, repo) = config_for(root, remote)
+  let recipes = fn(commit) {
+    let assert Ok(build) =
+      request.build("b-" <> commit, "owner/project", commit, "all", option.None)
+    let assert Ok(tasks) = prepare.build(cfg, repo, build)
+    list.map(tasks, fn(task) { #(task.action.name, task) })
+    |> dict.from_list
+  }
+  let one = recipes(first)
+  let two = recipes(second)
+  let assert Ok(plain_one) = dict.get(one, "plain")
+  let assert Ok(plain_two) = dict.get(two, "plain")
+  let assert Ok(meta_one) = dict.get(one, "meta")
+  let assert Ok(meta_two) = dict.get(two, "meta")
+
+  // The undeclared action keeps its key, and so reuses its proof.
+  assert plain_one.recipe == plain_two.recipe
+  assert plain_one.git == option.None
+  // The declared one moves with the commit, and carries its archive.
+  assert meta_one.recipe != meta_two.recipe
+  assert option.is_some(meta_one.git)
+  // The two actions have the same source and policy, yet different keys.
+  assert plain_one.recipe != meta_one.recipe
+  assert plain_one.source == meta_one.source
 }

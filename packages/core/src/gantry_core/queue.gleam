@@ -89,16 +89,58 @@ pub type Artifact {
   Artifact(path: String, digest: String)
 }
 
-/// An action with its immutable source archive and execution policy.
+/// How an immutable input archive is stored. A `Whole` digest names the
+/// archive's own blob. A `Chunked` digest names a chunk manifest, whose chunks
+/// concatenate to the archive (see `gantry_core/chunks`).
+pub type Input {
+  Whole(digest: String)
+  Chunked(manifest: String)
+}
+
+/// The digest a worker fetches first, whichever layout it names.
+///
+/// ## Examples
+///
+/// ```gleam
+/// queue.input_digest(queue.Whole("abc")) == "abc"
+/// ```
+pub fn input_digest(input: Input) -> String {
+  case input {
+    Whole(digest) -> digest
+    Chunked(manifest) -> manifest
+  }
+}
+
+/// An action with its immutable input archives and execution policy. `git`
+/// is present only for an action that declared Git metadata.
 pub type Task {
   Task(
     action: Action,
-    source: String,
+    source: Input,
+    git: Option(Input),
     recipe: String,
     pool: String,
     image: String,
     sandbox: sandbox.Profile,
   )
+}
+
+/// A task whose source is one blob and that stages no Git metadata.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.whole_task(action, digest, recipe, "linux", "image", sandbox.Strict)
+/// ```
+pub fn whole_task(
+  action action: Action,
+  source source: String,
+  recipe recipe: String,
+  pool pool: String,
+  image image: String,
+  sandbox profile: sandbox.Profile,
+) -> Task {
+  Task(action, Whole(source), None, recipe, pool, image, profile)
 }
 
 /// A key combines the action recipe and the resolved prerequisite files.

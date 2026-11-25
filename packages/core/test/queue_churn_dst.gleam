@@ -455,11 +455,25 @@ fn recipe_of(id: String) -> String {
 
 /// The two-action graph of one run.
 fn tasks(id: String) -> List(queue.Task) {
-  let producer = graph.Action("build", ["build"], [], ["out"], [], [], 10)
-  let consumer = graph.Action("test", ["test"], [], [], ["build"], [], 10)
+  let producer = graph.action("build", ["build"], [], ["out"], [], [], 10)
+  let consumer = graph.action("test", ["test"], [], [], ["build"], [], 10)
   [
-    queue.Task(producer, id, recipe_of(id), "build", "image", sandbox.Strict),
-    queue.Task(consumer, id, "consumer-" <> id, "test", "image", sandbox.Strict),
+    queue.whole_task(
+      producer,
+      id,
+      recipe_of(id),
+      "build",
+      "image",
+      sandbox.Strict,
+    ),
+    queue.whole_task(
+      consumer,
+      id,
+      "consumer-" <> id,
+      "test",
+      "image",
+      sandbox.Strict,
+    ),
   ]
 }
 
@@ -1584,9 +1598,9 @@ pub fn growth(runs: Int) -> #(Int, Int, Int) {
     int.range(0, runs, #(queue.empty(), 0), fn(acc, i) {
       let #(state, largest) = acc
       let id = "g" <> int.to_string(i)
-      let action = graph.Action("build", ["build"], [], ["out"], [], [], 10)
+      let action = graph.action("build", ["build"], [], ["out"], [], [], 10)
       let task =
-        queue.Task(
+        queue.whole_task(
           action,
           id,
           "recipe-" <> int.to_string(i % 7),
