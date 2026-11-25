@@ -67,3 +67,7 @@ snapshots, loses or replays polls, reorders stored deliveries, advances a
 competing ref, and separates Git mutation from recording its outcome. Focused
 cases cover an uncertain worker, a lapsed lease, a poison action, preparation
 order, and recovery of a successfully applied intent.
+
+The [queue verification guide](../../../docs/queue-verification.md) covers the
+seeded simulations (`scripts/queue-dst.sh sweep`, `churn`, and `growth`), the
+sweep results, and the mutation checks that planted defects must fail.
