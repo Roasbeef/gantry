@@ -1,6 +1,8 @@
 //// Khepri/Ra operations use an Erlang bridge because Gleam has no replicated
 //// conditional store. Only trusted startup configuration reaches cluster boot.
 
+import gantry/fault.{type Fault}
+
 /// Whether the expected snapshot authorized the proposal's receipt.
 pub type ProposalOutcome {
   Accepted
@@ -21,7 +23,7 @@ pub type QuietCheck {
 /// // ffi_khepri.boot("/var/lib/gantry", "", empty)
 /// ```
 @external(erlang, "gantry_khepri_ffi", "boot")
-pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
+pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, Fault)
 
 /// Confirm that the controller can reach the queue's voting majority.
 ///
@@ -31,7 +33,7 @@ pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
 /// // ffi_khepri.ready()
 /// ```
 @external(erlang, "gantry_khepri_ffi", "ready")
-pub fn ready() -> Result(Nil, String)
+pub fn ready() -> Result(Nil, Fault)
 
 /// Read bytes after Khepri's bounded fence.
 ///
@@ -41,7 +43,7 @@ pub fn ready() -> Result(Nil, String)
 /// // ffi_khepri.read()
 /// ```
 @external(erlang, "gantry_khepri_ffi", "read")
-pub fn read() -> Result(String, String)
+pub fn read() -> Result(String, Fault)
 
 /// Check whether a quorum-confirmed snapshot has the expected bytes.
 ///
@@ -51,7 +53,7 @@ pub fn read() -> Result(String, String)
 /// // ffi_khepri.confirm(expected)
 /// ```
 @external(erlang, "gantry_khepri_ffi", "confirm")
-pub fn confirm(expected: String) -> Result(ProposalOutcome, String)
+pub fn confirm(expected: String) -> Result(ProposalOutcome, Fault)
 
 /// Confirm a previously identified quiet snapshot with the quorum.
 ///
@@ -61,7 +63,7 @@ pub fn confirm(expected: String) -> Result(ProposalOutcome, String)
 /// // ffi_khepri.confirm_quiet()
 /// ```
 @external(erlang, "gantry_khepri_ffi", "confirm_quiet")
-pub fn confirm_quiet() -> Result(QuietCheck, String)
+pub fn confirm_quiet() -> Result(QuietCheck, Fault)
 
 /// Remember the bytes whose worker state is terminal.
 ///
@@ -84,4 +86,4 @@ pub fn remember_quiet(bytes: String) -> Nil
 pub fn swap(
   expected: String,
   proposed: String,
-) -> Result(ProposalOutcome, String)
+) -> Result(ProposalOutcome, Fault)

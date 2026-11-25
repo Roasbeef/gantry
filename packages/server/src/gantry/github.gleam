@@ -3,6 +3,7 @@
 //// fails at the receiving server.
 
 import gantry/config.{type GitHubTarget, DefaultBranch, RegisteredBranch}
+import gantry/fault.{type Fault}
 import gantry_core/job.{type Request}
 import gleam/dynamic/decode
 import gleam/http
@@ -37,14 +38,15 @@ pub type Readiness {
 /// ```gleam
 /// // github.read_pull(token, request)
 /// ```
-pub fn read_pull(token: String, pull: Request) -> Result(Pull, String) {
+pub fn read_pull(token: String, pull: Request) -> Result(Pull, Fault) {
   let url =
     "https://api.github.com/repos/"
     <> pull.repository
     <> "/pulls/"
     <> job.pull_number(pull)
   use req <- result.try(
-    request.to(url) |> result.replace_error("invalid GitHub API URL"),
+    request.to(url)
+    |> result.replace_error(fault.Internal("invalid GitHub API URL")),
   )
   let req =
     req
@@ -52,7 +54,8 @@ pub fn read_pull(token: String, pull: Request) -> Result(Pull, String) {
     |> request.set_header("accept", "application/vnd.github+json")
     |> request.set_header("user-agent", "gantry")
   use response <- result.try(
-    httpc.send(req) |> result.replace_error("GitHub API request failed"),
+    httpc.send(req)
+    |> result.replace_error(fault.Unavailable("GitHub API request failed")),
   )
 
   // Error response bodies may contain server-provided detail. Report the
@@ -60,9 +63,12 @@ pub fn read_pull(token: String, pull: Request) -> Result(Pull, String) {
   case response.status {
     200 ->
       json.parse(response.body, pull_decoder())
-      |> result.replace_error("invalid GitHub pull response")
+      |> result.replace_error(fault.Unavailable("invalid GitHub pull response"))
+    404 -> Error(fault.NotFound("pull request not found"))
     status ->
-      Error("GitHub pull request returned HTTP " <> int.to_string(status))
+      Error(fault.Unavailable(
+        "GitHub pull request returned HTTP " <> int.to_string(status),
+      ))
   }
 }
 
@@ -101,7 +107,7 @@ pub fn validate_pull(
   pull: Pull,
   request: Request,
   branch: String,
-) -> Result(String, String) {
+) -> Result(String, Fault) {
   case
     pull.state == "open",
     pull.branch == branch,
@@ -109,13 +115,15 @@ pub fn validate_pull(
     request.mode,
     pull.readiness
   {
-    False, _, _, _, _ -> Error("pull request is closed")
+    False, _, _, _, _ -> Error(fault.Invalid("pull request is closed"))
     True, False, _, _, _ ->
-      Error("pull request does not target the allowed branch")
+      Error(fault.Invalid("pull request does not target the allowed branch"))
     True, True, False, _, _ ->
-      Error("pull request head changed; enqueue the current revision")
+      Error(fault.Invalid(
+        "pull request head changed; enqueue the current revision",
+      ))
     True, True, True, job.Submit, Draft ->
-      Error("draft pull requests can only be built")
+      Error(fault.Invalid("draft pull requests can only be built"))
     True, True, True, job.Submit, Ready | True, True, True, job.Build, _ ->
       Ok(pull.branch)
   }
@@ -136,11 +144,11 @@ pub fn can_land(
   target: GitHubTarget,
   number: Int,
   head: String,
-) -> Result(Nil, String) {
+) -> Result(Nil, Fault) {
   // GraphQL takes the owner and repository as separate variables.
   use #(owner, name) <- result.try(case string.split(repo, "/") {
     [owner, name] -> Ok(#(owner, name))
-    _ -> Error("invalid GitHub repository")
+    _ -> Error(fault.Internal("invalid GitHub repository"))
   })
 
   let variables =
@@ -163,7 +171,7 @@ pub fn can_land(
 
   use req <- result.try(
     request.to("https://api.github.com/graphql")
-    |> result.replace_error("invalid GitHub API URL"),
+    |> result.replace_error(fault.Internal("invalid GitHub API URL")),
   )
   let req =
     req
@@ -173,13 +181,17 @@ pub fn can_land(
     |> request.set_header("content-type", "application/json")
     |> request.set_body(body)
   use response <- result.try(
-    httpc.send(req) |> result.replace_error("GitHub policy request failed"),
+    httpc.send(req)
+    |> result.replace_error(fault.Unavailable("GitHub policy request failed")),
   )
 
   // Only a successful HTTP exchange can convey a merge policy observation.
   use Nil <- result.try(case response.status {
     200 -> Ok(Nil)
-    status -> Error("GitHub policy returned HTTP " <> int.to_string(status))
+    status ->
+      Error(fault.Unavailable(
+        "GitHub policy returned HTTP " <> int.to_string(status),
+      ))
   })
 
   let decoder = {
@@ -200,7 +212,7 @@ pub fn can_land(
   }
   use #(default_branch, observed) <- result.try(
     json.parse(response.body, envelope)
-    |> result.replace_error("GitHub policy unavailable"),
+    |> result.replace_error(fault.Unavailable("GitHub policy unavailable")),
   )
 
   // A policy change can narrow the authority of an outstanding intent.
@@ -213,8 +225,8 @@ pub fn can_land(
   case allowed && observed == #(head, branch, "OPEN", False, "CLEAN") {
     True -> Ok(Nil)
     False ->
-      Error(
+      Error(fault.Unavailable(
         "source pull revision or GitHub merge policy does not permit landing",
-      )
+      ))
   }
 }

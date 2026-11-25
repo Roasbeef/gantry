@@ -100,7 +100,7 @@ ready() ->
     with_deadline(fun() ->
         try ra:consistent_query({?STORE, node()}, {erlang, is_tuple, []}, ?TIMEOUT) of
             {ok, true, _Leader} -> {ok, nil};
-            {timeout, _} -> {error, <<"queue readiness timed out">>};
+            {timeout, _} -> unavailable(<<"queue readiness timed out">>);
             Other -> failure(Other)
         catch Class:Why -> failure({Class, Why})
         end
@@ -118,11 +118,11 @@ with_deadline(Read) ->
     {Pid, Ref} = spawn_monitor(fun() -> exit({snapshot, Read()}) end),
     receive
         {'DOWN', Ref, process, Pid, {snapshot, Reply}} -> Reply;
-        {'DOWN', Ref, process, Pid, _} -> {error, <<"queue read failed">>}
+        {'DOWN', Ref, process, Pid, _} -> unavailable(<<"queue read failed">>)
     after ?TIMEOUT ->
         exit(Pid, kill),
         erlang:demonitor(Ref, [flush]),
-        {error, <<"queue quorum read timed out">>}
+        unavailable(<<"queue quorum read timed out">>)
     end.
 
 fenced_read() ->
@@ -130,7 +130,7 @@ fenced_read() ->
         ok ->
             case khepri:get(?STORE, ?PATH, #{favor => low_latency, timeout => ?TIMEOUT}) of
                 {ok, Bytes} when is_binary(Bytes), byte_size(Bytes) =< 4194304 -> {ok, Bytes};
-                {ok, _} -> {error, <<"invalid durable queue snapshot">>};
+                {ok, _} -> corrupt(<<"invalid durable queue snapshot">>);
                 Other -> failure(Other)
             end;
         Other -> failure(Other)
@@ -152,9 +152,9 @@ confirm_snapshot(Expected) ->
                         true -> {ok, accepted};
                         false -> {ok, snapshot_changed}
                     end;
-                _ -> {error, <<"invalid durable queue snapshot">>}
+                _ -> corrupt(<<"invalid durable queue snapshot">>)
             end;
-        {timeout, _} -> {error, <<"queue quorum read timed out">>};
+        {timeout, _} -> unavailable(<<"queue quorum read timed out">>);
         Other -> failure(Other)
     catch Class:Why -> failure({Class, Why})
     end.
@@ -167,5 +167,10 @@ swap(Expected, Proposed) ->
     catch Class:Why -> failure({Class, Why})
     end.
 
+%% Gleam represents gantry/fault.Unavailable and Internal as these tuples.
 failure(Reason) ->
-    {error, iolist_to_binary(io_lib:format("queue storage failure ~P", [Reason, 5]))}.
+    unavailable(iolist_to_binary(io_lib:format("queue storage failure ~P", [Reason, 5]))).
+
+unavailable(Detail) -> {error, {unavailable, Detail}}.
+
+corrupt(Detail) -> {error, {internal, Detail}}.

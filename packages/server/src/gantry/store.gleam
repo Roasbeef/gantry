@@ -5,6 +5,7 @@
 //// Each mutation reads and writes the full document. The 4 MiB ceiling
 //// bounds replicated metadata and makes this unsuitable for unbounded history.
 
+import gantry/fault.{type Fault}
 import gantry/internal/ffi_khepri.{
   type ProposalOutcome, Accepted, ConfirmedQuiet, NeedsClaim, SnapshotChanged,
 }
@@ -27,6 +28,7 @@ const max_bytes = 4_194_304
 /// ```
 pub fn boot(data_dir: String, seed: String) -> Result(Nil, String) {
   ffi_khepri.boot(data_dir, seed, queue.empty() |> encode)
+  |> result.map_error(fault.detail)
 }
 
 fn encode(state: queue.State) -> String {
@@ -34,11 +36,11 @@ fn encode(state: queue.State) -> String {
 }
 
 /// Decode the fenced document and retain its exact bytes for conditional replacement.
-fn snapshot() -> Result(#(String, queue.State), String) {
+fn snapshot() -> Result(#(String, queue.State), Fault) {
   use bytes <- result.try(ffi_khepri.read())
   use state <- result.try(
     json.parse(bytes, protocol.state_decoder())
-    |> result.replace_error("invalid durable queue snapshot"),
+    |> result.replace_error(fault.Internal("invalid durable queue snapshot")),
   )
   Ok(#(bytes, state))
 }
@@ -50,7 +52,7 @@ fn snapshot() -> Result(#(String, queue.State), String) {
 /// ```gleam
 /// // store.read()
 /// ```
-pub fn read() -> Result(queue.State, String) {
+pub fn read() -> Result(queue.State, Fault) {
   use #(_, state) <- result.try(snapshot())
   Ok(state)
 }
@@ -62,13 +64,14 @@ pub fn read() -> Result(queue.State, String) {
 /// ```gleam
 /// // store.ready()
 /// ```
-pub fn ready() -> Result(Nil, String) {
+pub fn ready() -> Result(Nil, Fault) {
   ffi_khepri.ready()
 }
 
 /// Run a pure proposal and return its receipt after a majority confirms the
 /// unchanged snapshot or commits a mutation.
 /// A storage timeout leaves the outcome unknown. Recover by operation identity.
+/// The proposal refuses a transition with a `Fault`, usually `Conflict`.
 ///
 /// ## Examples
 ///
@@ -76,8 +79,8 @@ pub fn ready() -> Result(Nil, String) {
 /// // store.change(fn(state) { Ok(#(state, Nil)) })
 /// ```
 pub fn change(
-  propose: fn(queue.State) -> Result(#(queue.State, a), String),
-) -> Result(a, String) {
+  propose: fn(queue.State) -> Result(#(queue.State, a), Fault),
+) -> Result(a, Fault) {
   attempt(propose, 8)
 }
 
@@ -92,7 +95,7 @@ pub fn claim(
   worker: String,
   pool: String,
   now: Int,
-) -> Result(Option(queue.Assignment), String) {
+) -> Result(Option(queue.Assignment), Fault) {
   use confirmed <- result.try(ffi_khepri.confirm_quiet())
 
   // A quiet snapshot cannot offer a lease to any worker.
@@ -105,9 +108,9 @@ pub fn claim(
 
 /// Recompute a pure transition from the latest snapshot after a competing write.
 fn attempt(
-  propose: fn(queue.State) -> Result(#(queue.State, a), String),
+  propose: fn(queue.State) -> Result(#(queue.State, a), Fault),
   remaining: Int,
-) -> Result(a, String) {
+) -> Result(a, Fault) {
   use #(prior, state) <- result.try(snapshot())
   use #(next, receipt) <- result.try(propose(state))
 
@@ -120,7 +123,8 @@ fn attempt(
   // A competing write invalidates the proposal and its receipt.
   case accepted, remaining {
     Accepted, _ -> Ok(receipt)
-    SnapshotChanged, 1 -> Error("queue contention exceeded retry budget")
+    SnapshotChanged, 1 ->
+      Error(fault.Unavailable("queue contention exceeded retry budget"))
     SnapshotChanged, _ -> attempt(propose, remaining - 1)
   }
 }
@@ -129,7 +133,7 @@ fn attempt(
 fn confirm(
   prior: String,
   state: queue.State,
-) -> Result(ProposalOutcome, String) {
+) -> Result(ProposalOutcome, Fault) {
   use accepted <- result.try(ffi_khepri.confirm(prior))
 
   // Pending and active work require the full decision even on a snapshot hit.
@@ -142,12 +146,12 @@ fn confirm(
 }
 
 /// Replace the expected snapshot with a bounded mutation.
-fn commit(prior: String, next: queue.State) -> Result(ProposalOutcome, String) {
+fn commit(prior: String, next: queue.State) -> Result(ProposalOutcome, Fault) {
   let bytes = encode(next)
 
   // Reject oversized metadata before it reaches the replicated log.
   case string.byte_size(bytes) > max_bytes {
-    True -> Error("queue snapshot exceeds 4 MiB")
+    True -> Error(fault.Internal("queue snapshot exceeds 4 MiB"))
     False -> ffi_khepri.swap(prior, bytes)
   }
 }

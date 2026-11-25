@@ -2,6 +2,7 @@
 
 import gantry/blobs
 import gantry/config
+import gantry/fault.{type Fault}
 import gantry/git
 import gantry/github
 import gantry/internal/ffi_host
@@ -28,7 +29,7 @@ pub fn build(
   cfg: config.Config,
   repo: config.Repository,
   pinned: request.Build,
-) -> Result(List(queue.Task), String) {
+) -> Result(List(queue.Task), Fault) {
   // The request carries a full object ID, so a ref change cannot retarget
   // this build. Its ad hoc action already passed the request rules.
   use s <- git.session(cfg, repo)
@@ -56,7 +57,7 @@ pub fn group(
   cfg: config.Config,
   repo: config.Repository,
   group: request.Submit,
-) -> Result(#(queue.Candidate, List(queue.Task)), String) {
+) -> Result(#(queue.Candidate, List(queue.Task)), Fault) {
   // Each distinct pull in the validated request contributes one ordered
   // integration step.
   let pulls = request.pulls(group)
@@ -111,14 +112,14 @@ fn merge_date(
   s: git.Session,
   parent: String,
   head: String,
-) -> Result(String, String) {
+) -> Result(String, Fault) {
   use dates <- result.try(
     list.try_map([parent, head], fn(sha) {
       use value <- result.try(
         git.command(s, ["show", "-s", "--format=%ct", sha]),
       )
       int.parse(string.trim(value))
-      |> result.replace_error("invalid Git parent timestamp")
+      |> result.replace_error(fault.Internal("invalid Git parent timestamp"))
     }),
   )
   let time = list.fold(dates, 0, int.max) + 1
@@ -137,7 +138,7 @@ pub fn member(
   repo: config.Repository,
   s: git.Session,
   n: Int,
-) -> Result(queue.Member, String) {
+) -> Result(queue.Member, Fault) {
   use sha <- result.try(git.fetch(
     s,
     "refs/pull/" <> int.to_string(n) <> "/head",
@@ -161,7 +162,7 @@ pub fn member(
       // Only the operator-selected branch can receive this integration.
       case branch == repo.branch {
         True -> Ok(queue.Member(n, sha))
-        False -> Error("unexpected pull target")
+        False -> Error(fault.Invalid("unexpected pull target"))
       }
     }
   }
@@ -177,7 +178,7 @@ fn tasks(
   target: String,
   id: String,
   adhoc: Option(graph.Action),
-) -> Result(List(queue.Task), String) {
+) -> Result(List(queue.Task), Fault) {
   // An ad hoc result has a private cache scope. Declared targets share a
   // scope. The request rules have already closed an ad hoc action over the
   // staging rules and rejected its graph edges.
@@ -190,10 +191,11 @@ fn tasks(
       use file <- result.try(git.command(s, ["unpack-file", string.trim(oid)]))
       use manifest <- result.try(
         simplifile.read(s.dir <> "/" <> string.trim(file))
-        |> result.replace_error("cannot read build manifest"),
+        |> result.replace_error(fault.Internal("cannot read build manifest")),
       )
       graph.compile(manifest, target)
       |> result.map(fn(actions) { #(actions, "declared") })
+      |> result.map_error(fault.Invalid)
     }
   })
 
@@ -202,14 +204,18 @@ fn tasks(
   // projecting tree blobs so packaging rules cannot omit or rewrite inputs.
   use Nil <- result.try(
     simplifile.create_directory_all(s.dir <> "/info")
-    |> result.replace_error("cannot configure raw Git projection"),
+    |> result.replace_error(fault.Unavailable(
+      "cannot configure raw Git projection",
+    )),
   )
   use Nil <- result.try(
     simplifile.write(
       s.dir <> "/info/attributes",
       "* -export-ignore -export-subst -text -crlf !eol -ident !filter !working-tree-encoding\n",
     )
-    |> result.replace_error("cannot protect raw Git projection"),
+    |> result.replace_error(fault.Unavailable(
+      "cannot protect raw Git projection",
+    )),
   )
 
   list.try_map(actions, fn(action) {
@@ -224,17 +230,20 @@ fn tasks(
     // An action with no inputs receives a valid empty archive.
     use _ <- result.try(case action.inputs {
       [] -> {
-        use #(status, _) <- result.try(ffi_host.run(
-          "tar",
-          ["-cf", path, "--files-from", "/dev/null"],
-          [],
-          10_000,
-        ))
+        use #(status, _) <- result.try(
+          ffi_host.run(
+            "tar",
+            ["-cf", path, "--files-from", "/dev/null"],
+            [],
+            10_000,
+          )
+          |> result.map_error(fault.Unavailable),
+        )
 
         // Require GNU tar to finish writing the empty archive.
         case status {
           0 -> Ok("")
-          _ -> Error("cannot create empty input archive")
+          _ -> Error(fault.Unavailable("cannot create empty input archive"))
         }
       }
       _ ->
@@ -257,18 +266,19 @@ fn tasks(
 
     use info <- result.try(
       simplifile.file_info(path)
-      |> result.replace_error("cannot inspect Git archive"),
+      |> result.replace_error(fault.Unavailable("cannot inspect Git archive")),
     )
 
     // Check the protocol transfer bound before allocating the archive in memory.
     use Nil <- result.try(case info.size <= blobs.limit {
       True -> Ok(Nil)
-      False -> Error("source archive exceeds worker transfer limit")
+      False ->
+        Error(fault.Invalid("source archive exceeds worker transfer limit"))
     })
 
     use bytes <- result.try(
       simplifile.read_bits(path)
-      |> result.replace_error("cannot read Git archive"),
+      |> result.replace_error(fault.Unavailable("cannot read Git archive")),
     )
     use source <- result.try(blobs.put(cfg.blobs, bytes))
 

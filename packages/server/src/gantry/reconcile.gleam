@@ -2,6 +2,7 @@
 //// outcome leaves that exact intent outstanding until a later observation.
 
 import gantry/config.{type Config}
+import gantry/fault.{type Fault}
 import gantry/store
 import gantry/submit
 import gantry_core/queue
@@ -42,7 +43,7 @@ fn on_message(cfg: Config, _message: Message) -> actor.Next(Config, Message) {
 /// ```gleam
 /// // tick(config)
 /// ```
-fn tick(cfg: Config) -> Result(Nil, String) {
+fn tick(cfg: Config) -> Result(Nil, Fault) {
   use intents <- result.try(
     store.change(fn(state) { Ok(queue.landings(state)) }),
   )
@@ -60,14 +61,17 @@ fn tick(cfg: Config) -> Result(Nil, String) {
 /// ```gleam
 /// // reconcile_one(config, intent)
 /// ```
-fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, String) {
+fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
   use repo <- result.try(
     dict.get(cfg.repositories, intent.repo)
-    |> result.replace_error("repository configuration unavailable"),
+    |> result.replace_error(fault.Internal(
+      "repository configuration unavailable",
+    )),
   )
   use outcome <- result.try(submit.reconcile(cfg, repo, intent))
   store.change(fn(state) {
     queue.record_landing(state, intent, outcome)
     |> result.map(fn(next) { #(next, Nil) })
+    |> result.map_error(fault.Conflict)
   })
 }

@@ -1,6 +1,7 @@
 //// Source archives, logs and outputs are immutable content-addressed bytes.
 //// Queue transitions reference objects after their atomic publication.
 
+import gantry/fault.{type Fault}
 import gantry/internal/ffi_host
 import gleam/bit_array
 import gleam/crypto
@@ -47,7 +48,7 @@ pub fn valid(value: String) -> Bool {
 /// ```gleam
 /// // blobs.put(shared_root, <<"artifact">>)
 /// ```
-pub fn put(root: String, bytes: BitArray) -> Result(String, String) {
+pub fn put(root: String, bytes: BitArray) -> Result(String, Fault) {
   use Nil <- result.try(check_size(bytes))
   let id = digest(bytes)
   let directory = root <> "/objects"
@@ -55,24 +56,24 @@ pub fn put(root: String, bytes: BitArray) -> Result(String, String) {
 
   use Nil <- result.try(
     simplifile.create_directory_all(directory)
-    |> result.replace_error("cannot open blob directory"),
+    |> result.replace_error(fault.Unavailable("cannot open blob directory")),
   )
   let suffix = crypto.strong_random_bytes(16) |> bit_array.base16_encode
   let temporary = directory <> "/.upload-" <> suffix
   use Nil <- result.try(
     simplifile.write_bits(bytes, to: temporary)
-    |> result.replace_error("cannot stage blob"),
+    |> result.replace_error(fault.Unavailable("cannot stage blob")),
   )
 
   // Concurrent writers publish identical bytes at the same destination.
   let published = {
-    use Nil <- result.try(ffi_host.sync_path(temporary))
+    use Nil <- result.try(sync(temporary))
     use Nil <- result.try(
       simplifile.rename(temporary, path)
-      |> result.replace_error("cannot publish blob"),
+      |> result.replace_error(fault.Unavailable("cannot publish blob")),
     )
-    use Nil <- result.try(ffi_host.sync_path(directory))
-    ffi_host.sync_path(root) |> result.map(fn(_) { id })
+    use Nil <- result.try(sync(directory))
+    sync(root) |> result.map(fn(_) { id })
   }
   let _ = simplifile.delete_file(temporary)
   published
@@ -85,31 +86,36 @@ pub fn put(root: String, bytes: BitArray) -> Result(String, String) {
 /// ```gleam
 /// // blobs.get(shared_root, id)
 /// ```
-pub fn get(root: String, id: String) -> Result(BitArray, String) {
+pub fn get(root: String, id: String) -> Result(BitArray, Fault) {
   use Nil <- result.try(check_digest(id))
   use bytes <- result.try(
     simplifile.read_bits(root <> "/objects/" <> id)
-    |> result.replace_error("blob unavailable"),
+    |> result.replace_error(fault.NotFound("blob unavailable")),
   )
   use Nil <- result.try(check_size(bytes))
 
   // Return the object only if its bytes still match its address.
   case digest(bytes) == id {
     True -> Ok(bytes)
-    False -> Error("stored blob failed digest verification")
+    False -> Error(fault.Internal("stored blob failed digest verification"))
   }
 }
 
-fn check_digest(id: String) -> Result(Nil, String) {
+fn check_digest(id: String) -> Result(Nil, Fault) {
   case valid(id) {
     True -> Ok(Nil)
-    False -> Error("invalid SHA-256 digest")
+    False -> Error(fault.Invalid("invalid SHA-256 digest"))
   }
 }
 
-fn check_size(bytes: BitArray) -> Result(Nil, String) {
+fn check_size(bytes: BitArray) -> Result(Nil, Fault) {
   case bit_array.byte_size(bytes) <= limit {
     True -> Ok(Nil)
-    False -> Error("blob exceeds 64 MiB")
+    False -> Error(fault.Invalid("blob exceeds 64 MiB"))
   }
+}
+
+/// Flush a published path, treating a failure as a retryable storage fault.
+fn sync(path: String) -> Result(Nil, Fault) {
+  ffi_host.sync_path(path) |> result.map_error(fault.Unavailable)
 }

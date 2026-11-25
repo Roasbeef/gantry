@@ -4,6 +4,7 @@
 import gantry/api
 import gantry/blobs
 import gantry/config.{type Config}
+import gantry/fault.{type Fault}
 import gantry/store
 import gleam/bit_array
 import gleam/bytes_tree
@@ -81,7 +82,7 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
 fn ready_reply() -> Reply {
   respond(
     store.ready()
-    |> result.replace_error("queue quorum unavailable")
+    |> result.map_error(fn(_) { fault.Unavailable("queue quorum unavailable") })
     |> result.map(fn(_) { json.object([#("status", json.string("ready"))]) }),
   )
 }
@@ -99,7 +100,7 @@ fn claim_reply(body: String) -> Reply {
       response.new(204)
       |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(<<>>)))
     Ok(Some(assignment)) -> json_reply(200, assignment)
-    Error(reason) -> error(status(reason), reason)
+    Error(reason) -> fault_reply(reason)
   }
 }
 
@@ -117,7 +118,7 @@ fn authorized(
 ) -> Reply {
   case accepts(req, token) {
     True -> then()
-    False -> error(401, "authentication required")
+    False -> fault_reply(fault.Unauthorized("authentication required"))
   }
 }
 
@@ -136,7 +137,7 @@ fn authorized_either(
 ) -> Reply {
   case accepts(req, first) || accepts(req, second) {
     True -> then()
-    False -> error(401, "authentication required")
+    False -> fault_reply(fault.Unauthorized("authentication required"))
   }
 }
 
@@ -226,7 +227,7 @@ fn read_body(
 /// ```
 fn upload(root: String, id: String, body: BitArray) -> Reply {
   case blobs.valid(id) && blobs.digest(body) == id {
-    False -> error(400, "upload digest mismatch")
+    False -> fault_reply(fault.Invalid("upload digest mismatch"))
     True ->
       blobs.put(root, body)
       |> result.map(fn(saved) { json.object([#("digest", json.string(saved))]) })
@@ -241,25 +242,21 @@ fn download(root: String, id: String) -> Reply {
       response.new(200)
       |> response.set_header("content-type", "application/octet-stream")
       |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(body)))
-    Error(_) -> error(404, "blob unavailable")
+    Error(reason) -> fault_reply(reason)
   }
 }
 
-fn respond(answer: Result(json.Json, String)) -> Reply {
+fn respond(answer: Result(json.Json, Fault)) -> Reply {
   case answer {
     Ok(value) -> json_reply(200, value)
-    Error(reason) -> error(status(reason), reason)
+    Error(reason) -> fault_reply(reason)
   }
 }
 
-/// Map queue conflicts, missing records and unavailable services to HTTP status codes.
-fn status(reason: String) -> Int {
-  case reason {
-    "attempt is no longer active" | "run ID already has different inputs" -> 409
-    "unknown run" | "repository is not registered" -> 404
-    "queue " <> _ | "Khepri" <> _ | "blob unavailable" -> 503
-    _ -> 400
-  }
+/// Report a typed failure with the status its kind selects. Transient
+/// dependency failures use 503 so clients retry, and corrupt state uses 500.
+pub fn fault_reply(reason: Fault) -> Reply {
+  error(fault.status(reason), fault.detail(reason))
 }
 
 fn error(code: Int, reason: String) -> Reply {

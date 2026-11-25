@@ -2,6 +2,7 @@
 
 import gantry/blobs
 import gantry/config.{type Config}
+import gantry/fault.{type Fault}
 import gantry/prepare
 import gantry/store
 import gantry_core/graph
@@ -16,6 +17,11 @@ import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 import gleam/time/timestamp
+
+/// The typed failure every request operation reports. `http_api` maps its
+/// variant to an HTTP status.
+pub type Error =
+  Fault
 
 /// Choose whether to admit or inspect a graph.
 pub type BuildMode {
@@ -34,9 +40,12 @@ pub fn build(
   cfg: Config,
   body: String,
   mode: BuildMode,
-) -> Result(json.Json, String) {
+) -> Result(json.Json, Error) {
   use pinned <- result.try(
-    request.parse_build(body) |> result.map_error(request.message),
+    request.parse_build(body)
+    |> result.map_error(fn(rejection) {
+      fault.Invalid(request.message(rejection))
+    }),
   )
   use repo <- result.try(registered(cfg, request.build_repo(pinned)))
   use tasks <- result.try(prepare.build(cfg, repo, pinned))
@@ -67,9 +76,12 @@ pub fn build(
 /// ```gleam
 /// // api.group(config, body)
 /// ```
-pub fn group(cfg: Config, body: String) -> Result(json.Json, String) {
+pub fn group(cfg: Config, body: String) -> Result(json.Json, Error) {
   use group <- result.try(
-    request.parse_submit(body) |> result.map_error(request.message),
+    request.parse_submit(body)
+    |> result.map_error(fn(rejection) {
+      fault.Invalid(request.message(rejection))
+    }),
   )
   use repo <- result.try(registered(cfg, request.submit_repo(group)))
   use saved <- result.try(store.read())
@@ -104,10 +116,10 @@ fn replay_group(
   run: queue.Run,
   repo: String,
   pulls: List(Int),
-) -> Result(json.Json, String) {
+) -> Result(json.Json, Error) {
   // A group retry must identify the same repository and ordered pull requests.
   case run.submission {
-    queue.Build -> Error("run ID already has different inputs")
+    queue.Build -> Error(fault.Conflict("run ID already has different inputs"))
     queue.Queued(candidate)
     | queue.Landing(candidate)
     | queue.Landed(candidate)
@@ -115,7 +127,7 @@ fn replay_group(
       use Nil <- result.try(require(
         run.repo == repo
           && list.map(candidate.members, fn(member) { member.pull }) == pulls,
-        "run ID already has different inputs",
+        fault.Conflict("run ID already has different inputs"),
       ))
       Ok(protocol.encode_run(run))
     }
@@ -136,10 +148,11 @@ fn admit(
   target: String,
   intent: queue.Submission,
   tasks: List(queue.Task),
-) -> Result(json.Json, String) {
+) -> Result(json.Json, Error) {
   store.change(fn(state) {
     queue.admit(state, id, repo, revision, target, intent, tasks)
     |> result.map(fn(pair) { #(pair.0, protocol.encode_run(pair.1)) })
+    |> result.map_error(fault.Conflict)
   })
 }
 
@@ -150,10 +163,10 @@ fn admit(
 /// ```gleam
 /// // api.get("build-1")
 /// ```
-pub fn get(id: String) -> Result(json.Json, String) {
+pub fn get(id: String) -> Result(json.Json, Error) {
   use state <- result.try(store.read())
   queue.find(state, id)
-  |> result.replace_error("unknown run")
+  |> result.replace_error(fault.NotFound("unknown run"))
   |> result.map(protocol.encode_run)
 }
 
@@ -164,11 +177,11 @@ pub fn get(id: String) -> Result(json.Json, String) {
 /// ```gleam
 /// // api.claim("{...}")
 /// ```
-pub fn claim(body: String) -> Result(Option(json.Json), String) {
+pub fn claim(body: String) -> Result(Option(json.Json), Error) {
   use #(worker, pool) <- result.try(parse(body, claim_decoder()))
   use Nil <- result.try(require(
     request.valid_id(worker) && request.valid_id(pool),
-    "invalid identifier",
+    fault.Invalid("invalid identifier"),
   ))
   let #(now, _) =
     timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
@@ -184,7 +197,7 @@ pub fn claim(body: String) -> Result(Option(json.Json), String) {
 /// ```gleam
 /// // api.finish(config, body)
 /// ```
-pub fn finish(cfg: Config, body: String) -> Result(json.Json, String) {
+pub fn finish(cfg: Config, body: String) -> Result(json.Json, Error) {
   use #(run, action, worker, serial, completion) <- result.try(parse(
     body,
     completion_decoder(),
@@ -196,6 +209,7 @@ pub fn finish(cfg: Config, body: String) -> Result(json.Json, String) {
     |> result.map(fn(next) {
       #(next, json.object([#("accepted", json.bool(True))]))
     })
+    |> result.map_error(fault.Conflict)
   })
 }
 
@@ -209,7 +223,7 @@ pub fn finish(cfg: Config, body: String) -> Result(json.Json, String) {
 fn verify_blobs(
   root: String,
   completion: queue.Completion,
-) -> Result(Nil, String) {
+) -> Result(Nil, Error) {
   // Verify every referenced log and each output that a successful report publishes.
   let ids = case completion {
     queue.Succeeded(files, log) -> [
@@ -227,20 +241,21 @@ fn verify_blobs(
 fn registered(
   cfg: Config,
   repository: String,
-) -> Result(config.Repository, String) {
+) -> Result(config.Repository, Error) {
   dict.get(cfg.repositories, string.lowercase(repository))
-  |> result.replace_error("repository is not registered")
+  |> result.replace_error(fault.NotFound("repository is not registered"))
 }
 
-fn require(condition: Bool, reason: String) -> Result(Nil, String) {
+fn require(condition: Bool, otherwise: Error) -> Result(Nil, Error) {
   case condition {
     True -> Ok(Nil)
-    False -> Error(reason)
+    False -> Error(otherwise)
   }
 }
 
-fn parse(body: String, decoder: decode.Decoder(a)) -> Result(a, String) {
-  json.parse(body, decoder) |> result.replace_error("invalid request JSON")
+fn parse(body: String, decoder: decode.Decoder(a)) -> Result(a, Error) {
+  json.parse(body, decoder)
+  |> result.replace_error(fault.Invalid("invalid request JSON"))
 }
 
 fn claim_decoder() {

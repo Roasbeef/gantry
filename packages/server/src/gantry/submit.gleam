@@ -2,6 +2,7 @@
 //// observation or push retains the lane for later reconciliation.
 
 import gantry/config
+import gantry/fault.{type Fault}
 import gantry/git
 import gantry/github
 import gantry/prepare
@@ -20,14 +21,14 @@ pub fn reconcile(
   cfg: config.Config,
   repo: config.Repository,
   intent: queue.Intent,
-) -> Result(Result(Nil, String), String) {
+) -> Result(Result(Nil, String), Fault) {
   let c = intent.candidate
 
   // Confirm the registered remote still owns the intent’s lane.
   use Nil <- result.try(
     case intent.repo == repo.name && c.branch == repo.branch {
       True -> Ok(Nil)
-      False -> Error("landing configuration changed")
+      False -> Error(fault.Internal("landing configuration changed"))
     },
   )
 
@@ -50,7 +51,8 @@ pub fn reconcile(
   // The bundle must restore the tested commit and preserve the expected base.
   use Nil <- result.try(case ff && restored == c.commit {
     True -> Ok(Nil)
-    False -> Error("invalid stored candidate ancestry or identity")
+    False ->
+      Error(fault.Internal("invalid stored candidate ancestry or identity"))
   })
 
   use landed <- result.try(git.ancestor(s, c.commit, observed))
@@ -79,7 +81,10 @@ pub fn reconcile(
               // A changed pin leaves any previous in-flight push unresolved.
               case actual == m {
                 True -> Ok(Nil)
-                False -> Error("pull head changed while submission unresolved")
+                False ->
+                  Error(fault.Unavailable(
+                    "pull head changed while submission unresolved",
+                  ))
               }
             }
           }
