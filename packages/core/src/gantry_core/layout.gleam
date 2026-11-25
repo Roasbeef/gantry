@@ -521,16 +521,7 @@ fn renumber(
 ) -> #(List(Write), Int) {
   let #(numbered, used) =
     list.fold(wanted, #([], next), fn(inner, entry) {
-      // A proof that was already stored keeps its number, unless this finish
-      // published it again, which makes it the newest.
-      let stored = case Some(entry) == newest {
-        True -> Error(Nil)
-        False -> list.find(old, fn(one) { one.remembered == entry })
-      }
-      case stored {
-        Ok(one) -> #([one, ..inner.0], inner.1)
-        Error(Nil) -> #([Numbered(inner.1 + 1, entry), ..inner.0], inner.1 + 1)
-      }
+      place(old, newest, inner, entry)
     })
   let kept = list.reverse(numbered)
   let dropped = absent_from(old, kept)
@@ -543,6 +534,28 @@ fn renumber(
       Put(["proofs", pad(one.number)], group_pointer(one.remembered))
     })
   #(list.flatten([order_deletes, [store_group(key, kept)], order_puts]), used)
+}
+
+/// Give one proof its number: it keeps the number it had, unless this finish
+/// published it again, which makes it the newest. `inner` holds the numbered
+/// proofs so far, newest last, and the largest number used.
+fn place(
+  old: List(Numbered),
+  newest: Option(queue.Remembered),
+  inner: #(List(Numbered), Int),
+  entry: queue.Remembered,
+) -> #(List(Numbered), Int) {
+  // A proof published again counts as new, whatever was stored before.
+  let stored = case Some(entry) == newest {
+    True -> Error(Nil)
+    False -> list.find(old, fn(one) { one.remembered == entry })
+  }
+
+  // A stored proof is kept, and any other takes the next number.
+  case stored {
+    Ok(one) -> #([one, ..inner.0], inner.1)
+    Error(Nil) -> #([Numbered(inner.1 + 1, entry), ..inner.0], inner.1 + 1)
+  }
 }
 
 /// The write that stores a proof group, or removes it when no proof is left.
@@ -944,7 +957,6 @@ fn claim_from(
         ),
       )
     }
-    // A replayed lease issues no serial, so it never overtakes anything.
     Some(job), [_, ..] ->
       case next.serial != scan.serial.0 && overtook_unread(scan, job) {
         True -> {
@@ -985,6 +997,7 @@ fn next_window(
 }
 
 /// Whether a lease went to a run enrolled after some ready run still unread.
+/// Only a new lease can, because a replayed one issues no serial.
 fn overtook_unread(scan: Scan, job: queue.Assignment) -> Bool {
   let leased =
     list.find(scan.current, fn(stored) { stored.run.id == job.run })
@@ -1062,6 +1075,7 @@ pub fn finish(
     queue.Succeeded(_, _) -> True
     queue.Rejected(_, _) -> False
   }
+
   let wanted =
     bool.guard(!published, [], fn() {
       list.flat_map(loaded, fn(stored) { leased_group(stored.run, action) })
