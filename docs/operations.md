@@ -103,6 +103,28 @@ A managed profile (from `gantry worker setup`) also refuses to start when its
 journal is missing or has no identity, since an action could have started.
 Use a fresh profile and slot ID in that case, and let the old lease expire.
 
+### Upgrade across a queue format change
+
+The queue snapshot carries no format version, and each release decodes
+only the step kinds and fields it knows. A newer release reads an older
+snapshot, but an older release answers every request, `/health` included,
+with 400 `invalid durable queue snapshot` once a newer one has written.
+The release after f4cc695 is such a change: it adds `skipped` and
+`expired` steps, attempt counts, and the proof cache.
+
+Across such a release, upgrade every voter together:
+
+1. Stop admitting work and let the workers drain, since a worker stopped
+   mid-action fails its run.
+2. Stop all voters and back up each `data_dir/queue-ra`.
+3. Install the new release on every voter and start them all.
+
+Rolling back after the new release has written means restoring those
+backups, which loses whatever was admitted since. An upgrade drill on
+2026-11-24 from f4cc695 to 10fd0ef showed this. The controller upgrade
+read every earlier run; the rollback refused the snapshot; and the
+upgraded worker reopened the old journal but failed its in-flight action.
+
 ### The snapshot reaches 4 MiB
 
 The queue is one snapshot with a 4 MiB ceiling. A mutation that would exceed
