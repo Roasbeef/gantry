@@ -104,6 +104,10 @@ pub type Failure {
   /// The queue refused the transition. The text comes from the core.
   Refused(detail: String)
 
+  /// The store holds the most runs it accepts, so a new one waits for
+  /// retention to drop a finished one.
+  Full(detail: String)
+
   /// The store could not be read.
   Unreadable(detail: String)
 
@@ -137,6 +141,11 @@ pub const format_value = "indexed-v1"
 
 /// How many ready runs one claim loads before it asks for more.
 const window = 8
+
+/// The most runs the store holds at once, finished or not. It bounds the
+/// replicated metadata where the 4 MiB snapshot used to, and a deployment
+/// with that many unfinished runs is falling behind and should refuse more.
+pub const max_runs = 10_000
 
 // ---------------------------------------------------------------------------
 // Keys and entries
@@ -714,6 +723,11 @@ fn admit_new(
   tasks: List(queue.Task),
 ) -> Result(Plan(Run), Failure) {
   use #(seq, seq_text) <- result.try(counter(reader, counter_key("seq")))
+  use #(held, held_text) <- result.try(counter(reader, counter_key("runs")))
+  use <- bool.guard(
+    held >= max_runs,
+    Error(Full("the queue holds the most runs it accepts")),
+  )
   use #(lane, lane_expects) <- result.try(admission_lane(
     reader,
     repo,
@@ -734,10 +748,18 @@ fn admit_new(
   let writes =
     list.append(
       counter_writes(counter_key("seq"), seq, seq + 1),
-      run_writes(lane, next.runs, seq + 1),
+      list.append(
+        counter_writes(counter_key("runs"), held, held + 1),
+        run_writes(lane, next.runs, seq + 1),
+      ),
     )
   plan(
-    [Is(counter_key("seq"), seq_text), Is(run_key(id), None), ..lane_expects],
+    [
+      Is(counter_key("seq"), seq_text),
+      Is(counter_key("runs"), held_text),
+      Is(run_key(id), None),
+      ..lane_expects
+    ],
     writes,
     run,
   )
@@ -1161,9 +1183,19 @@ pub fn retain(
     retention.keep_proofs,
     batch,
   ))
+  use #(held, held_text) <- result.try(counter(reader, counter_key("runs")))
+  let dropped = list.length(loaded) - list.length(trimmed.runs)
+
+  // Dropping runs lowers the count that bounds admission.
+  let count_expects =
+    bool.guard(dropped == 0, [], fn() { [Is(counter_key("runs"), held_text)] })
   plan(
-    list.append(run_expects, proof_expects),
-    list.append(run_writes(loaded, trimmed.runs, 0), proof_writes),
+    list.flatten([run_expects, proof_expects, count_expects]),
+    list.flatten([
+      run_writes(loaded, trimmed.runs, 0),
+      counter_writes(counter_key("runs"), held, int.max(0, held - dropped)),
+      proof_writes,
+    ]),
     excess > batch || proofs_left,
   )
 }
@@ -1288,6 +1320,7 @@ pub fn import_state(state: State) -> List(Write) {
       Put(format_key(), format_value),
       Put(counter_key("serial"), int.to_string(state.serial)),
       Put(counter_key("seq"), int.to_string(list.length(state.runs))),
+      Put(counter_key("runs"), int.to_string(list.length(state.runs))),
       Put(counter_key("proofs"), int.to_string(list.length(proofs))),
     ],
     run_puts,

@@ -216,3 +216,35 @@ fn numbers(first: Int, last: Int) -> List(Int) {
     first + offset
   })
 }
+
+pub fn a_full_queue_refuses_a_new_run_until_retention_frees_one_test() {
+  let full =
+    image.apply(image.empty(), [
+      layout.Put(["counter", "runs"], int.to_string(layout.max_runs)),
+    ])
+  let admitted =
+    layout.admit(
+      image.reader(full),
+      "run-1",
+      "repo",
+      "run-1",
+      "check",
+      queue.Build,
+      tasks("run-1", False),
+    )
+  let assert Error(layout.Full(_)) = admitted
+
+  // A run that already exists is still found, because it is not new.
+  let both = admit(start(), "run-2", False)
+  let assert Ok(plan) =
+    layout.admit(
+      image.reader(both.store),
+      "run-2",
+      "repo",
+      "run-2",
+      "check",
+      queue.Build,
+      tasks("run-2", False),
+    )
+  assert layout.writes(plan) == []
+}

@@ -6,6 +6,7 @@
 import gantry_core/image.{type Image}
 import gantry_core/layout
 import gantry_core/queue
+import gleam/bool
 import gleam/dict
 import gleam/list
 import gleam/option.{None}
@@ -67,6 +68,7 @@ pub fn admit(
     Error(_), Error(layout.Refused(_)) -> Ok(store)
     Error(_), Error(layout.Unreadable(detail))
     | Error(_), Error(layout.Corrupt(detail))
+    | Error(_), Error(layout.Full(detail))
     -> Error("admit: unreadable: " <> detail)
     Ok(_), Error(_) -> Error("admit: layout refused an accepted run")
     Error(_), Ok(_) -> Error("admit: layout accepted a refused run")
@@ -86,7 +88,10 @@ pub fn replay(
       let #(after, receipt) = queue.claim(state, worker, pool, now)
       planned(store, layout.claim(reader, worker, pool, now), "claim", fn(plan) {
         case layout.receipt(plan) == receipt {
-          True -> conclude(store, plan, True, after, "claim")
+          True -> {
+            use next <- result.try(conclude(store, plan, True, after, "claim"))
+            rival(store, next, plan, pool, now)
+          }
           False ->
             Error(
               "claim: receipts differ: whole="
@@ -173,8 +178,9 @@ fn planned(
   case outcome {
     Ok(plan) -> then(plan)
     Error(layout.Refused(detail)) -> Error(label <> ": refused: " <> detail)
-    Error(layout.Unreadable(detail)) | Error(layout.Corrupt(detail)) ->
-      Error(label <> ": unreadable: " <> detail)
+    Error(layout.Unreadable(detail))
+    | Error(layout.Corrupt(detail))
+    | Error(layout.Full(detail)) -> Error(label <> ": unreadable: " <> detail)
   }
 }
 
@@ -190,6 +196,7 @@ fn agree(
     Error(_), Error(layout.Refused(_)) -> Ok(store)
     Error(_), Error(layout.Unreadable(detail))
     | Error(_), Error(layout.Corrupt(detail))
+    | Error(_), Error(layout.Full(detail))
     -> Error(label <> ": unreadable: " <> detail)
     Ok(_), Error(_) -> Error(label <> ": layout refused an accepted change")
     Error(_), Ok(_) -> Error(label <> ": layout accepted a refused change")
@@ -243,5 +250,53 @@ fn indexed(store: Image, state: queue.State) -> Bool {
   set.from_list(present) == set.from_list(dict.keys(wanted))
   && list.all(dict.to_list(wanted), fn(pair) {
     image.get(store, pair.0) == Ok(pair.1)
+  })
+}
+
+/// A second claim planned on the same image must not commit over the first
+/// when both issue a lease: each took the next serial. One rival asks the
+/// same pool, and one asks another pool with ready runs, so only the serial
+/// both claims write can make them conflict. This is what the expectations
+/// are for, and a plan that drops one fails here.
+fn rival(
+  before: Image,
+  next: Image,
+  first: layout.Plan(a),
+  pool: String,
+  now: Int,
+) -> Result(Image, String) {
+  let pools = [pool, ..other_pools(before, pool)]
+  use <- bool.guard(!issues(first), Ok(next))
+  list.try_each(pools, fn(asked) {
+    let planned = layout.claim(image.reader(before), "\u{0}rival", asked, now)
+
+    // A rival that writes nothing has nothing to lose.
+    case planned {
+      Ok(plan) ->
+        case issues(plan), image.commit(next, plan) {
+          True, Ok(_) -> Error("claim: a rival lease committed over a lease")
+          _, _ -> Ok(Nil)
+        }
+      Error(_) -> Ok(Nil)
+    }
+  })
+  |> result.replace(next)
+}
+
+/// The pools other than `pool` that hold a ready run.
+fn other_pools(store: Image, pool: String) -> List(String) {
+  result.unwrap(layout.numbered(image.reader(store)), [])
+  |> list.flat_map(fn(pair) { queue.ready_pools(pair.1) })
+  |> list.unique
+  |> list.filter(fn(other) { other != pool })
+}
+
+/// Whether a plan writes the lease serial, which only a new lease does.
+fn issues(plan: layout.Plan(a)) -> Bool {
+  list.any(layout.writes(plan), fn(write) {
+    case write {
+      layout.Put(["counter", "serial"], _) -> True
+      layout.Put(_, _) | layout.Delete(_) -> False
+    }
   })
 }

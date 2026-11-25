@@ -245,6 +245,7 @@ fn reader() -> layout.Reader {
 fn fault_of(failure: layout.Failure) -> Fault {
   case failure {
     layout.Refused(detail) -> fault.Conflict(detail)
+    layout.Full(detail) -> fault.Unavailable(detail)
     layout.Unreadable(detail) -> fault.Unavailable(detail)
     layout.Corrupt(detail) -> fault.Internal(detail)
   }
