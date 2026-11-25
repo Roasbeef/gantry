@@ -71,12 +71,13 @@ sorted listing is in enrollment order.
 
 | Key | Holds | Answers |
 | --- | --- | --- |
-| `counter/serial`, `counter/seq`, `counter/proofs` | A counter each | The next lease serial, enrollment number, and proof number |
+| `counter/serial`, `counter/seq`, `counter/proofs`, `counter/runs` | A counter each | The next lease serial, enrollment number, and proof number, and how many runs are stored |
 | `run/<id>` | The run and its enrollment number | Lookup by identity |
 | `ready/<pool>/<seq>` | The run's ID | The oldest run with an action a slot in `pool` can take now |
 | `active/<seq>` | The earliest lease deadline and the workers holding leases | Which leases lapsed, and whether a worker already holds one |
 | `waiting/<repo>/<branch>/<seq>` | The run's ID | The head of each lane that is waiting to be prepared |
-| `holds/<repo>/<branch>/<seq>` | The run's ID | Which run holds a lane, and which runs can land |
+| `holds/<repo>/<branch>/<seq>` | The run's ID | Which run holds a lane |
+| `landing/<seq>` | The run's ID | Which runs the reconciler can land or is landing |
 | `done/<seq>` | The run's ID | The oldest finished runs, for retention |
 | `proof/<repo>/<recipe>` | The proofs for a recipe, each with its proof number | Reuse by key |
 | `proofs/<n>` | The proof's group | The oldest proofs, for retention |
@@ -96,11 +97,20 @@ effect escapes. A plan that writes nothing, such as an empty poll, is confirmed
 by a quorum read of the same expectations and appends nothing to the log. This
 replaces the digest of the whole snapshot that the quiet-queue hint compared.
 
-Three counters are the only keys that unrelated operations contend on. Each
+Four counters are the only keys that unrelated operations contend on. Each
 controller serializes the operations that write one counter, so its own
 traffic does not lose races to itself, and the expectation still catches
-another controller. The gate is a mutual-exclusion primitive in the Erlang
-bridge. It decides nothing about the queue.
+another controller. The lock is a mutual-exclusion primitive in the Erlang
+bridge. It decides nothing about the queue. An operation plans without the
+lock first, and only a plan that writes takes it and plans again, so an empty
+poll never waits behind real claims.
+
+The old snapshot also capped how many runs the queue could hold, because a
+mutation past 4 MiB was refused. The cap goes with it, so admission now checks
+`counter/runs` against `layout.max_runs` (10,000) and refuses a new run as
+unavailable past that. Retention lowers the counter. The bound limits the
+memory a flood of admissions can take, and it is a limit on state and not on
+throughput.
 
 ### What the plans owe
 
