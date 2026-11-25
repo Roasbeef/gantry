@@ -103,7 +103,7 @@ pub fn group(
     None,
   ))
   use Nil <- result.try(git.preserve(cfg, repo, s, base, commit))
-  Ok(#(queue.Candidate(repo.branch, base, commit, members), plan))
+  Ok(#(queue.candidate(repo.branch, base, commit, members), plan))
 }
 
 /// A merge timestamp one second after its newest parent is stable on replay.

@@ -692,7 +692,9 @@ fn pending_retry_body() -> String {
 }
 
 fn failed_body() -> String {
-  run_body("failed", [queue.Work(task(), queue.Failed("exit 23", blob))])
+  run_body("failed", [
+    queue.Work(task(), queue.Failed(queue.Reported("exit 23"), blob)),
+  ])
 }
 
 // ---------------------------------------------------------------------------

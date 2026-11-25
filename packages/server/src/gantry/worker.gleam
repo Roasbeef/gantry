@@ -152,7 +152,7 @@ fn claim(slot: Slot, network: controllers.Controllers) -> Result(Step, Fault) {
 
       // The lease must name this exact capacity slot and pool.
       let owned = case
-        assignment.lease.worker == slot.worker
+        queue.lease_worker(assignment.lease) == slot.worker
         && assignment.task.pool == slot.pool
       {
         True -> Ok(Nil)
@@ -168,7 +168,7 @@ fn claim(slot: Slot, network: controllers.Controllers) -> Result(Step, Fault) {
             json.string(slot.worker),
             json.string(assignment.run),
             json.string(assignment.task.action.name),
-            json.int(assignment.lease.serial),
+            json.int(queue.lease_serial(assignment.lease)),
           ],
           fn(value) { value },
         )

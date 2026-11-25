@@ -20,8 +20,8 @@ pub fn generated_receipts_require_the_current_owner_and_exact_paths_test() {
     let #(number, digests, reverse) = input
     let #(pending, artifacts) = pending_run(number, digests)
     let #(active, assignment) = claim(pending, number)
-    let worker = assignment.lease.worker
-    let serial = assignment.lease.serial
+    let worker = queue.lease_worker(assignment.lease)
+    let serial = queue.lease_serial(assignment.lease)
     let paths = case reverse {
       True -> list.reverse(artifacts)
       False -> artifacts
@@ -52,7 +52,8 @@ pub fn generated_receipts_require_the_current_owner_and_exact_paths_test() {
     let assert Ok(next) = finish(active, assignment, worker, serial, completion)
     let assert Ok(run) = queue.find(next, assignment.run)
     let assert [queue.Work(_, queue.Passed(proof))] = run.work
-    let assert True = proof == queue.Proof(assignment.lease.key, paths, log)
+    let assert True =
+      proof == queue.proof(queue.lease_key(assignment.lease), paths, log)
     let assert True =
       finish(next, assignment, worker, serial, completion) == attempt_error
     Nil
@@ -90,8 +91,8 @@ pub fn generated_queue_snapshots_and_wire_values_round_trip_test() {
       finish(
         active,
         assignment,
-        assignment.lease.worker,
-        assignment.lease.serial,
+        queue.lease_worker(assignment.lease),
+        queue.lease_serial(assignment.lease),
         completion,
       )
     list.each([pending, active, settled], assert_persistence)
@@ -105,7 +106,7 @@ pub fn generated_queue_snapshots_and_wire_values_round_trip_test() {
     let assert True =
       queue.claim(
         restored,
-        assignment.lease.worker,
+        queue.lease_worker(assignment.lease),
         assignment.task.pool,
         number + 1,
       )
@@ -114,15 +115,15 @@ pub fn generated_queue_snapshots_and_wire_values_round_trip_test() {
       finish(
         restored,
         assignment,
-        assignment.lease.worker,
-        assignment.lease.serial,
+        queue.lease_worker(assignment.lease),
+        queue.lease_serial(assignment.lease),
         completion,
       )
       == Ok(settled)
     case completion {
       queue.Succeeded(_, _) -> assert_landing_persistence(settled, suffix)
       queue.Rejected(_, _) -> {
-        let assert #(unchanged, option.None) = queue.landing(settled)
+        let assert #(unchanged, []) = queue.landings(settled)
         let assert True = unchanged == settled
         Nil
       }
@@ -166,7 +167,7 @@ fn pending_run(
   let task =
     queue.Task(action, "tree-" <> suffix, "recipe-" <> suffix, "linux", "image")
   let candidate =
-    queue.Candidate("main", "base-" <> suffix, "commit-" <> suffix, [
+    queue.candidate("main", "base-" <> suffix, "commit-" <> suffix, [
       queue.Member(number + 1, "head-" <> suffix),
     ])
   let assert Ok(#(state, _)) =
@@ -174,7 +175,7 @@ fn pending_run(
       queue.empty(),
       "run-" <> suffix,
       "owner/project",
-      candidate.commit,
+      queue.candidate_commit(candidate),
       "check",
       queue.Queued(candidate),
       [task],
@@ -224,16 +225,23 @@ fn assert_persistence(state: queue.State) -> Nil {
 }
 
 fn assert_landing_persistence(state: queue.State, suffix: String) -> Nil {
-  let assert #(landing, option.Some(intent)) = queue.landing(state)
+  let assert #(landing, [intent]) = queue.landings(state)
   assert_persistence(landing)
   let assert Ok(restored) =
     json.parse(
       json.to_string(protocol.encode_state(landing)),
       protocol.state_decoder(),
     )
-  let assert True = queue.landing(restored) == #(landing, option.Some(intent))
-  list.each([Ok(Nil), Error("target advanced-" <> suffix)], fn(outcome) {
-    let assert Ok(terminal) = queue.record_landing(restored, intent, outcome)
-    assert_persistence(terminal)
-  })
+  let assert True = queue.landings(restored) == #(landing, [intent])
+  list.each(
+    [
+      Ok(Nil),
+      Error(queue.TargetAdvanced),
+      Error(queue.PolicyDenied("denied-" <> suffix)),
+    ],
+    fn(outcome) {
+      let assert Ok(terminal) = queue.record_landing(restored, intent, outcome)
+      assert_persistence(terminal)
+    },
+  )
 }

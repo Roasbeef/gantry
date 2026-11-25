@@ -62,7 +62,7 @@ fn tick(cfg: Config) -> Result(Nil, String) {
 /// ```
 fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, String) {
   use repo <- result.try(
-    dict.get(cfg.repositories, intent.repo)
+    dict.get(cfg.repositories, queue.intent_repo(intent))
     |> result.replace_error("repository configuration unavailable"),
   )
   use outcome <- result.try(submit.reconcile(cfg, repo, intent))
