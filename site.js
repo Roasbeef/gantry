@@ -1,26 +1,29 @@
-const toggle = document.querySelector("#toggle-base");
-const label = document.querySelector("#outcome-label");
-const result = document.querySelector("#outcome-text");
-const normal = [...result.childNodes];
-const stale = document.createDocumentFragment();
-const branch = document.createElement("code");
-const newerTip = document.createElement("code");
+// The graph shows the landed path by default, and the toggle swaps in the
+// rows for a target that moved during the build. Without JavaScript the
+// landed path stays visible and the toggle is hidden.
+const graph = document.querySelector(".graph");
+const toggle = document.querySelector(".toggle");
+const pill = graph.querySelector(".pill");
+const statusText = graph.querySelector(".status-text");
 
-branch.textContent = "main";
-newerTip.textContent = "b71e6a4";
-stale.append(
-  branch, " moved to ", newerTip,
-  ". Git rejects the update. A fresh submission tests against the new tip.",
-);
+const outcomes = {
+  landed: { pill: "Landed", text: "<code>main</code>: <code>53ad9e2</code> → <code>c42f8b7</code>" },
+  blocked: { pill: "Blocked", text: "<code>main</code> stays at <code>b71e6a4</code>. Submit again." },
+};
 
-let baseMoved = false;
+function show(outcome) {
+  graph.dataset.outcome = outcome;
+  pill.textContent = outcomes[outcome].pill;
+  statusText.innerHTML = outcomes[outcome].text;
+  for (const button of toggle.querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.outcome === outcome));
+  }
+}
+
 toggle.hidden = false;
-toggle.addEventListener("click", () => {
-  baseMoved = !baseMoved;
-  label.textContent = baseMoved ? "Blocked" : "Landed";
-  label.classList.toggle("blocked", baseMoved);
-  result.replaceChildren(...(baseMoved ? [...stale.cloneNode(true).childNodes] : normal));
-  toggle.textContent = baseMoved ? "Restore the tested base" : "Simulate a moved base";
+toggle.addEventListener("click", event => {
+  const button = event.target.closest("button[data-outcome]");
+  if (button) show(button.dataset.outcome);
 });
 
 if (navigator.clipboard?.writeText) {
@@ -34,12 +37,7 @@ if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(commands.textContent);
         button.textContent = "Copied";
       } catch {
-        const range = document.createRange();
-        range.selectNodeContents(snippet);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        button.textContent = "Press Ctrl+C or ⌘C";
+        button.textContent = "Select and copy";
       }
     });
   }
