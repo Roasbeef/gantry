@@ -66,7 +66,12 @@ A lease carries a deadline: the claim time plus the action's `timeout` plus
 the action exits. Nothing renews it. Lease times are wall-clock seconds taken
 on whichever controller serves the poll, so keep the controllers' clocks in
 sync with NTP: a clock step forward larger than that slack expires live
-leases. Every claim from any slot first expires the
+leases. The slack also sets how long a lost worker holds its action: the
+action is reassigned 10 minutes after its timeout, a poison action takes three
+such lapses before its run fails, and a submission's lane stays held in the
+meantime. A repository removed from `controller.toml` while groups wait on it
+leaves them waiting, and the reconciler logs an error each pass; register a
+repository on every controller before anything is submitted to it. Every claim from any slot first expires the
 leases past their deadline. An expired action goes back to `pending` with one
 more attempt, and the next eligible poll can lease it to another slot. The
 third lapse fails the run: the action's step becomes `expired`, the run's

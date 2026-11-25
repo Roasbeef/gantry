@@ -173,15 +173,15 @@ fn prepare_one(
   cfg: Config,
   preparation: queue.Preparation,
 ) -> Result(Nil, Fault) {
-  // A waiting group has pushed nothing, so a repository that is no longer
-  // registered is a definite refusal rather than an error retried forever.
-  use outcome <- result.try(
-    case dict.get(cfg.repositories, queue.preparation_repo(preparation)) {
-      Ok(repo) -> prepare.candidate(cfg, repo, preparation)
-      Error(Nil) ->
-        Ok(prepare.Refusal(queue.Refused("repository is no longer registered")))
-    },
+  // A controller that does not know the repository leaves the group alone.
+  // During a rollout another controller may already have it configured.
+  use repo <- result.try(
+    dict.get(cfg.repositories, queue.preparation_repo(preparation))
+    |> result.replace_error(fault.Internal(
+      "repository configuration unavailable",
+    )),
   )
+  use outcome <- result.try(prepare.candidate(cfg, repo, preparation))
 
   // A built candidate and a refusal are both durable outcomes.
   let recorded = case outcome {
