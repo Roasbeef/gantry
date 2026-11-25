@@ -313,13 +313,14 @@ and the journaled receipt refer to uploaded bytes by digest.
 
 `store.change` computes a pure proposal from a fenced local snapshot.
 A mutation compares and swaps the exact snapshot bytes through Khepri.
-An unchanged proposal checks the same bytes through a Ra leader query
-that confirms the leader's authority with a majority. A conflict causes
+An unchanged proposal asks a Ra leader query, after the leader confirms
+its authority with a majority, whether its copy hashes to the SHA-256 of
+the expected bytes. Only that answer returns to the caller. A conflict causes
 the store to rebuild the proposal, with up to eight total attempts.
 The queue snapshot has a 4 MiB ceiling.
 When every action in a snapshot is terminal, a controller can remember
-its exact bytes locally. A worker poll first checks those bytes through
-the same quorum read. A match proves there is no lease to issue or
+its digest locally. A worker poll first checks that digest through the
+same leader query. A match proves there is no lease to issue or
 replay. A miss runs the normal claim decision.
 The controller allows up to 64 MiB per blob. It syncs object bytes
 before atomic rename and syncs the containing directory before
@@ -338,14 +339,21 @@ propose changes concurrently.
 | --- | --- |
 | Mist request handler | The request, its validation, and a proposal submitted to `store.change` |
 | Khepri and Ra | The committed queue snapshot and ordering of accepted replacements |
-| Weft reconciler per controller | Its periodic `Reconcile` message and sequential provider calls for the intents it received |
+| Static supervisor | The Mist listener and the reconciler. It restarts whichever crashes, and past five restarts in a minute it exits so the VM stops |
+| Weft reconciler per controller | Its periodic `Reconcile` message, its per-intent backoff table, and sequential provider calls for the intents it received |
+| Git mirror lock | One repository's persistent bare mirror, held by one request or reconciler attempt at a time |
 | `gantry/worker` loop | One slot, its journal connection, and outcome publication |
 | Erlang worker FFI | The worker's `flock` process, Docker command execution, and tar operations |
 | Gun connection | One controller request, with bounded response bytes and a deadline |
 | Docker daemon | Container execution and temporary volumes |
 | Remote Git server | The target ref and the expected-old-SHA check at update time |
 
-The reconciler waits one second between periodic ticks. Controllers may
+The reconciler waits one second between periodic ticks and retries an
+unresolved intent after 1 s, then 2 s, doubling up to 60 s. It logs every
+error. A definite policy refusal, observed before this controller pushed,
+blocks the run with its reason, and an indeterminate outcome stays open.
+Each repository has one persistent bare mirror under `data_dir/mirrors`,
+fetched incrementally under a node-local lock. Controllers may
 try the same committed intent concurrently. The queue matches results
 to that intent, and Git rejects a push if the target moved. A storage
 timeout can leave the commit outcome unknown. Use the same run or
