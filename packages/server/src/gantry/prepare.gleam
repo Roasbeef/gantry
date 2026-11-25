@@ -7,7 +7,6 @@ import gantry/git
 import gantry/github
 import gantry/internal/ffi_host
 import gantry_core/graph
-import gantry_core/job
 import gantry_core/queue
 import gantry_core/request
 import gleam/int
@@ -148,8 +147,7 @@ pub fn member(
   case repo.provider {
     config.Local(_) -> Ok(queue.Member(n, sha))
     config.GitHub(target) -> {
-      let req = job.Request(repo.name, n, sha, job.Submit)
-      use pull <- result.try(github.read_pull(cfg.github_token, req))
+      use pull <- result.try(github.read_pull(cfg.github_token, repo.name, n))
 
       // Resolve the GitHub admission branch from the current repository policy.
       let allowed = case target {
@@ -157,7 +155,7 @@ pub fn member(
         config.RegisteredBranch -> repo.branch
       }
 
-      use branch <- result.try(github.validate_pull(pull, req, allowed))
+      use branch <- result.try(github.validate_submission(pull, sha, allowed))
 
       // Only the operator-selected branch can receive this integration.
       case branch == repo.branch {

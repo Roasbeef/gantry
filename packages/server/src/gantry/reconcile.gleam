@@ -69,8 +69,14 @@ fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
     )),
   )
   use outcome <- result.try(submit.reconcile(cfg, repo, intent))
+
+  // A refusal is a durable block, so the lane is released with its reason.
+  let recorded = case outcome {
+    submit.Landed -> Ok(Nil)
+    submit.Refused(reason) -> Error(reason)
+  }
   store.change(fn(state) {
-    queue.record_landing(state, intent, outcome)
+    queue.record_landing(state, intent, recorded)
     |> result.map(fn(next) { #(next, Nil) })
     |> result.map_error(fault.Conflict)
   })
