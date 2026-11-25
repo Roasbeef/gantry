@@ -270,11 +270,11 @@ fn validate_retention(bounds: #(Int, Int)) -> Result(queue.Retention, String) {
   let #(runs, proofs) = bounds
 
   // Zero would drop every finished run and break status and cache reuse.
-  case runs >= 1 && runs <= 5000 && proofs >= 1 && proofs <= 20_000 {
+  case runs >= 1 && runs <= 1000 && proofs >= 1 && proofs <= 5000 {
     True -> Ok(queue.Retention(runs, proofs))
     False ->
       Error(
-        "retention needs keep_runs from 1 to 5000 and keep_proofs from 1 to 20000",
+        "retention needs keep_runs from 1 to 1000 and keep_proofs from 1 to 5000",
       )
   }
 }
