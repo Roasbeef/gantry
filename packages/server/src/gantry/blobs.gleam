@@ -34,11 +34,37 @@ pub fn digest(bytes: BitArray) -> String {
 /// blobs.valid("not-a-digest") == False
 /// ```
 pub fn valid(value: String) -> Bool {
-  string.byte_size(value) == 64
-  && list.all(string.to_utf_codepoints(value), fn(point) {
+  string.byte_size(value) == 64 && lower_hex(value)
+}
+
+/// Whether every character is a lowercase hexadecimal digit. This is the
+/// controller's one hex check, shared by digests and Git object IDs.
+///
+/// ## Examples
+///
+/// ```gleam
+/// assert blobs.lower_hex("00ff")
+/// assert !blobs.lower_hex("00FF")
+/// ```
+pub fn lower_hex(value: String) -> Bool {
+  list.all(string.to_utf_codepoints(value), fn(point) {
     let n = string.utf_codepoint_to_int(point)
     { n >= 48 && n <= 57 } || { n >= 97 && n <= 102 }
   })
+}
+
+/// Sixteen random bytes as lowercase hex, for staged file names that must
+/// not collide between concurrent writers.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // blobs.unique_suffix() -> "4f9c1a2b7d3e5a604f9c1a2b7d3e5a60"
+/// ```
+pub fn unique_suffix() -> String {
+  crypto.strong_random_bytes(16)
+  |> bit_array.base16_encode
+  |> string.lowercase
 }
 
 /// Atomically publish bytes at their immutable object path.
@@ -58,8 +84,7 @@ pub fn put(root: String, bytes: BitArray) -> Result(String, Fault) {
     simplifile.create_directory_all(directory)
     |> result.replace_error(fault.Unavailable("cannot open blob directory")),
   )
-  let suffix = crypto.strong_random_bytes(16) |> bit_array.base16_encode
-  let temporary = directory <> "/.upload-" <> suffix
+  let temporary = directory <> "/.upload-" <> unique_suffix()
   use Nil <- result.try(
     simplifile.write_bits(bytes, to: temporary)
     |> result.replace_error(fault.Unavailable("cannot stage blob")),

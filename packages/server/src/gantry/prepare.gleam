@@ -5,7 +5,6 @@ import gantry/config
 import gantry/fault.{type Fault}
 import gantry/git
 import gantry/github
-import gantry/internal/ffi_host
 import gantry_core/graph
 import gantry_core/queue
 import gantry_core/request
@@ -187,8 +186,13 @@ fn tasks(
         git.command(s, ["rev-parse", "--verify", base <> ":gantry.json"]),
       )
       use file <- result.try(git.command(s, ["unpack-file", string.trim(oid)]))
+
+      // The checkout lands beside the mirror, so remove it once it is read.
+      let path = s.dir <> "/" <> string.trim(file)
+      let read = simplifile.read(path)
+      let _ = simplifile.delete_file(path)
       use manifest <- result.try(
-        simplifile.read(s.dir <> "/" <> string.trim(file))
+        read
         |> result.replace_error(fault.Internal("cannot read build manifest")),
       )
       graph.compile(manifest, target)
@@ -217,67 +221,7 @@ fn tasks(
   )
 
   list.try_map(actions, fn(action) {
-    let path = s.dir <> "/source.tar"
-
-    // The whole-tree projection maps to an empty Git pathspec.
-    let paths = case action.inputs {
-      ["."] -> []
-      other -> other
-    }
-
-    // An action with no inputs receives a valid empty archive.
-    use _ <- result.try(case action.inputs {
-      [] -> {
-        use #(status, _) <- result.try(
-          ffi_host.run(
-            "tar",
-            ["-cf", path, "--files-from", "/dev/null"],
-            [],
-            10_000,
-          )
-          |> result.map_error(fault.Unavailable),
-        )
-
-        // Require GNU tar to finish writing the empty archive.
-        case status {
-          0 -> Ok("")
-          _ -> Error(fault.Unavailable("cannot create empty input archive"))
-        }
-      }
-      _ ->
-        git.command(
-          s,
-          list.append(
-            [
-              "archive",
-              "--format=tar",
-              "--mtime=2000-01-01T00:00:00Z",
-              "--output",
-              path,
-              revision <> "^{tree}",
-              "--",
-            ],
-            paths,
-          ),
-        )
-    })
-
-    use info <- result.try(
-      simplifile.file_info(path)
-      |> result.replace_error(fault.Unavailable("cannot inspect Git archive")),
-    )
-
-    // Check the protocol transfer bound before allocating the archive in memory.
-    use Nil <- result.try(case info.size <= blobs.limit {
-      True -> Ok(Nil)
-      False ->
-        Error(fault.Invalid("source archive exceeds worker transfer limit"))
-    })
-
-    use bytes <- result.try(
-      simplifile.read_bits(path)
-      |> result.replace_error(fault.Unavailable("cannot read Git archive")),
-    )
+    use bytes <- result.try(archive(s, revision, action.inputs))
     use source <- result.try(blobs.put(cfg.blobs, bytes))
 
     let identity =
@@ -298,4 +242,78 @@ fn tasks(
     let recipe = blobs.digest(<<identity:utf8>>)
     Ok(queue.Task(action, source, recipe, repo.pool, repo.image))
   })
+}
+
+/// The tar bytes of an action's declared inputs at a revision.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // prepare.archive(s, revision, ["src"])
+/// ```
+fn archive(
+  s: git.Session,
+  revision: String,
+  inputs: List(String),
+) -> Result(BitArray, Fault) {
+  case inputs {
+    // An action with no inputs receives a valid empty archive.
+    [] -> Ok(empty_archive())
+    _ -> {
+      // The whole-tree projection maps to an empty Git pathspec.
+      let paths = case inputs {
+        ["."] -> []
+        other -> other
+      }
+      let path = git.scratch(s, "source.tar")
+      let read = {
+        use _ <- result.try(git.command(
+          s,
+          list.append(
+            [
+              "archive",
+              "--format=tar",
+              "--mtime=2000-01-01T00:00:00Z",
+              "--output",
+              path,
+              revision <> "^{tree}",
+              "--",
+            ],
+            paths,
+          ),
+        ))
+        use info <- result.try(
+          simplifile.file_info(path)
+          |> result.replace_error(fault.Unavailable(
+            "cannot inspect Git archive",
+          )),
+        )
+
+        // Check the protocol transfer bound before allocating the archive in memory.
+        use Nil <- result.try(case info.size <= blobs.limit {
+          True -> Ok(Nil)
+          False ->
+            Error(fault.Invalid("source archive exceeds worker transfer limit"))
+        })
+        simplifile.read_bits(path)
+        |> result.replace_error(fault.Unavailable("cannot read Git archive"))
+      }
+      let _ = simplifile.delete_file(path)
+      read
+    }
+  }
+}
+
+/// A tar archive of no members: two zero blocks, padded to tar's default
+/// ten-block record. GNU tar writes the same 10240 zero bytes for an empty
+/// member list, so the source digest of an action with no inputs is
+/// unchanged by writing the bytes natively.
+///
+/// ## Examples
+///
+/// ```gleam
+/// assert bit_array.byte_size(prepare.empty_archive()) == 10_240
+/// ```
+pub fn empty_archive() -> BitArray {
+  <<0:size(81_920)>>
 }
