@@ -42,6 +42,7 @@ supported voter counts are one and three.
 | `GANTRY_BENCH_INFLIGHT` | 256 | 1 to 4096 | Open-loop admissions allowed in flight |
 | `GANTRY_BENCH_RETRIES` | 4 | 0 to 1000 | Retries after an explicit CAS contention reply |
 | `GANTRY_BENCH_TIMEOUT_MS` | 30000 | 1000 to 600000 | Per-request HTTP deadline |
+| `GANTRY_BENCH_RETAINED` | 200 | 1 to 1000 | Finished runs each voter keeps (`keep_runs`). The final re-read of every run needs this at least `GANTRY_BENCH_RUNS`, because retention drops older runs once a minute |
 | `GANTRY_BENCH_PORT` | 18972 | 1 to 65533 | The first voter's HTTP port |
 
 With `GANTRY_BENCH_RATE` unset the phases match the Node driver. Every

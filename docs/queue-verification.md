@@ -123,13 +123,13 @@ against a real Khepri store.
 `scripts/queue-dst.sh growth N` drives N builds through the core with
 retention after each transition. Every fifth run is rejected with a 256 KiB
 reason. The largest encoded state stays at 5,188 bytes for 200 and for 2,000
-runs, so the 4 MiB store limit cannot be reached by history. The core caps a
+runs, so history does not grow the retained state. The core caps a
 reason at 1,024 bytes where it records it.
 
 Coverage-guided fuzzing mutates mask and operation bytes. It retains
 inputs that reach new instrumented lines in the production queue or
 protocol modules. This tests the controller's decision boundary.
-Khepri's actual CAS retries, filesystem behavior, worker custody, and
+Khepri's actual commit conflicts, filesystem behavior, worker custody, and
 Git commands are exercised in the live harness. The virtual Git
 fixture represents one branch as a linear history in the single-lane
 harness.
