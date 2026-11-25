@@ -54,8 +54,11 @@ to package the OTP release, including ERTS and the SQLite NIF. It writes
 release and installs `gantryd`, `gantry-worker`, and the `gantry` CLI under
 `PREFIX/bin`. The default prefix is `$HOME/.local`. Installed hosts need
 the system commands for the roles they run. Controllers use Git and GNU
-tar, workers use Docker, GNU coreutils, and `flock`, and the CLI uses Bash,
-curl, and jq. Python is unnecessary at runtime.
+tar, workers use Docker, GNU coreutils, and `flock`. The `gantry` CLI is a
+Gleam program on the bundled runtime, so it needs neither Bash, jq, curl,
+nor OpenSSL. Its onboarding commands also use Git, GNU coreutils, and
+util-linux (`flock` and `setpriv`), as described below. Python is
+unnecessary at runtime.
 
 Run `make update PREFIX="$HOME/.local"` from the checkout to build and
 install a new release. The installer publishes a complete, immutable
@@ -79,8 +82,8 @@ checked in alongside the schema and queries.
 
 ### Verify a local installation
 
-Run this command on Linux with the installed release, Docker, OpenSSL,
-and util-linux (`flock`, `setsid`, and `setpriv`).
+Run this command on Linux with the installed release, Docker, Git, GNU
+coreutils, and util-linux (`flock` and `setpriv`).
 
 ```sh
 gantry init --local
@@ -104,7 +107,13 @@ Restore an established profile's Ra state or worker journal from backup
 if either is missing or damaged.
 
 Use `gantry local start` to run both services in the foreground or as
-one supervisor-managed process. Load the agent credential and endpoint
+one supervisor-managed process. The CLI owns each service through a
+supervised port and starts it under `setpriv --pdeathsig TERM`. When one
+service exits, the CLI stops the other's process group, sending SIGTERM
+and then SIGKILL after ten seconds, and exits 1 with `service_exited`.
+SIGINT, SIGTERM, and SIGHUP end the CLI at once with status 130, 143, or
+129, and the death signal stops both services. A second onboarding
+command on the same profile exits 6 with `profile_busy`. Load the agent credential and endpoint
 in the shell that will use the CLI.
 
 ```sh

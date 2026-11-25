@@ -8,6 +8,7 @@ import gantry/internal/ffi_host
 import gantry_core/graph
 import gantry_core/job
 import gantry_core/queue
+import gantry_core/request
 import gleam/int
 import gleam/json
 import gleam/list
@@ -21,25 +22,27 @@ import simplifile
 /// ## Examples
 ///
 /// ```gleam
-/// // prepare.build(cfg, repo, revision, "check", "build-1", None)
+/// // prepare.build(cfg, repo, pinned)
 /// ```
 pub fn build(
   cfg: config.Config,
   repo: config.Repository,
-  revision: String,
-  target: String,
-  id: String,
-  adhoc: Option(graph.Action),
+  pinned: request.Build,
 ) -> Result(List(queue.Task), String) {
-  // Accept object IDs so a ref change cannot retarget this build request.
-  use Nil <- result.try(case job.valid_sha(revision) {
-    True -> Ok(Nil)
-    False -> Error("expected immutable revision")
-  })
-
+  // The request carries a full object ID, so a ref change cannot retarget
+  // this build. Its ad hoc action already passed the request rules.
   use s <- git.session(cfg, repo)
-  use sha <- result.try(git.fetch(s, revision))
-  tasks(cfg, repo, s, sha, sha, target, id, adhoc)
+  use sha <- result.try(git.fetch(s, request.revision(pinned)))
+  tasks(
+    cfg,
+    repo,
+    s,
+    sha,
+    sha,
+    request.target(pinned),
+    request.build_id(pinned),
+    request.action(pinned),
+  )
 }
 
 /// Integrate ordered pull heads into a candidate, then stage its action graph.
@@ -47,25 +50,16 @@ pub fn build(
 /// ## Examples
 ///
 /// ```gleam
-/// // prepare.group(cfg, repo, [1, 2])
+/// // prepare.group(cfg, repo, group)
 /// ```
 pub fn group(
   cfg: config.Config,
   repo: config.Repository,
-  pulls: List(Int),
+  group: request.Submit,
 ) -> Result(#(queue.Candidate, List(queue.Task)), String) {
-  // Each distinct pull contributes one ordered integration step.
-  use Nil <- result.try(
-    case
-      pulls != []
-      && list.unique(pulls) == pulls
-      && list.all(pulls, fn(n) { n > 0 })
-    {
-      True -> Ok(Nil)
-      False -> Error("expected distinct positive pull numbers")
-    },
-  )
-
+  // Each distinct pull in the validated request contributes one ordered
+  // integration step.
+  let pulls = request.pulls(group)
   use s <- git.session(cfg, repo)
   use base <- result.try(git.fetch(s, "refs/heads/" <> repo.branch))
   use members <- result.try(
@@ -184,17 +178,11 @@ fn tasks(
   id: String,
   adhoc: Option(graph.Action),
 ) -> Result(List(queue.Task), String) {
-  // An ad hoc result has a private cache scope. Declared targets share a scope.
+  // An ad hoc result has a private cache scope. Declared targets share a
+  // scope. The request rules have already closed an ad hoc action over the
+  // staging rules and rejected its graph edges.
   use #(actions, scope) <- result.try(case adhoc {
-    Some(action) -> {
-      use Nil <- result.try(graph.validate_action(action))
-
-      // An isolated ad hoc action has no graph to resolve dependency edges against.
-      case action.dependencies, action.after {
-        [], [] -> Ok(#([action], "ad-hoc:" <> id))
-        _, _ -> Error("ad hoc actions cannot reference graph dependencies")
-      }
-    }
+    Some(action) -> Ok(#([action], "ad-hoc:" <> id))
     None -> {
       use oid <- result.try(
         git.command(s, ["rev-parse", "--verify", base <> ":gantry.json"]),
