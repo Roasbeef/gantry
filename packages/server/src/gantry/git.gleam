@@ -148,7 +148,14 @@ pub fn scratch(s: Session, name: String) -> String {
 }
 
 /// Preserve Git exit codes for commands with meaningful negative answers.
-fn raw(s: Session, args: List(String)) -> Result(#(Int, String), Fault) {
+///
+/// ## Examples
+///
+/// ```gleam
+/// // git.raw(s, ["merge-base", "--is-ancestor", base, head])
+/// // -> Ok(#(1, ""))
+/// ```
+pub fn raw(s: Session, args: List(String)) -> Result(#(Int, String), Fault) {
   case ffi_host.run("git", list.append(["-C", s.dir], args), s.env, 120_000) {
     Ok(reply) -> Ok(reply)
 

@@ -17,13 +17,18 @@
 //// | Target is neither the base nor contains the candidate | `Ok(Refused)` |
 //// | Target is the base and policy refuses, and a second look still shows the base | `Ok(Refused)` |
 //// | Target is the base and policy passes | push, then `Ok(Landed)` |
-//// | Network failure, unknown merge state, unreadable object graph, failed push | `Error`, intent stays open |
+//// | Target is the base, policy passes, and the remote rejects the push, and a second look still shows the base | `Ok(Refused)` |
+//// | Network failure, unknown merge state, unreadable object graph, failed push transport | `Error`, intent stays open |
 ////
-//// A refusal is definite only before this controller has dispatched a push.
+//// A refusal is definite only before any controller has dispatched a push.
 //// A push that this or another controller left in flight can apply after the
-//// first observation and make GitHub report the pull as merged. A policy
-//// refusal therefore looks at the target again, and a landed candidate wins
-//// over the refusal.
+//// first observation and make GitHub report the pull as merged. A refusal
+//// therefore looks at the target again, and a landed candidate wins over the
+//// refusal. The second look narrows the window without closing it: if one
+//// controller's push is still in flight when another records the refusal,
+//// the run reads Blocked while its candidate is on the target. The target
+//// itself stays safe, because the next group is prepared on the real tip and
+//// every push carries the expected base.
 
 import gantry/config
 import gantry/fault.{type Fault}
@@ -33,6 +38,7 @@ import gantry/prepare
 import gantry_core/queue
 import gleam/list
 import gleam/result
+import gleam/string
 
 /// The decision an observation of the remote supports.
 pub type Outcome {
@@ -108,8 +114,8 @@ pub fn reconcile(
       // more, and an unknown merge state leaves the intent open.
       case verdict {
         github.Permitted -> {
-          use _ <- result.try(
-            git.command(s, [
+          use #(status, out) <- result.try(
+            git.raw(s, [
               "push",
               "--porcelain",
               "--force-with-lease=" <> target <> ":" <> queue.candidate_base(c),
@@ -118,7 +124,22 @@ pub fn reconcile(
               queue.candidate_commit(c) <> ":" <> target,
             ]),
           )
-          Ok(Landed)
+
+          // The remote can decline the update outright, as a protected branch
+          // hook does. That is a definite answer, so it goes through the same
+          // second look as a policy refusal. Transport failures stay open.
+          case status, string.contains(out, "[remote rejected]") {
+            0, _ -> Ok(Landed)
+            _, True ->
+              confirm_refusal(
+                s,
+                target,
+                c,
+                "the remote rejected the push: " <> string.trim(out),
+              )
+            _, False ->
+              Error(fault.Unavailable("Git push failed: " <> string.trim(out)))
+          }
         }
         github.Denied(reason) -> confirm_refusal(s, target, c, reason)
         github.Pending ->
