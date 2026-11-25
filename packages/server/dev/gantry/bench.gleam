@@ -742,14 +742,14 @@ fn claim(bench: Bench, lane: Int) -> Result(Leased, String) {
     }
     Some(offer) -> {
       use Nil <- result.try(require(
-        offer.lease.worker == worker
+        queue.lease_worker(offer.lease) == worker
           && offer.task.action.argv == action(bench.settings).argv,
         "assignment does not match the admitted action",
       ))
       use Nil <- result.try(execute(bench, node, lane, worker, offer))
       Ok(Leased(
         run: offer.run,
-        serial: offer.lease.serial,
+        serial: queue.lease_serial(offer.lease),
         dispatch:,
         finish: ffi_bench.now_us(),
       ))
@@ -811,7 +811,7 @@ fn execute(
       #("run", json.string(offer.run)),
       #("action", json.string(offer.task.action.name)),
       #("worker", json.string(worker)),
-      #("serial", json.int(offer.lease.serial)),
+      #("serial", json.int(queue.lease_serial(offer.lease))),
       #(
         "completion",
         protocol.encode_completion(queue.Succeeded(
@@ -941,12 +941,15 @@ fn verify(bench: Bench, serial: Int) -> Result(Int, String) {
       use run <- result.try(decoded(bytes, protocol.run_decoder()))
 
       // A passed run must hold exactly the fixture's output and log digests.
-      case queue.phase(run), run.work {
-        "passed", [queue.Work(_, queue.Passed(proof))]
-          if proof.files == [queue.Artifact(artifact, output)]
-          && proof.log == log
-        -> Ok(run)
-        _, _ -> Error("run " <> run_id(index) <> " lacks its durable proof")
+      let held = case queue.phase(run), run.work {
+        queue.PhasePassed, [queue.Work(_, queue.Passed(proof))] ->
+          queue.proof_files(proof) == [queue.Artifact(artifact, output)]
+          && queue.proof_log(proof) == log
+        _, _ -> False
+      }
+      case held {
+        True -> Ok(run)
+        False -> Error("run " <> run_id(index) <> " lacks its durable proof")
       }
     }),
   )
@@ -962,7 +965,7 @@ fn verify(bench: Bench, serial: Int) -> Result(Int, String) {
   ))
 
   // The store persists exactly this encoding, so its size is the snapshot's.
-  queue.State(serial, runs)
+  queue.State(serial, runs, [])
   |> protocol.encode_state
   |> json.to_string
   |> string.byte_size
