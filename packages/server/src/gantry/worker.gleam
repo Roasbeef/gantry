@@ -243,7 +243,11 @@ fn publish(
   name: String,
   receipt: String,
 ) -> Result(Step, Fault) {
-  use digests <- result.try(custody.digests(slot.db) |> result.map_error(Stop))
+  // Upload only what the receipt names. A rejected action can leave other
+  // spooled bytes that no controller will ever read.
+  use digests <- result.try(
+    custody.referenced(receipt) |> result.map_error(Stop),
+  )
   use next <- result.try(
     list.try_fold(digests, network, fn(network, digest) {
       use bytes <- result.try(
