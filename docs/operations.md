@@ -125,20 +125,21 @@ backups, which loses whatever was admitted since. An upgrade drill on
 read every earlier run; the rollback refused the snapshot; and the
 upgraded worker reopened the old journal but failed its in-flight action.
 
-### The snapshot reaches 4 MiB
+### The queue is full
 
-The queue is one snapshot with a 4 MiB ceiling. A mutation that would exceed
-it is refused with HTTP 500 `queue snapshot exceeds 4 MiB`, so new runs stop
-being admitted. The reconciler on each controller trims finished runs and
+The queue holds at most 10,000 runs at once, finished or not. A new run past
+that is refused with HTTP 503 `the queue holds the most runs it accepts`, so
+agents retry later. The reconciler on each controller trims finished runs and
 proofs to `[retention]` once a minute (`keep_runs` 200 and `keep_proofs` 1000
-by default). Runs that are not finished are never dropped, so a ceiling hit
-means either the bounds are too high for your run size, or too many runs are
-active or waiting. Lower `keep_runs` and `keep_proofs` in `controller.toml`,
-restart the controllers one at a time (the file is read at startup), and wait
-a minute for the next pass. Dropped runs lose their status, but their cached
-proofs remain reusable until `keep_proofs` drops them. The
-[controller benchmark](controller-load.md) shows cost per operation rising
-with snapshot size, well before the ceiling.
+by default, in batches of 250). Runs that are not finished are never dropped,
+so a full queue means too many runs are active or waiting, or `keep_runs` is
+high for your admission rate. Check that workers are claiming, or lower
+`keep_runs` and `keep_proofs` in `controller.toml`, restart the controllers
+one at a time (the file is read at startup), and wait a minute for the next
+pass. Dropped runs lose their status, but their cached proofs remain reusable
+until `keep_proofs` drops them. The cost of one operation no longer grows with
+the number of retained runs, so the bound limits memory and not throughput
+([controller benchmark](controller-load.md)).
 
 ### A landing is stuck
 

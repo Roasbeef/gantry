@@ -283,17 +283,27 @@ fn ordered(
   plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
 ) -> Result(a, Fault) {
   use first <- result.try(plan(reader()) |> result.map_error(fault_of))
+  let locked = fn() { ffi_khepri.gated(name, fn() { attempt(plan, attempts) }) }
 
-  // Nothing to write: confirm it, and only a stale read needs the lock.
+  // A plan with nothing to write is confirmed, and one with writes is not.
   case layout.writes(first) {
-    [] -> {
-      use outcome <- result.try(commit(first))
-      case outcome {
-        Accepted -> Ok(layout.receipt(first))
-        Stale -> ffi_khepri.gated(name, fn() { attempt(plan, attempts) })
-      }
-    }
-    [_, ..] -> ffi_khepri.gated(name, fn() { attempt(plan, attempts) })
+    [] -> confirmed(first, locked)
+    [_, ..] -> locked()
+  }
+}
+
+/// Confirm a plan that writes nothing. A stale read means a competing write,
+/// so the operation then plans again under its lock.
+fn confirmed(
+  planned: layout.Plan(a),
+  fallback: fn() -> Result(a, Fault),
+) -> Result(a, Fault) {
+  use outcome <- result.try(commit(planned))
+
+  // Only a refused confirmation needs the lock.
+  case outcome {
+    Accepted -> Ok(layout.receipt(planned))
+    Stale -> fallback()
   }
 }
 

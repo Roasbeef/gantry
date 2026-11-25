@@ -838,10 +838,9 @@ pub fn claim(
 
   // Nothing leased to this worker, nothing lapsed, and nothing ready is an
   // empty poll, which reads no run and no counter.
-  use <- bool.guard(
-    involved == [] && ready == [],
-    plan([Keys(ready_prefix, [])], [], None),
-  )
+  use <- bool.lazy_guard(involved == [] && ready == [], fn() {
+    plan([Keys(ready_prefix, [])], [], None)
+  })
   use #(serial, serial_text) <- result.try(counter(
     reader,
     counter_key("serial"),

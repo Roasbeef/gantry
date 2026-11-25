@@ -20,9 +20,9 @@
 ////
 //// ## Retention
 ////
-//// The queue snapshot has a 4 MiB ceiling, so terminal runs and remembered
-//// proofs are bounded. The optional table sets the bounds, and a run that
-//// is not terminal is never dropped.
+//// Terminal runs and remembered proofs are bounded, and the queue holds at
+//// most 10,000 runs in all. The optional table sets the first two bounds,
+//// and a run that is not terminal is never dropped.
 ////
 //// ```toml
 //// [retention]
