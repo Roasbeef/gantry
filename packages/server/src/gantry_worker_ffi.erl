@@ -1,6 +1,6 @@
 %% OS resources that OTP ports and erl_tar can provide to the Gleam worker.
 -module(gantry_worker_ffi).
--export([lock/1, docker/5, entries/1, archive_open/1, archive_add/3, archive_close/1]).
+-export([lock/1, entries/1, archive_open/1, archive_add/3, archive_close/1]).
 
 lock(Path) ->
     case os:find_executable("flock") of
@@ -36,47 +36,6 @@ hold_lock(Flock, Path, Owner, Ref) ->
         error:badarg -> Owner ! {Ref, {error, <<"cannot start worker directory lock">>}};
         error:system_limit -> Owner ! {Ref, {error, <<"worker lock port limit reached">>}}
     end.
-
-docker(Args, Settings, Milliseconds, Limit, Stream) ->
-    case {os:find_executable("docker"), os:find_executable("timeout"),
-          os:find_executable("env")} of
-        {false, _, _} -> {error, <<"Docker executable not found">>};
-        {_, false, _} -> {error, <<"GNU timeout executable not found">>};
-        {_, _, false} -> {error, <<"env executable not found">>};
-        {Docker, Timeout, Env} ->
-            Seconds = integer_to_list((Milliseconds + 999) div 1000) ++ "s",
-            Arguments = ["-i" | lists:map(fun unicode:characters_to_list/1, Settings)] ++
-                        [Timeout, "--kill-after=5s", Seconds, Docker |
-                         lists:map(fun unicode:characters_to_list/1, Args)],
-            Streams = case Stream of combined -> [stderr_to_stdout]; stdout -> [] end,
-            try
-                Port = open_port({spawn_executable, Env},
-                                 [binary, exit_status, use_stdio, {args, Arguments} | Streams]),
-                Deadline = erlang:monotonic_time(millisecond) + Milliseconds + 7000,
-                collect(Port, Deadline, Limit, [], false)
-            catch
-                error:badarg -> {error, <<"could not start Docker">>};
-                error:system_limit -> {error, <<"Docker port limit reached">>}
-            end
-    end.
-
-collect(Port, Deadline, Remaining, Parts, Truncated) ->
-    Wait = max(0, Deadline - erlang:monotonic_time(millisecond)),
-    receive
-        {Port, {data, Data}} ->
-            Size = min(byte_size(Data), Remaining),
-            <<Keep:Size/binary, _/binary>> = Data,
-            Next = case Size of 0 -> Parts; _ -> [Keep | Parts] end,
-            collect(Port, Deadline, Remaining - Size, Next, Truncated orelse Size < byte_size(Data));
-        {Port, {exit_status, Status}} ->
-            {ok, {command, Status, iolist_to_binary(lists:reverse(Parts)), capture(Truncated)}}
-    after Wait ->
-        try port_close(Port) catch error:badarg -> ok end,
-        {error, <<"Docker subprocess did not return after its wall deadline">>}
-    end.
-
-capture(false) -> complete;
-capture(true) -> clipped.
 
 entries(Bytes) ->
     try erl_tar:table({binary, Bytes}, [verbose]) of

@@ -2,25 +2,9 @@
 //// metadata. Decisions about work and result publication stay in Gleam.
 
 import envoy
+import gantry/internal/ffi_host
 import gleam/list
 import gleam/result
-
-/// Select which bytes a Docker subprocess may write to the captured stream.
-pub type Stream {
-  Combined
-  Stdout
-}
-
-/// Whether the capture retained every byte written by the subprocess.
-pub type Capture {
-  Complete
-  Clipped
-}
-
-/// A bounded stream and its subprocess exit status.
-pub type Command {
-  Command(status: Int, bytes: BitArray, capture: Capture)
-}
 
 /// Tar members that can enter an isolated workspace.
 pub type Entry {
@@ -47,32 +31,29 @@ pub fn lock(path: String) -> Result(Nil, String)
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_worker.docker(["version"], 30_000, 4096, ffi_worker.Combined)
+/// // ffi_worker.docker(["version"], 30_000, 4096, ffi_host.Combined)
 /// ```
 pub fn docker(
   args: List(String),
   deadline_ms: Int,
   limit: Int,
-  stream: Stream,
-) -> Result(Command, String) {
+  stream: ffi_host.Stream,
+) -> Result(ffi_host.Command, String) {
   let path = envoy.get("PATH") |> result.unwrap("/usr/local/bin:/usr/bin:/bin")
   let connection =
     list.filter_map(["DOCKER_HOST", "XDG_RUNTIME_DIR"], fn(key) {
       envoy.get(key) |> result.map(fn(value) { key <> "=" <> value })
     })
   let settings = ["PATH=" <> path, "DOCKER_CONFIG=/nonexistent", ..connection]
-  docker_port(args, settings, deadline_ms, limit, stream)
+  ffi_host.capture(
+    "docker",
+    args,
+    ffi_host.Clear(settings),
+    stream,
+    limit,
+    deadline_ms,
+  )
 }
-
-/// Start the Docker port with the selected environment and capture policy.
-@external(erlang, "gantry_worker_ffi", "docker")
-fn docker_port(
-  args: List(String),
-  settings: List(String),
-  deadline_ms: Int,
-  limit: Int,
-  stream: Stream,
-) -> Result(Command, String)
 
 /// Inspect source members without extracting them on the worker host.
 ///

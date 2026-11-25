@@ -5,6 +5,7 @@
 
 import envoy
 import gantry/blobs
+import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
 import gantry/worker/controllers
 import gantry_core/graph
@@ -353,40 +354,54 @@ fn run(
       ["start", "-a", container],
       task.action.timeout * 1000,
       65_536,
-      ffi_worker.Combined,
+      ffi_host.Combined,
     )
     |> result.map_error(Unavailable),
   )
   use log <- result.try(
     spool(with_truncation(command)) |> result.map_error(JournalFault),
   )
-  use state <- result.try(control(
-    ["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", container],
-    "",
-  ))
 
-  // Use Docker's exit state to distinguish an action exit from timeout.
-  case string.split(string.trim(state), " ") {
-    ["exited", number] -> {
-      use code <- result.try(
-        int.parse(number)
-        |> result.replace_error(Unavailable("invalid Docker exit code")),
-      )
+  // The runner killed the Docker client at the deadline. The container may
+  // still be running, so remove it before reporting the timeout.
+  case command.exit {
+    ffi_host.TimedOut -> {
       use _ <- result.try(remove_container(name))
-      complete(
-        name,
-        task.action.outputs,
-        log,
-        case code {
-          0 -> command.status
-          _ -> code
-        },
-        spool,
-      )
-    }
-    _ if command.status == 124 || command.status == 137 ->
       Ok(queue.Rejected("action exceeded its wall deadline", log))
-    _ -> Ok(queue.Rejected("container failed to exit normally", log))
+    }
+    ffi_host.Exited(status) -> {
+      use state <- result.try(control(
+        [
+          "inspect",
+          "--format",
+          "{{.State.Status}} {{.State.ExitCode}}",
+          container,
+        ],
+        "",
+      ))
+
+      // Use Docker's exit state to confirm the action exited by itself.
+      case string.split(string.trim(state), " ") {
+        ["exited", number] -> {
+          use code <- result.try(
+            int.parse(number)
+            |> result.replace_error(Unavailable("invalid Docker exit code")),
+          )
+          use _ <- result.try(remove_container(name))
+          complete(
+            name,
+            task.action.outputs,
+            log,
+            case code {
+              0 -> status
+              _ -> code
+            },
+            spool,
+          )
+        }
+        _ -> Ok(queue.Rejected("container failed to exit normally", log))
+      }
+    }
   }
 }
 
@@ -441,14 +456,14 @@ fn read_artifact(
       ],
       60_000,
       blobs.limit,
-      ffi_worker.Stdout,
+      ffi_host.Stdout,
     )
     |> result.map_error(Unavailable),
   )
 
   // Require a complete, successful capture before hashing artifact data.
   case command {
-    ffi_worker.Command(0, bytes, ffi_worker.Complete) ->
+    ffi_host.Command(ffi_host.Exited(0), bytes, ffi_host.Complete) ->
       spool(bytes)
       |> result.map_error(JournalFault)
       |> result.map(queue.Artifact(path, _))
@@ -468,14 +483,14 @@ fn bind(directory: String, file: String) -> String {
 }
 
 /// Retain the log prefix and tell the reader when more bytes were written.
-fn with_truncation(command: ffi_worker.Command) -> BitArray {
+fn with_truncation(command: ffi_host.Command) -> BitArray {
   // Expose when the action wrote more bytes than the log budget.
   case command {
-    ffi_worker.Command(_, bytes, ffi_worker.Clipped) -> <<
+    ffi_host.Command(_, bytes, ffi_host.Clipped) -> <<
       bytes:bits,
       "\n[output truncated]\n":utf8,
     >>
-    ffi_worker.Command(_, bytes, ffi_worker.Complete) -> bytes
+    ffi_host.Command(_, bytes, ffi_host.Complete) -> bytes
   }
 }
 
@@ -486,7 +501,7 @@ fn remove_container(name: String) -> Result(String, Fault) {
 /// Require Docker to acknowledge a control request or a known missing resource.
 fn control(args: List(String), missing: String) -> Result(String, Fault) {
   use reply <- result.try(
-    ffi_worker.docker(args, 30_000, 16_384, ffi_worker.Combined)
+    ffi_worker.docker(args, 30_000, 16_384, ffi_host.Combined)
     |> result.map_error(Unavailable),
   )
   let diagnostic =
@@ -495,7 +510,7 @@ fn control(args: List(String), missing: String) -> Result(String, Fault) {
 
   // A missing container or volume is already clean.
   case
-    reply.status == 0
+    reply.exit == ffi_host.Exited(0)
     || {
       missing != "" && string.contains(string.lowercase(diagnostic), missing)
     }

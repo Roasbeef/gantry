@@ -28,14 +28,14 @@ gen-sql:
 .PHONY: check
 check:
 	cd packages/core && gleam format --check src test && gleam build --warnings-as-errors && gleam test && gleam test --target javascript
-	cd packages/server && gleam format --check src && gleam build --warnings-as-errors
+	cd packages/server && gleam format --check src test && gleam build --warnings-as-errors && gleam test
 	$(MAKE) lint
 	bash scripts/check-cli.sh
 
 .PHONY: fmt
 fmt:
 	cd packages/core && gleam format src test
-	cd packages/server && gleam format src
+	cd packages/server && gleam format src test
 
 .PHONY: lint
 lint:
