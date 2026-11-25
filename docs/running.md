@@ -297,8 +297,10 @@ curl -fsS --max-time 10 http://127.0.0.1:4737/health | jq -e '.status == "ok"'
 curl -fsS --max-time 10 https://controller-a.example/health | jq -e '.status == "ok"'
 ```
 
-`GET /health` requires no token. A successful response includes a queue
-read, so probe each origin after startup or before routing traffic to it.
+`GET /health` requires no token. It shares the readiness check, so a
+successful response confirms that Ra reaches a voting majority without
+transferring the queue. Probe each origin after startup or before routing
+traffic to it.
 Use a build to verify worker execution and blob access.
 
 ### Form a three-controller quorum

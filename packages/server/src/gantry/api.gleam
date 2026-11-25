@@ -226,7 +226,10 @@ pub fn finish(
   })
 }
 
-/// Read output and log bytes by identity before storing references.
+/// Check that every referenced object exists before storing references. An
+/// upload was verified against its digest when it was published, and objects
+/// are immutable, so a stat is enough. Re-hashing up to 64 MiB per object on
+/// every result would repeat that work.
 ///
 /// ## Examples
 ///
@@ -246,8 +249,7 @@ fn verify_blobs(
     queue.Rejected(_, log) -> [log]
   }
 
-  list.try_map(ids, fn(id) { blobs.get(root, id) |> result.map(fn(_) { Nil }) })
-  |> result.map(fn(_) { Nil })
+  list.try_each(ids, blobs.require(root, _))
 }
 
 /// Resolve a repository against the operator's case-insensitive allowlist.

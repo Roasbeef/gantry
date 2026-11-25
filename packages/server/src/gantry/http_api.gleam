@@ -31,15 +31,11 @@ type Reply =
 pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
   // The method and path select the operation and its required credential.
   case req.method, request.path_segments(req) {
-    Get, ["health"] ->
-      respond(
-        store.read()
-        |> result.map(fn(_) { json.object([#("status", json.string("ok"))]) }),
-      )
-    Get, ["ready"] -> ready_reply()
+    Get, ["health"] -> ready_reply("ok")
+    Get, ["ready"] -> ready_reply("ready")
     Get, ["v1", "worker", "ready"] -> {
       use _ <- worker(req, cfg)
-      ready_reply()
+      ready_reply("ready")
     }
     Post, ["v1", "runs"] -> {
       use <- authorized(req, cfg.agent_token)
@@ -78,12 +74,14 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
   }
 }
 
-/// Confirm quorum access for gateway and worker probes without claiming work.
-fn ready_reply() -> Reply {
+/// Confirm quorum access for gateway and worker probes without claiming work
+/// or transferring the queue snapshot. `/health` shares this check, because a
+/// controller that cannot reach its quorum cannot serve any request.
+fn ready_reply(status: String) -> Reply {
   respond(
     store.ready()
     |> result.map_error(fn(_) { fault.Unavailable("queue quorum unavailable") })
-    |> result.map(fn(_) { json.object([#("status", json.string("ready"))]) }),
+    |> result.map(fn(_) { json.object([#("status", json.string(status))]) }),
   )
 }
 

@@ -126,6 +126,28 @@ pub fn get(root: String, id: String) -> Result(BitArray, Fault) {
   }
 }
 
+/// Confirm that a published object exists with a plausible size, without
+/// reading it. Objects are written once under their digest, so the upload
+/// check already established their content.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // blobs.require(shared_root, id)
+/// ```
+pub fn require(root: String, id: String) -> Result(Nil, Fault) {
+  use Nil <- result.try(check_digest(id))
+  case simplifile.file_info(root <> "/objects/" <> id) {
+    Ok(info) ->
+      case simplifile.file_info_type(info), info.size <= limit {
+        simplifile.File, True -> Ok(Nil)
+        _, _ -> Error(fault.Internal("stored blob is not a regular object"))
+      }
+    Error(simplifile.Enoent) -> Error(fault.NotFound("blob unavailable"))
+    Error(_) -> Error(fault.Unavailable("cannot inspect blob"))
+  }
+}
+
 fn check_digest(id: String) -> Result(Nil, Fault) {
   case valid(id) {
     True -> Ok(Nil)
