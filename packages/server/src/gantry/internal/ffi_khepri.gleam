@@ -1,5 +1,14 @@
-//// Khepri/Ra operations use an Erlang bridge because Gleam has no replicated
-//// conditional store. Only trusted startup configuration reaches cluster boot.
+//// Khepri/Ra primitives behind an Erlang bridge, because Gleam has no
+//// replicated conditional store. Each function performs one call and
+//// reports its outcome. Policy lives in `gantry/store`: the bootstrap or
+//// join decision, the node-name marker, the snapshot size limit and the
+//// quiet hint's invalidation. Only trusted startup configuration reaches
+//// cluster boot.
+////
+//// Failures are `Fault`s. The Erlang side builds `Unavailable` and
+//// `Internal` as `{unavailable, Detail}` and `{internal, Detail}`.
+
+import gantry/fault.{type Fault}
 
 /// Whether the expected snapshot authorized the proposal's receipt.
 pub type ProposalOutcome {
@@ -7,21 +16,77 @@ pub type ProposalOutcome {
   SnapshotChanged
 }
 
-/// Whether a worker poll can return before running the full claim decision.
-pub type QuietCheck {
-  ConfirmedQuiet
-  NeedsClaim
-}
-
-/// Open the replica and initialize the snapshot if absent.
+/// Start the Khepri application and this node's Ra system in `directory`.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.boot("/var/lib/gantry", "", empty)
+/// // ffi_khepri.start_system("/var/lib/gantry/queue-ra")
 /// ```
-@external(erlang, "gantry_khepri_ffi", "boot")
-pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
+@external(erlang, "gantry_khepri_ffi", "start_system")
+pub fn start_system(directory: String) -> Result(Nil, Fault)
+
+/// This VM's distribution node name.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.local_node() -> "gantry1@controller1"
+/// ```
+@external(erlang, "gantry_khepri_ffi", "local_node")
+pub fn local_node() -> String
+
+/// Whether Ra's directory already holds this store's server. Khepri would
+/// otherwise create a new singleton, so an established voter refuses to
+/// start without it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.directory_known()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "directory_known")
+pub fn directory_known() -> Bool
+
+/// Start or restart this node's store server.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.start_store()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "start_store")
+pub fn start_store() -> Result(Nil, Fault)
+
+/// Join the cluster that the named node belongs to.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.join("gantry1@controller1")
+/// ```
+@external(erlang, "gantry_khepri_ffi", "join")
+pub fn join(seed: String) -> Result(Nil, Fault)
+
+/// Flush Ra's directory so a restart recognizes this member.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.sync_directory()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "sync_directory")
+pub fn sync_directory() -> Result(Nil, Fault)
+
+/// Initialize the snapshot unless it already exists.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.create(empty)
+/// ```
+@external(erlang, "gantry_khepri_ffi", "create")
+pub fn create(empty: String) -> Result(Nil, Fault)
 
 /// Confirm that the controller can reach the queue's voting majority.
 ///
@@ -31,9 +96,9 @@ pub fn boot(dir: String, seed: String, empty: String) -> Result(Nil, String)
 /// // ffi_khepri.ready()
 /// ```
 @external(erlang, "gantry_khepri_ffi", "ready")
-pub fn ready() -> Result(Nil, String)
+pub fn ready() -> Result(Nil, Fault)
 
-/// Read bytes after Khepri's bounded fence.
+/// Read bytes after Khepri's bounded fence. The caller checks their size.
 ///
 /// ## Examples
 ///
@@ -41,39 +106,21 @@ pub fn ready() -> Result(Nil, String)
 /// // ffi_khepri.read()
 /// ```
 @external(erlang, "gantry_khepri_ffi", "read")
-pub fn read() -> Result(String, String)
+pub fn read() -> Result(String, Fault)
 
-/// Check whether a quorum-confirmed snapshot has the expected bytes.
+/// Ask the Ra leader, after a quorum confirms its authority, whether the
+/// stored snapshot hashes to the SHA-256 `digest`. Only the answer returns.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.confirm(expected)
+/// // ffi_khepri.matches(digest)
 /// ```
-@external(erlang, "gantry_khepri_ffi", "confirm")
-pub fn confirm(expected: String) -> Result(ProposalOutcome, String)
+@external(erlang, "gantry_khepri_ffi", "matches")
+pub fn matches(digest: BitArray) -> Result(ProposalOutcome, Fault)
 
-/// Confirm a previously identified quiet snapshot with the quorum.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // ffi_khepri.confirm_quiet()
-/// ```
-@external(erlang, "gantry_khepri_ffi", "confirm_quiet")
-pub fn confirm_quiet() -> Result(QuietCheck, String)
-
-/// Remember the bytes whose worker state is terminal.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // ffi_khepri.remember_quiet(bytes)
-/// ```
-@external(erlang, "gantry_khepri_ffi", "remember_quiet")
-pub fn remember_quiet(bytes: String) -> Nil
-
-/// Replace the expected bytes with a mutation through Khepri.
+/// Replace the expected bytes with a mutation through Khepri, within the
+/// same deadline as every other call. A deadline leaves the outcome unknown.
 ///
 /// ## Examples
 ///
@@ -84,4 +131,44 @@ pub fn remember_quiet(bytes: String) -> Nil
 pub fn swap(
   expected: String,
   proposed: String,
-) -> Result(ProposalOutcome, String)
+) -> Result(ProposalOutcome, Fault)
+
+/// Create the table that holds the local quiet hint, if it is absent.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.hint_open()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "hint_open")
+pub fn hint_open() -> Nil
+
+/// The digest of the last snapshot a worker poll found quiet.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.hint_read()
+/// ```
+@external(erlang, "gantry_khepri_ffi", "hint_read")
+pub fn hint_read() -> Result(BitArray, Nil)
+
+/// Remember the digest of a snapshot whose worker state is terminal.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.hint_remember(digest)
+/// ```
+@external(erlang, "gantry_khepri_ffi", "hint_remember")
+pub fn hint_remember(digest: BitArray) -> Nil
+
+/// Drop the hint if it still holds `digest`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.hint_forget(digest)
+/// ```
+@external(erlang, "gantry_khepri_ffi", "hint_forget")
+pub fn hint_forget(digest: BitArray) -> Nil

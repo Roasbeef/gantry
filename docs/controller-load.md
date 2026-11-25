@@ -1,52 +1,117 @@
 # Controller load benchmark
 
-Run the benchmark on Linux with Node.js 22 or later, Git, and an installed
-Gantry controller. It starts the launcher with a fresh data directory, a
-private Git remote, and loopback endpoints for each sample. Use a different
-starting port for concurrent invocations.
+The benchmark boots isolated controller voters from an installed `gantryd`
+and drives them with real worker-protocol traffic: Git enrollment, Khepri and
+Ra claims, blob staging, and result reports. It is a Gleam dev module,
+`packages/server/dev/gantry/bench.gleam`, with its pure settings and
+statistics in `bench/load.gleam`. It replaces the Node driver
+(`scripts/bench-controller.mjs`, now deleted), which produced the
+[earlier measurements](#earlier-measurements-node-driver) below.
+
+Run it on Linux with Git and an installed controller. Each sample starts
+fresh voters with a new data directory, a private Git remote per repository,
+and loopback endpoints. Use a different `GANTRY_BENCH_PORT` for concurrent
+invocations.
 
 ```sh
-node scripts/bench-controller.mjs "$(command -v gantryd)"
-GANTRY_BENCH_VOTERS=3 GANTRY_BENCH_WORKERS=3 GANTRY_BENCH_POLLS=360 \
-  node scripts/bench-controller.mjs "$(command -v gantryd)"
+cd packages/server
+GANTRY_BENCH_CONTROLLER="$(command -v gantryd)" gleam run -m gantry/bench
+
+# The offered-rate sweep behind the results below.
+GANTRY_BENCH_CONTROLLER="$(command -v gantryd)" GANTRY_BENCH_REPOS=100 \
+  GANTRY_BENCH_RATE=15 GANTRY_BENCH_SLEEP_MS=50 GANTRY_BENCH_RUNS=600 \
+  GANTRY_BENCH_WORKERS=8 gleam run -m gantry/bench
 ```
 
-The defaults are one voter, two BEAM schedulers per voter, 32 runs, four
-concurrent clients, 120 empty polls, and starting port 18972. Configure these
-with `GANTRY_BENCH_VOTERS`, `GANTRY_BENCH_SCHEDULERS`, `GANTRY_BENCH_RUNS`,
-`GANTRY_BENCH_WORKERS`, `GANTRY_BENCH_POLLS`, and `GANTRY_BENCH_PORT`.
-Controllers must share a local filesystem for the benchmark's artifact store.
-The two supported voter counts are one and three.
+A sample prints one JSON row per phase and prints nothing if a durable check
+fails. Controllers must share a local filesystem for the artifact store. The
+supported voter counts are one and three.
 
-Each successful sample prints three JSON rows.
+| Variable | Default | Bounds | Meaning |
+| --- | ---: | --- | --- |
+| `GANTRY_BENCH_CONTROLLER` | required | path | The `gantryd` launcher to boot |
+| `GANTRY_BENCH_VOTERS` | 1 | 1 or 3 | Controller voters |
+| `GANTRY_BENCH_SCHEDULERS` | 2 | 1 to 32 | BEAM schedulers per voter |
+| `GANTRY_BENCH_RUNS` | 32 | 1 to 20000 | Actions admitted per sample |
+| `GANTRY_BENCH_WORKERS` | 4 | 1 to 128 | Concurrent protocol clients, which are the drain's slots |
+| `GANTRY_BENCH_POLLS` | 120 | 1 to 10000 | Empty polls after the drain |
+| `GANTRY_BENCH_REPOS` | 1 | 1 to 1000 | Registered repositories, each with its own Git remote |
+| `GANTRY_BENCH_RATE` | 0 | 0 to 10000 | Offered admissions per second, or 0 for closed-loop admission |
+| `GANTRY_BENCH_SLEEP_MS` | 0 | 0 to 999 | Sleep added to each action, in milliseconds |
+| `GANTRY_BENCH_POLL_MS` | 10 | 1 to 5000 | A slot's pause after an empty claim during the drain |
+| `GANTRY_BENCH_INFLIGHT` | 256 | 1 to 4096 | Open-loop admissions allowed in flight |
+| `GANTRY_BENCH_RETRIES` | 4 | 0 to 1000 | Retries after an explicit CAS contention reply |
+| `GANTRY_BENCH_TIMEOUT_MS` | 30000 | 1000 to 600000 | Per-request HTTP deadline |
+| `GANTRY_BENCH_PORT` | 18972 | 1 to 65533 | The first voter's HTTP port |
 
-| Phase | One operation |
+With `GANTRY_BENCH_RATE` unset the phases match the Node driver. Every
+admission completes, then the slots drain the queue, then empty polls run.
+A positive rate admits work open-loop at that many actions per second,
+interleaved across the repositories, while the slots drain it in the same
+window. Admissions are bounded by `GANTRY_BENCH_INFLIGHT`, and the driver
+reports how late it sent them against the schedule (`lagP99Ms`).
+
+| Row `id` | One operation |
 | --- | --- |
-| Enrollment | Admit an uncached ad hoc action on a pinned Git commit. |
-| Queue drain | Claim one enrolled action, read its source archive, run a short shell command, stage its output and log, and finish the lease. |
-| Empty polls | Request an assignment once all runs have passed and their records are retained. |
+| `enrollment` | Admit an uncached ad hoc action on a pinned Git commit (closed loop) |
+| `admission` | The same admission at the offered rate (open loop) |
+| `queue-drain` | Claim one action, read its source archive, run a short shell command, stage its output and log, and finish the lease |
+| `empty-polls` | Request an assignment once every run has passed |
 
-A protocol client executes the shell fixture on the host. The benchmark
-covers the actual HTTP, Khepri/Ra, Git enrollment, and blob storage paths.
-The Docker worker launcher and its SQLite journal are covered by
-`make e2e`. Individual phase latencies exclude waiting for the preceding phase.
+A protocol client executes the shell fixture on the host, so the benchmark
+covers the HTTP, Khepri and Ra, Git enrollment, and blob storage paths. The
+Docker worker and its journal are covered by `make e2e`.
 
-Throughput is completed operations divided by elapsed phase time. The
-p50 and p95 use nearest-rank quantiles of individual operation latencies.
-CPU is the sum of all voter BEAM processes' Linux user and system time. CPU
-percentage is relative to one logical core, and excludes the load driver and
-subprocesses. RSS is the maximum sampled sum of voter BEAM resident memory
-at 25 ms intervals, in KiB. This includes any shared pages counted once per
-process. The reported contention counter covers explicit CAS retry-budget
-failures. The timer includes the client's bounded backoff and retry after
-those responses. Other errors stop the sample.
+Each row has `throughput`, nearest-rank `p50Ms`, `p95Ms`, and `p99Ms`, BEAM
+CPU (`cpuMs`, `cpuPercent`, `cpuMsPerOp`, the sum of the voters' user and
+system time, excluding the load driver), `peakRssKiB` sampled every 25 ms,
+`contentionRetries` (explicit CAS retry-budget replies, HTTP 503), the status
+counts, and `snapshotBytes` and `dataDirBytes` at the end of the sample. A
+drain row adds `readyP50Ms` through `readyMaxMs`, the time from an action
+becoming ready to a slot receiving its lease, plus `makespanMs` and slot
+`utilization`. The benchmark checks that every lease is unique and re-reads
+every run, proof, and artifact before printing. Retain each invocation's rows
+when comparing builds, and alternate old and new controllers to reduce drift.
 
-The benchmark checks unique assignments and re-reads every stored run,
-proof and artifact after the timed phases. It prints results only after
-these checks pass. Retain each invocation's JSON rows when comparing builds.
-Repeat from fresh state and alternate old and new controllers to reduce drift.
+## Measurements on the Gleam benchmark
 
-## Initial measurements
+These runs used a four-vCPU Linux host (blue-knight), 100 repositories,
+50 ms actions, and three samples per cell, and report the median. They
+predate the retention fix (`[retention]` in `controller.toml`), so a sample's
+snapshot grew with every retained run. The measured target is the one in
+[ADR 001](adr/001-khepri-owns-queue-decisions.md): a ready-to-dispatch p99
+under one second at 100 actions per second across 100 repositories.
+
+| Offered rate | Cell | Result |
+| ---: | --- | --- |
+| 10 to 15 actions/s | One and three voters | Drain keeps pace. Ready-to-dispatch p99 is 57 to 110 ms |
+| 25 actions/s | One voter, 8 slots | Saturates at 21.5 actions/s, p99 825 ms |
+| 25 actions/s | One voter, 32 slots | Saturates at 5.2 actions/s, with 1015 CAS refusals (HTTP 503) |
+| 25 actions/s | Three voters, 8 slots | Saturates at 13.3 actions/s, p99 4.8 s |
+| 10 actions/s, 600 retained runs | One voter | Drain falls to 1.3 to 1.7 actions/s, p99 in minutes |
+
+At 25 actions per second every cell saturates or exceeds a one second p99,
+which is a quarter of the rate the ADR asks for. BEAM CPU per operation grew
+from 12 ms at a 31 KiB snapshot to 52 to 75 ms at 94 to 141 KiB, which is
+what the whole-snapshot compare-and-swap predicts: every mutation reads,
+decodes, re-encodes, and replaces the full document. More slots make it worse
+(the 32-slot cell), because competing mutations lose the swap and retry.
+Three voters did worse than one at the same slot count, which fits each write
+waiting on a majority.
+
+Two caveats. Retention now bounds the snapshot, so the 600-run cell should be
+rerun against a current build before anyone reads it as the steady state.
+Three samples per cell is enough to see the cliff and not enough to rank
+cells that are close.
+
+## Earlier measurements (Node driver)
+
+The sections below came from the Node driver at the commits named in each,
+with one repository and the full run history retained. They show the cost of
+an idle poll and what the quiet-queue check removed. They are history. Do not
+compare their absolute numbers with the table above.
+
+### Initial measurements (commit `0316e2f`)
 
 These medians come from ten fresh samples per configuration on
 `0316e2f`, using Gleam 1.19.0, Erlang/OTP 29, Node.js 24.22.3, and a Linux
@@ -87,7 +152,7 @@ The one-repository workload uses three separate phases and gives an
 initial controller baseline for further measurement against the broader
 [queue architecture target](adr/001-khepri-owns-queue-decisions.md).
 
-## Profiling with Pickglass
+### Profiling with Pickglass (commit `b2ff8cb` for Pickglass)
 
 Pickglass can attach to an isolated benchmark voter without putting its
 viewer in the controller VM. Give it the voter's node name and the
@@ -144,7 +209,7 @@ The Ra commit index stayed at 21 through a separate run of 240 empty
 polls sent to the two followers. A mixed-version run also exercised
 updated followers querying a leader running the previous Gantry build.
 
-## Quiet queues
+### Quiet queues (compared with `0316e2f`)
 
 A controller remembers one snapshot in which every work item is terminal.
 Worker polls can confirm those exact bytes through Ra before decoding the

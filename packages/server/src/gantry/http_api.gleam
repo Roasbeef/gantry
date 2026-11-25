@@ -4,7 +4,9 @@
 import gantry/api
 import gantry/blobs
 import gantry/config.{type Config}
+import gantry/fault.{type Fault}
 import gantry/store
+import gantry_core/request as admission
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/crypto
@@ -30,15 +32,11 @@ type Reply =
 pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
   // The method and path select the operation and its required credential.
   case req.method, request.path_segments(req) {
-    Get, ["health"] ->
-      respond(
-        store.read()
-        |> result.map(fn(_) { json.object([#("status", json.string("ok"))]) }),
-      )
-    Get, ["ready"] -> ready_reply()
+    Get, ["health"] -> ready_reply("ok")
+    Get, ["ready"] -> ready_reply("ready")
     Get, ["v1", "worker", "ready"] -> {
-      use <- authorized(req, cfg.worker_token)
-      ready_reply()
+      use _ <- worker(req, cfg)
+      ready_reply("ready")
     }
     Post, ["v1", "runs"] -> {
       use <- authorized(req, cfg.agent_token)
@@ -57,32 +55,34 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
       api.get(id) |> respond
     }
     Post, ["v1", "claims"] -> {
-      use <- authorized(req, cfg.worker_token)
-      with_json(req, claim_reply)
+      use identity <- worker(req, cfg)
+      with_json(req, fn(body) { claim_reply(identity, body) })
     }
     Post, ["v1", "results"] -> {
-      use <- authorized(req, cfg.worker_token)
-      with_json(req, fn(body) { api.finish(cfg, body) |> respond })
+      use identity <- worker(req, cfg)
+      with_json(req, fn(body) { api.finish(cfg, identity, body) |> respond })
     }
     Put, ["v1", "blobs", id] -> {
-      use <- authorized(req, cfg.worker_token)
+      use _ <- worker(req, cfg)
       use body <- with_body(req, blobs.limit)
       upload(cfg.blobs, id, body)
     }
     Get, ["v1", "blobs", id] -> {
-      use <- authorized_either(req, cfg.agent_token, cfg.worker_token)
+      use <- agent_or_worker(req, cfg)
       download(cfg.blobs, id)
     }
     _, _ -> error(404, "route not found")
   }
 }
 
-/// Confirm quorum access for gateway and worker probes without claiming work.
-fn ready_reply() -> Reply {
+/// Confirm quorum access for gateway and worker probes without claiming work
+/// or transferring the queue snapshot. `/health` shares this check, because a
+/// controller that cannot reach its quorum cannot serve any request.
+fn ready_reply(status: String) -> Reply {
   respond(
     store.ready()
-    |> result.replace_error("queue quorum unavailable")
-    |> result.map(fn(_) { json.object([#("status", json.string("ready"))]) }),
+    |> result.map_error(fn(_) { fault.Unavailable("queue quorum unavailable") })
+    |> result.map(fn(_) { json.object([#("status", json.string(status))]) }),
   )
 }
 
@@ -91,15 +91,15 @@ fn ready_reply() -> Reply {
 /// ## Examples
 ///
 /// ```gleam
-/// // claim_reply(body)
+/// // claim_reply("worker-1", body)
 /// ```
-fn claim_reply(body: String) -> Reply {
-  case api.claim(body) {
+fn claim_reply(identity: String, body: String) -> Reply {
+  case api.claim(identity, body) {
     Ok(None) ->
       response.new(204)
       |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(<<>>)))
     Ok(Some(assignment)) -> json_reply(200, assignment)
-    Error(reason) -> error(status(reason), reason)
+    Error(reason) -> fault_reply(reason)
   }
 }
 
@@ -117,16 +117,16 @@ fn authorized(
 ) -> Reply {
   case accepts(req, token) {
     True -> then()
-    False -> error(401, "authentication required")
+    False -> fault_reply(fault.Unauthorized("authentication required"))
   }
 }
 
-/// Allow two roles to read shared state or artifacts.
+/// Allow two roles to read shared state.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // use <- authorized_either(request, agent_token, worker_token)
+/// // use <- authorized_either(request, agent_token, submit_token)
 /// ```
 fn authorized_either(
   req: Request(Connection),
@@ -136,19 +136,69 @@ fn authorized_either(
 ) -> Reply {
   case accepts(req, first) || accepts(req, second) {
     True -> then()
-    False -> error(401, "authentication required")
+    False -> fault_reply(fault.Unauthorized("authentication required"))
+  }
+}
+
+/// Authenticate a worker and hand its registered ID to the handler. The
+/// identity comes from the credential alone, so no field a client sends can
+/// choose it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // use identity <- worker(request, config)
+/// ```
+fn worker(
+  req: Request(Connection),
+  cfg: Config,
+  then: fn(String) -> Reply,
+) -> Reply {
+  case bearer(req) |> result.try(config.worker_for(cfg, _)) {
+    Ok(identity) -> then(identity)
+    Error(Nil) -> fault_reply(fault.Unauthorized("authentication required"))
+  }
+}
+
+/// Allow the build agent or any registered worker to read shared artifacts.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // use <- agent_or_worker(request, config)
+/// ```
+fn agent_or_worker(
+  req: Request(Connection),
+  cfg: Config,
+  then: fn() -> Reply,
+) -> Reply {
+  let worker = bearer(req) |> result.try(config.worker_for(cfg, _))
+
+  // The agent token or any registered worker credential may read.
+  case accepts(req, cfg.agent_token), worker {
+    True, _ | False, Ok(_) -> then()
+    False, Error(Nil) ->
+      fault_reply(fault.Unauthorized("authentication required"))
+  }
+}
+
+/// The bearer token a request presents, if any.
+fn bearer(req: Request(Connection)) -> Result(String, Nil) {
+  case request.get_header(req, "authorization") {
+    Ok("Bearer " <> supplied) -> Ok(supplied)
+    Ok(_) | Error(Nil) -> Error(Nil)
   }
 }
 
 /// Compare a bearer credential with the required role's token in constant time.
 fn accepts(req: Request(Connection), token: String) -> Bool {
-  case request.get_header(req, "authorization") {
-    Ok("Bearer " <> supplied) ->
+  case bearer(req) {
+    Ok(supplied) ->
       crypto.secure_compare(
         bit_array.from_string(supplied),
         bit_array.from_string(token),
       )
-    Ok(_) | Error(Nil) -> False
+    Error(Nil) -> False
   }
 }
 
@@ -160,7 +210,7 @@ fn accepts(req: Request(Connection), token: String) -> Bool {
 /// // use body <- with_json(request)
 /// ```
 fn with_json(req: Request(Connection), then: fn(String) -> Reply) -> Reply {
-  use body <- with_body(req, 262_144)
+  use body <- with_body(req, admission.body_limit)
 
   // Only valid UTF-8 can reach the JSON decoder.
   case bit_array.to_string(body) {
@@ -226,7 +276,7 @@ fn read_body(
 /// ```
 fn upload(root: String, id: String, body: BitArray) -> Reply {
   case blobs.valid(id) && blobs.digest(body) == id {
-    False -> error(400, "upload digest mismatch")
+    False -> fault_reply(fault.Invalid("upload digest mismatch"))
     True ->
       blobs.put(root, body)
       |> result.map(fn(saved) { json.object([#("digest", json.string(saved))]) })
@@ -241,25 +291,21 @@ fn download(root: String, id: String) -> Reply {
       response.new(200)
       |> response.set_header("content-type", "application/octet-stream")
       |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(body)))
-    Error(_) -> error(404, "blob unavailable")
+    Error(reason) -> fault_reply(reason)
   }
 }
 
-fn respond(answer: Result(json.Json, String)) -> Reply {
+fn respond(answer: Result(json.Json, Fault)) -> Reply {
   case answer {
     Ok(value) -> json_reply(200, value)
-    Error(reason) -> error(status(reason), reason)
+    Error(reason) -> fault_reply(reason)
   }
 }
 
-/// Map queue conflicts, missing records and unavailable services to HTTP status codes.
-fn status(reason: String) -> Int {
-  case reason {
-    "attempt is no longer active" | "run ID already has different inputs" -> 409
-    "unknown run" | "repository is not registered" -> 404
-    "queue " <> _ | "Khepri" <> _ | "blob unavailable" -> 503
-    _ -> 400
-  }
+/// Report a typed failure with the status its kind selects. Transient
+/// dependency failures use 503 so clients retry, and corrupt state uses 500.
+pub fn fault_reply(reason: Fault) -> Reply {
+  error(fault.status(reason), fault.detail(reason))
 }
 
 fn error(code: Int, reason: String) -> Reply {

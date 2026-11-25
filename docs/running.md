@@ -4,6 +4,8 @@ Gantry workers run actions against immutable Git snapshots. Gantry
 supports target plans, declared builds, restricted ad hoc actions,
 result polling, artifact and log retrieval, and guarded submission of
 ordered PR groups. Controllers share the same replicated queue.
+[Operations](operations.md) covers adding a machine and recovery, and
+[the status page](architecture/runtime.md#status) says what is built.
 
 ## Build and verify
 
@@ -54,8 +56,11 @@ to package the OTP release, including ERTS and the SQLite NIF. It writes
 release and installs `gantryd`, `gantry-worker`, and the `gantry` CLI under
 `PREFIX/bin`. The default prefix is `$HOME/.local`. Installed hosts need
 the system commands for the roles they run. Controllers use Git and GNU
-tar, workers use Docker, GNU coreutils, and `flock`, and the CLI uses Bash,
-curl, and jq. Python is unnecessary at runtime.
+tar, workers use Docker, `env`, `kill`, and `realpath`. The `gantry` CLI is a
+Gleam program on the bundled runtime, so it needs neither Bash, jq, curl,
+nor OpenSSL. Its onboarding commands also use Git, GNU coreutils, and
+util-linux (`flock` and `setpriv`), as described below. Python is
+unnecessary at runtime.
 
 Run `make update PREFIX="$HOME/.local"` from the checkout to build and
 install a new release. The installer publishes a complete, immutable
@@ -79,8 +84,8 @@ checked in alongside the schema and queries.
 
 ### Verify a local installation
 
-Run this command on Linux with the installed release, Docker, OpenSSL,
-and util-linux (`flock`, `setsid`, and `setpriv`).
+Run this command on Linux with the installed release, Docker, Git, GNU
+coreutils, and util-linux (`flock` and `setpriv`).
 
 ```sh
 gantry init --local
@@ -104,7 +109,13 @@ Restore an established profile's Ra state or worker journal from backup
 if either is missing or damaged.
 
 Use `gantry local start` to run both services in the foreground or as
-one supervisor-managed process. Load the agent credential and endpoint
+one supervisor-managed process. The CLI owns each service through a
+supervised port and starts it under `setpriv --pdeathsig TERM`. When one
+service exits, the CLI stops the other's process group, sending SIGTERM
+and then SIGKILL after ten seconds, and exits 1 with `service_exited`.
+SIGINT, SIGTERM, and SIGHUP end the CLI at once with status 130, 143, or
+129, and the death signal stops both services. A second onboarding
+command on the same profile exits 6 with `profile_busy`. Load the agent credential and endpoint
 in the shell that will use the CLI.
 
 ```sh
@@ -112,25 +123,39 @@ in the shell that will use the CLI.
 gantry status RUN_ID
 ```
 
-The generated controller configuration registers only the smoke fixture.
-Add other repositories explicitly in `controller.toml` while the
-controller is stopped.
+The generated controller configuration registers only the smoke fixture,
+`gantry/fixture`, with `pool = "local"` and a bare Git repository as its
+`local_remote`. The profile's one worker slot is in the pool `local`, and
+the controller runs without `GH_TOKEN`. A repository added to the file
+(while the controller is stopped) therefore needs `pool = "local"` and an
+absolute `local_remote` path, since the controller cannot authenticate to
+GitHub. A slot added later needs its own `[[worker]]` entry.
 
 ### Prepare a remote worker
 
 Install the release on a Linux Docker host. Use a stable HTTPS gateway
-origin and the existing deployment's worker role token. The gateway
-must pass `GET /v1/worker/ready` and its authorization header to a current
-controller. Readiness checks the token and queue quorum without
-acquiring a lease.
+origin. The gateway must pass `GET /v1/worker/ready` and its
+authorization header to a current controller. Readiness checks the
+worker's credential and queue quorum without acquiring a lease.
+
+Each worker has its own token, and the controller authorizes it by the
+token's SHA-256 digest in `controller.toml`. Setup mints the worker's ID
+and token, saves them in the slot's profile, and prints the `token_sha256`
+for the controller. The first run fails with `auth_failed` until the
+controller lists the worker. The error message carries the exact
+`[[worker]]` entry to add.
 
 ```sh
-gantry worker setup https://gantry.example linux --token-stdin < /private/path/worker-token
+gantry worker setup https://gantry.example linux
+# Add the printed [[worker]] entry to controller.toml on every controller,
+# restart them, and rerun setup.
+gantry worker setup https://gantry.example linux
 gantry worker start
 ```
 
-You can also supply the token through `GANTRY_WORKER_TOKEN`. Setup checks
-Docker and authenticated gateway readiness, saves one slot, and exits.
+To use a token you generated yourself, supply it with `--token-stdin` or
+`GANTRY_WORKER_TOKEN` on the first run. Setup checks Docker and
+authenticated gateway readiness, saves one slot, and exits.
 Use the explicit start command as the foreground command for your
 supervisor. Install a gateway's private CA in the system trust store on
 the worker when needed. Pre-pull the images required by the pool before
@@ -209,10 +234,15 @@ of those BEAM mechanisms.
 
 ## Start a controller
 
-Copy the [controller example](examples/controller.toml) and register
-a project. Set three distinct secrets of at least 32 bytes
-in `GANTRY_TOKEN`, `GANTRY_WORKER_TOKEN`, and `GANTRY_SUBMIT_TOKEN`.
-`GH_TOKEN` supplies GitHub authentication to controllers only. A local
+Copy the [controller example](examples/controller.toml), register a
+project, and list each worker. Set two distinct secrets of at least 32
+bytes in `GANTRY_TOKEN` and `GANTRY_SUBMIT_TOKEN`. Workers do not share a
+token. Each `[[worker]]` entry gives the worker's ID and the SHA-256
+digest of its own token, and the controller derives a request's worker
+identity from the credential it presents. A worker that sends a different
+`worker` in its request body gets HTTP 403. A configuration with no
+`[[worker]]` entry, such as one that relied on `GANTRY_WORKER_TOKEN`,
+fails to load. `GH_TOKEN` supplies GitHub authentication to controllers only. A local
 provider can instead set an absolute `local_remote` path and use bare Git
 pull refs at `refs/pull/<number>/head`.
 
@@ -221,9 +251,19 @@ export GANTRY_CONFIG=/absolute/path/to/controller.toml
 gantryd
 ```
 
-For a new deployment, generate the three role tokens once with a separate
+For a new deployment, generate the two role tokens once with a separate
 `openssl rand -hex 32` invocation for each and load them from a private
-service environment. Give each client only the token for its role.
+service environment. Give each client only the token for its role. Mint
+each worker's token the same way and register its digest:
+
+```sh
+token=$(openssl rand -hex 32)
+printf '%s' "$token" | sha256sum | cut -d ' ' -f 1
+```
+
+Put the printed digest in the worker's `token_sha256` and give the worker
+the token as `GANTRY_WORKER_TOKEN` with `GANTRY_WORKER_ID` set to the
+entry's `id`.
 From a source checkout, use `gleam run` in `packages/server` with the
 same environment.
 
@@ -263,13 +303,15 @@ curl -fsS --max-time 10 http://127.0.0.1:4737/health | jq -e '.status == "ok"'
 curl -fsS --max-time 10 https://controller-a.example/health | jq -e '.status == "ok"'
 ```
 
-`GET /health` requires no token. A successful response includes a queue
-read, so probe each origin after startup or before routing traffic to it.
+`GET /health` requires no token. It shares the readiness check, so a
+successful response confirms that Ra reaches a voting majority without
+transferring the queue. Probe each origin after startup or before routing
+traffic to it.
 Use a build to verify worker execution and blob access.
 
 ### Form a three-controller quorum
 
-Use the same repository policy, role tokens, and shared filesystem on all
+Use the same repository policy, worker entries, role tokens, and shared filesystem on all
 three controllers. Mount that filesystem at `blob_dir` before starting
 Gantry. It must provide atomic renames and file and directory sync. Keep
 `data_dir` on each controller's local disk for its Ra state.
@@ -344,9 +386,12 @@ For a same-host rehearsal, use the loopback configuration in the
 ## Start a worker
 
 Pre-pull the digest-pinned action images for the slot's pool and the
-Alpine 3.22 collector image on each Docker host. The collector uses the
-digest in the controller example. Choose images containing `/bin/sh`, `tar`,
-and the toolchains your targets need. The action receives its selected Git
+collector image on each Docker host. The collector is a fixed Alpine 3.22
+image whose digest is compiled into the worker (`docker.gleam`), shown in the
+`docker pull` below. The controller example reuses that digest only as a
+sample action image, and nothing reads it from `controller.toml`. Choose
+action images containing `/bin/sh`, `tar`, and the toolchains your targets
+need. The action receives its selected Git
 files and verified upstream artifacts in a private tmpfs workspace.
 It runs without network access and has a read-only container root.
 For a worker sharing a host with a single controller, use
@@ -359,7 +404,7 @@ export GANTRY_ENDPOINT=https://controller-a.example,https://controller-b.example
 export GANTRY_WORKER_ID=linux-01 GANTRY_POOL=linux
 export GANTRY_WORKER_DIR=/srv/gantry/worker-linux-01
 install -d -m 0700 "$GANTRY_WORKER_DIR"
-: "${GANTRY_WORKER_TOKEN:?Load the shared worker token from the private service environment}"
+: "${GANTRY_WORKER_TOKEN:?Load this worker's own token from the private service environment}"
 export GANTRY_WORKER_TOKEN
 gantry-worker
 ```
@@ -369,17 +414,46 @@ From a source checkout, use `gleam run -m gantry/worker` in
 
 Run the worker as a user with access to its Docker daemon and write
 access to its local directory. One worker process runs one action at a
-time. The defaults are two CPUs, 768 MiB of container memory, and
-256 MiB of workspace. Set `GANTRY_WORKER_CPUS`,
-`GANTRY_WORKER_MEMORY_MIB`, and `GANTRY_WORKSPACE_MIB` to size the slot.
-Match capacity and isolation policy across slots in the same named
-pool, and match `GANTRY_POOL` to the controller's repository pool.
+time. Set these variables to size the slot. Each is validated against
+its bounds at startup, and a value outside them stops the worker.
 
+| Variable | Default | Bounds | Limits |
+| --- | --- | --- | --- |
+| `GANTRY_WORKER_CPUS` | 2 | 1 to 1024 | Container CPUs |
+| `GANTRY_WORKER_MEMORY_MIB` | 768 | 128 to 2097152 | Container memory, including `/tmp` |
+| `GANTRY_WORKSPACE_MIB` | 256 | 64 to 1048576 | The `/work` tmpfs volume |
+| `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
+| `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
+| `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The `/tmp` tmpfs size |
+
+The process default matters for BEAM builds. A BEAM starts a scheduler
+thread per core, and on a 32-core host it could not start under 128
+processes. `/tmp` counts against the memory limit, so a larger size
+bounds the file it can hold and does not reserve memory. Match capacity
+and isolation policy across slots in the same named pool, and match
+`GANTRY_POOL` to the controller's repository pool.
+
+At startup the worker takes an exclusive SQLite lock on its journal, so a
+second worker with the same directory exits with an error. It then
+inspects the collector image and exits with the `docker pull` command to
+run if the image is missing. An idle slot polls the controller with a
+jittered delay that grows from about 0.25 s to a 2 s ceiling and resets
+as soon as it receives work. Each HTTP exchange has a 10 s connect
+timeout, a response wait of 30 s plus 4 s per MiB uploaded, and a 30 s
+bound that restarts at every response chunk. A 64 MiB blob therefore
+completes over any link that sustains 256 KiB/s. The worker keeps one
+connection per controller origin.
+
+Infrastructure faults retry while they are safe to retry, and
+[otherwise become a failed action](architecture/runtime.md#worker-faults).
 To add slots, launch one supervisor-managed worker per slot with its own
-deployment-wide ID and directory, for example `linux-02` and
-`/srv/gantry/worker-linux-02`. Size their combined reservations to fit
-the host. No controller registration step is needed. Retain each
-directory and reuse the same worker ID on restart. The journal records
+deployment-wide ID, token, and directory, for example `linux-02` and
+`/srv/gantry/worker-linux-02`. Register each slot's ID and token digest as a
+`[[worker]]` entry on every controller, and restart the controllers. Size the
+slots' combined limits to fit the host, because the controller does not know
+how large the machine is. Adding slots is how a large host does more at once
+([how work is spread](scheduling.md), [add-a-machine checklist](operations.md#add-a-machine)).
+Retain each directory and reuse the same worker ID on restart. The journal records
 whether a container could have started and keeps unpublished outcomes
 until a controller acknowledges them.
 
@@ -425,9 +499,19 @@ as JSON lines. Pass a file containing one action as the optional final
 CLI argument for isolated ad hoc work. Ad hoc keys are scoped to their
 run ID. The submit token can admit or inspect submissions. It cannot
 claim work or upload worker outputs.
+
+A submission pins the heads of its pull requests and waits. The controller
+builds the candidate on the branch's current tip only when the group heads
+its lane, so a group queued behind another is built on the commit the first
+one lands. A waiting group shows phase `waiting`. A pinned head that moved,
+a merge conflict, or a provider refusal ends it as `unprepared` with a typed
+reason. A landing that GitHub policy denies, or a target that moved outside
+the candidate, ends as `blocked` with its reason, and an action skipped
+after a failure shows step kind `skipped`.
 [CLI reference](cli.md)
 
-The [GitHub Actions example](examples/github-submit.yml) uses a trusted
+The [HTTP API reference](api.md) lists every route, status code, and the
+run-status JSON. The [GitHub Actions example](examples/github-submit.yml) uses a trusted
 manual workflow to submit an ordered list, wait for landing, and link the
 confirmed commit on the original PRs. GitHub can recognize the merge by
 ancestry. This path requires the configured GitHub identity to be allowed
@@ -438,14 +522,16 @@ the current target.
 
 ## Current implementation boundaries
 
-The first store replaces a bounded 4 MiB metadata snapshot with an atomic
-Khepri CAS. High-throughput placement, indexed state and retention remain
-separate work. Startup and failover tests use real voters. The worker uses
-Docker while Loom executor integration awaits its own interop proof. The
-GitHub adapter and workflow require deployment validation on a live
-repository. The full gate exercises the same Git preparation and mutation
-against a local bare remote.
+[The status section](architecture/runtime.md#status) is the single record of
+what is built and what is open. Three limits matter when you size a
+deployment. The queue is one snapshot of at most 4 MiB, and the controller
+trims finished runs and proofs to the `[retention]` bounds in
+`controller.toml` (200 runs and 1000 proofs by default). Throughput on the
+whole-snapshot swap saturates near 20 actions per second on four vCPUs
+([measurements](controller-load.md#measurements-on-the-gleam-benchmark)).
+Blobs and candidate bundles are not collected.
 
 The API uses immutable commits and optional ad hoc actions. Workspace
-overlays, cancellation, and event cursors are described in the
-[design](architecture/build-and-submit.md) for later protocol work.
+overlays, cancellation, and event cursors are in the
+[target design](architecture/build-and-submit.md#what-is-built) for later
+protocol work.

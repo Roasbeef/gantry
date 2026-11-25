@@ -10,7 +10,8 @@ and the target branch still matches the tested base.
 
 [Try it locally](#get-started) · [Integrate a repository](docs/integrating.md) ·
 [Run a worker pool](docs/running.md) · [CLI](docs/cli.md) ·
-[Architecture](docs/architecture/runtime.md)
+[HTTP API](docs/api.md) · [Architecture](docs/architecture/runtime.md) ·
+[Tour of the code](docs/guide/tour.md)
 
 ## Why Gantry
 
@@ -39,7 +40,9 @@ gantry init --local
 ```
 
 Init creates a private profile, runs a Docker smoke build, and reports its
-run ID and artifact digest. Use `gantry local start` to keep the local
+run ID and artifact digest. The installed `gantry` CLI, onboarding
+included, runs on the bundled BEAM runtime and needs no jq, curl, or
+OpenSSL. Use `gantry local start` to keep the local
 services running, and `gantry skill` to give an agent the CLI instructions.
 [Local and remote setup](docs/running.md#verify-a-local-installation)
 
@@ -73,6 +76,7 @@ controller. From your project checkout, use a commit available on the
 registered remote. Set `GANTRY_URL` and `GANTRY_TOKEN` for the controller.
 
 ```sh
+# The installed `gantry`, or the source shim, which needs Gleam and Erlang.
 gantry=/path/to/gantry/scripts/gantry
 revision=$(git rev-parse HEAD)
 run_id="check-$(date +%s)"
@@ -107,24 +111,31 @@ A pure Gleam core decides graph and queue transitions. Controllers persist those
 decisions through Khepri and Ra before dispatching effects. Workers keep a local
 journal so they can recover assignments and replay results after a restart.
 [Runtime architecture](docs/architecture/runtime.md) ·
-[State machines](docs/architecture/state-machines.md)
+[Tour of the code](docs/guide/tour.md)
 
-Run more workers by adding slots to a named pool. Each slot can reach
-every controller in its queue's quorum through the HTTPS API.
+Run more workers by adding slots to a named pool. Each slot runs one action at
+a time and can reach every controller in its queue's quorum through the HTTPS
+API. A single action never splits across slots, so a repository's parallelism
+comes from how its manifest is cut into actions.
+[How work is spread](docs/scheduling.md) ·
+[Add a machine](docs/operations.md#add-a-machine) ·
 [Controller and worker setup](docs/running.md#choose-a-deployment)
 
 ## Project status
 
 The current release scope covers pinned Git commits, declared and ad hoc
 actions, Docker execution, and ordered group submission. The live harness
-exercises the queue, Docker, and Git path against a local bare remote.
-A deployment against GitHub branch rules and PR reconciliation is the next
-provider verification. [Deployment boundaries](docs/running.md#current-implementation-boundaries)
+exercises the queue, Docker, and Git path against a local bare remote, and a
+GitHub pilot has landed a group on a disposable branch. What is built, what is
+open, and the throughput measured so far are in one place:
+[status](docs/architecture/runtime.md#status).
 
 Gantry uses a TLA+ model to check queue invariants and seeded deterministic
-simulation to exercise retries, controller loss, and delayed effects. See the
-runbook for the model, unit, and live end-to-end commands.
+simulation to exercise retries, controller loss, lease expiry, and delayed
+effects. See the runbook for the model, unit, and live end-to-end commands.
 [Verification model](protocol/models/queue/README.md) ·
-[Build and submit design](docs/architecture/build-and-submit.md) ·
+[Queue verification](docs/queue-verification.md) ·
+[Operations and recovery](docs/operations.md) ·
+[Target design](docs/architecture/build-and-submit.md) ·
 [Contributor handoff](docs/next.md) ·
 [Performance workflow](skills/gantry-perf/SKILL.md)

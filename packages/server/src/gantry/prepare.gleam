@@ -2,12 +2,12 @@
 
 import gantry/blobs
 import gantry/config
+import gantry/fault.{type Fault}
 import gantry/git
 import gantry/github
-import gantry/internal/ffi_host
 import gantry_core/graph
-import gantry_core/job
 import gantry_core/queue
+import gantry_core/request
 import gleam/int
 import gleam/json
 import gleam/list
@@ -21,95 +21,194 @@ import simplifile
 /// ## Examples
 ///
 /// ```gleam
-/// // prepare.build(cfg, repo, revision, "check", "build-1", None)
+/// // prepare.build(cfg, repo, pinned)
 /// ```
 pub fn build(
   cfg: config.Config,
   repo: config.Repository,
-  revision: String,
-  target: String,
-  id: String,
-  adhoc: Option(graph.Action),
-) -> Result(List(queue.Task), String) {
-  // Accept object IDs so a ref change cannot retarget this build request.
-  use Nil <- result.try(case job.valid_sha(revision) {
-    True -> Ok(Nil)
-    False -> Error("expected immutable revision")
-  })
-
+  pinned: request.Build,
+) -> Result(List(queue.Task), Fault) {
+  // The request carries a full object ID, so a ref change cannot retarget
+  // this build. Its ad hoc action already passed the request rules.
   use s <- git.session(cfg, repo)
-  use sha <- result.try(git.fetch(s, revision))
-  tasks(cfg, repo, s, sha, sha, target, id, adhoc)
+  use sha <- result.try(git.fetch(s, request.revision(pinned)))
+  tasks(
+    cfg,
+    repo,
+    s,
+    sha,
+    sha,
+    request.target(pinned),
+    request.build_id(pinned),
+    request.action(pinned),
+  )
 }
 
-/// Integrate ordered pull heads into a candidate, then stage its action graph.
+/// Pin the heads of an ordered group at admission. The pins are what the
+/// submitter reviewed, and preparation later refuses a group whose pulls moved.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // prepare.group(cfg, repo, [1, 2])
+/// // prepare.pin(cfg, repo, group)
 /// ```
-pub fn group(
+pub fn pin(
   cfg: config.Config,
   repo: config.Repository,
-  pulls: List(Int),
-) -> Result(#(queue.Candidate, List(queue.Task)), String) {
-  // Each distinct pull contributes one ordered integration step.
-  use Nil <- result.try(
-    case
-      pulls != []
-      && list.unique(pulls) == pulls
-      && list.all(pulls, fn(n) { n > 0 })
-    {
-      True -> Ok(Nil)
-      False -> Error("expected distinct positive pull numbers")
-    },
-  )
+  group: request.Submit,
+) -> Result(List(queue.Member), Fault) {
+  use s <- git.session(cfg, repo)
+  list.try_map(request.pulls(group), fn(n) { member(cfg, repo, s, n) })
+}
+
+/// What preparing a waiting group produced.
+pub type Prepared {
+  /// The candidate on the current branch tip, and its staged action graph.
+  Ready(candidate: queue.Candidate, tasks: List(queue.Task))
+
+  /// A definite refusal that the queue records. A `Fault` instead means the
+  /// outcome is unknown, and the caller retries later.
+  Refusal(failure: queue.PrepareFailure)
+}
+
+/// Build a waiting group's candidate on the branch's current tip and stage
+/// its action graph. This is the one place a group is integrated, and it
+/// runs only when the group heads a free lane, so the base it records is the
+/// tip that the landing will expect.
+///
+/// A pinned member that moved, a merge that conflicts, and a provider or
+/// manifest refusal are `Refusal`s. A Git or GitHub failure is a `Fault`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // prepare.candidate(cfg, repo, preparation)
+/// ```
+pub fn candidate(
+  cfg: config.Config,
+  repo: config.Repository,
+  preparation: queue.Preparation,
+) -> Result(Prepared, Fault) {
+  let pinned = queue.preparation_members(preparation)
+  let branch = queue.preparation_branch(preparation)
+
+  // The registered branch is the one lane this repository can land on.
+  use Nil <- result.try(case branch == repo.branch {
+    True -> Ok(Nil)
+    False -> Error(fault.Internal("registered branch changed while waiting"))
+  })
 
   use s <- git.session(cfg, repo)
-  use base <- result.try(git.fetch(s, "refs/heads/" <> repo.branch))
-  use members <- result.try(
-    list.try_map(pulls, fn(n) { member(cfg, repo, s, n) }),
-  )
-  use commit <- result.try(
-    list.try_fold(members, base, fn(parent, m) {
-      use tree <- result.try(
-        git.command(s, ["merge-tree", "--write-tree", parent, m.head]),
-      )
-      use date <- result.try(merge_date(s, parent, m.head))
-      let author =
-        git.Session(..s, env: [
-          #("GIT_AUTHOR_DATE", date),
-          #("GIT_COMMITTER_DATE", date),
-          ..s.env
-        ])
-      use sha <- result.try(
-        git.command(author, [
-          "commit-tree",
-          string.trim(tree),
-          "-p",
-          parent,
-          "-p",
-          m.head,
-          "-m",
-          "Integrate pull " <> int.to_string(m.pull),
-        ]),
-      )
-      git.oid(s, string.trim(sha))
-    }),
-  )
-  use plan <- result.try(tasks(
-    cfg,
-    repo,
-    s,
-    base,
-    commit,
-    repo.target,
-    "",
-    None,
-  ))
-  use Nil <- result.try(git.preserve(cfg, repo, s, base, commit))
-  Ok(#(queue.Candidate(repo.branch, base, commit, members), plan))
+  use base <- result.try(git.fetch(s, "refs/heads/" <> branch))
+  use moved <- result.try(first_moved(cfg, repo, s, pinned))
+
+  // A moved pin is refused before any merge work.
+  case moved {
+    Some(failure) -> Ok(Refusal(failure))
+    None -> {
+      use merged <- result.try(integrate(s, base, pinned))
+
+      // A conflict is refused. Otherwise stage the graph on the merge commit.
+      case merged {
+        Error(failure) -> Ok(Refusal(failure))
+        Ok(commit) -> stage(cfg, repo, s, base, commit, pinned)
+      }
+    }
+  }
+}
+
+/// Re-read each pinned pull and report the first one that no longer matches
+/// its pin, or that the provider now refuses.
+fn first_moved(
+  cfg: config.Config,
+  repo: config.Repository,
+  s: git.Session,
+  pinned: List(queue.Member),
+) -> Result(Option(queue.PrepareFailure), Fault) {
+  list.try_fold(pinned, None, fn(found, pin) {
+    // The earliest failure stands, and later pulls are not read.
+    case found {
+      Some(_) -> Ok(found)
+      None ->
+        case member(cfg, repo, s, pin.pull) {
+          Ok(current) if current == pin -> Ok(None)
+          Ok(_) -> Ok(Some(queue.MemberMoved(pin.pull)))
+          Error(fault.Invalid(detail)) | Error(fault.NotFound(detail)) ->
+            Ok(Some(queue.Refused(detail)))
+          Error(other) -> Error(other)
+        }
+    }
+  })
+}
+
+/// Merge the pinned heads onto the base in order, one integration commit per
+/// member. A conflict returns the typed refusal instead of a commit.
+fn integrate(
+  s: git.Session,
+  parent: String,
+  members: List(queue.Member),
+) -> Result(Result(String, queue.PrepareFailure), Fault) {
+  // Each member's commit becomes the parent of the next.
+  case members {
+    [] -> Ok(Ok(parent))
+    [m, ..rest] -> {
+      use merged <- result.try(git.merge_tree(s, parent, m.head))
+
+      // A conflicted tree has no commit to build on.
+      case merged {
+        git.Conflicted(detail) ->
+          Ok(
+            Error(queue.Unmergeable(
+              "pull " <> int.to_string(m.pull) <> ": " <> detail,
+            )),
+          )
+        git.Merged(tree) -> {
+          use date <- result.try(merge_date(s, parent, m.head))
+          let author =
+            git.Session(..s, env: [
+              #("GIT_AUTHOR_DATE", date),
+              #("GIT_COMMITTER_DATE", date),
+              ..s.env
+            ])
+          use sha <- result.try(
+            git.command(author, [
+              "commit-tree",
+              tree,
+              "-p",
+              parent,
+              "-p",
+              m.head,
+              "-m",
+              "Integrate pull " <> int.to_string(m.pull),
+            ]),
+          )
+          use commit <- result.try(git.oid(s, string.trim(sha)))
+          integrate(s, commit, rest)
+        }
+      }
+    }
+  }
+}
+
+/// Stage the manifest's action graph for the integration commit and publish
+/// its bundle. A manifest or input the controller rejects is a refusal.
+fn stage(
+  cfg: config.Config,
+  repo: config.Repository,
+  s: git.Session,
+  base: String,
+  commit: String,
+  pinned: List(queue.Member),
+) -> Result(Prepared, Fault) {
+  // A manifest the controller rejects ends the wait. Anything else retries.
+  case tasks(cfg, repo, s, base, commit, repo.target, "", None) {
+    Error(fault.Invalid(detail)) -> Ok(Refusal(queue.Refused(detail)))
+    Error(other) -> Error(other)
+    Ok(plan) -> {
+      use Nil <- result.try(git.preserve(cfg, repo, s, base, commit))
+      Ok(Ready(queue.candidate(repo.branch, base, commit, pinned), plan))
+    }
+  }
 }
 
 /// A merge timestamp one second after its newest parent is stable on replay.
@@ -117,14 +216,14 @@ fn merge_date(
   s: git.Session,
   parent: String,
   head: String,
-) -> Result(String, String) {
+) -> Result(String, Fault) {
   use dates <- result.try(
     list.try_map([parent, head], fn(sha) {
       use value <- result.try(
         git.command(s, ["show", "-s", "--format=%ct", sha]),
       )
       int.parse(string.trim(value))
-      |> result.replace_error("invalid Git parent timestamp")
+      |> result.replace_error(fault.Internal("invalid Git parent timestamp"))
     }),
   )
   let time = list.fold(dates, 0, int.max) + 1
@@ -143,7 +242,7 @@ pub fn member(
   repo: config.Repository,
   s: git.Session,
   n: Int,
-) -> Result(queue.Member, String) {
+) -> Result(queue.Member, Fault) {
   use sha <- result.try(git.fetch(
     s,
     "refs/pull/" <> int.to_string(n) <> "/head",
@@ -153,8 +252,7 @@ pub fn member(
   case repo.provider {
     config.Local(_) -> Ok(queue.Member(n, sha))
     config.GitHub(target) -> {
-      let req = job.Request(repo.name, n, sha, job.Submit)
-      use pull <- result.try(github.read_pull(cfg.github_token, req))
+      use pull <- result.try(github.read_pull(cfg.github_token, repo.name, n))
 
       // Resolve the GitHub admission branch from the current repository policy.
       let allowed = case target {
@@ -162,12 +260,12 @@ pub fn member(
         config.RegisteredBranch -> repo.branch
       }
 
-      use branch <- result.try(github.validate_pull(pull, req, allowed))
+      use branch <- result.try(github.validate_submission(pull, sha, allowed))
 
       // Only the operator-selected branch can receive this integration.
       case branch == repo.branch {
         True -> Ok(queue.Member(n, sha))
-        False -> Error("unexpected pull target")
+        False -> Error(fault.Invalid("unexpected pull target"))
       }
     }
   }
@@ -183,29 +281,37 @@ fn tasks(
   target: String,
   id: String,
   adhoc: Option(graph.Action),
-) -> Result(List(queue.Task), String) {
-  // An ad hoc result has a private cache scope. Declared targets share a scope.
+) -> Result(List(queue.Task), Fault) {
+  // An ad hoc result has a private cache scope. Declared targets share a
+  // scope. The request rules have already closed an ad hoc action over the
+  // staging rules and rejected its graph edges.
   use #(actions, scope) <- result.try(case adhoc {
-    Some(action) -> {
-      use Nil <- result.try(graph.validate_action(action))
-
-      // An isolated ad hoc action has no graph to resolve dependency edges against.
-      case action.dependencies, action.after {
-        [], [] -> Ok(#([action], "ad-hoc:" <> id))
-        _, _ -> Error("ad hoc actions cannot reference graph dependencies")
-      }
-    }
+    Some(action) -> Ok(#([action], "ad-hoc:" <> id))
     None -> {
-      use oid <- result.try(
-        git.command(s, ["rev-parse", "--verify", base <> ":gantry.json"]),
+      use #(status, oid) <- result.try(
+        git.raw(s, ["rev-parse", "--verify", base <> ":gantry.json"]),
       )
+
+      // The commit is already local, so a nonzero exit means the manifest is
+      // missing, which is a refusal. A fault running Git stays an error.
+      use Nil <- result.try(case status {
+        0 -> Ok(Nil)
+        _ -> Error(fault.Invalid("revision has no gantry.json"))
+      })
+
       use file <- result.try(git.command(s, ["unpack-file", string.trim(oid)]))
+
+      // The checkout lands beside the mirror, so remove it once it is read.
+      let path = s.dir <> "/" <> string.trim(file)
+      let read = simplifile.read(path)
+      let _ = simplifile.delete_file(path)
       use manifest <- result.try(
-        simplifile.read(s.dir <> "/" <> string.trim(file))
-        |> result.replace_error("cannot read build manifest"),
+        read
+        |> result.replace_error(fault.Internal("cannot read build manifest")),
       )
       graph.compile(manifest, target)
       |> result.map(fn(actions) { #(actions, "declared") })
+      |> result.map_error(fault.Invalid)
     }
   })
 
@@ -214,74 +320,22 @@ fn tasks(
   // projecting tree blobs so packaging rules cannot omit or rewrite inputs.
   use Nil <- result.try(
     simplifile.create_directory_all(s.dir <> "/info")
-    |> result.replace_error("cannot configure raw Git projection"),
+    |> result.replace_error(fault.Unavailable(
+      "cannot configure raw Git projection",
+    )),
   )
   use Nil <- result.try(
     simplifile.write(
       s.dir <> "/info/attributes",
       "* -export-ignore -export-subst -text -crlf !eol -ident !filter !working-tree-encoding\n",
     )
-    |> result.replace_error("cannot protect raw Git projection"),
+    |> result.replace_error(fault.Unavailable(
+      "cannot protect raw Git projection",
+    )),
   )
 
   list.try_map(actions, fn(action) {
-    let path = s.dir <> "/source.tar"
-
-    // The whole-tree projection maps to an empty Git pathspec.
-    let paths = case action.inputs {
-      ["."] -> []
-      other -> other
-    }
-
-    // An action with no inputs receives a valid empty archive.
-    use _ <- result.try(case action.inputs {
-      [] -> {
-        use #(status, _) <- result.try(ffi_host.run(
-          "tar",
-          ["-cf", path, "--files-from", "/dev/null"],
-          [],
-          10_000,
-        ))
-
-        // Require GNU tar to finish writing the empty archive.
-        case status {
-          0 -> Ok("")
-          _ -> Error("cannot create empty input archive")
-        }
-      }
-      _ ->
-        git.command(
-          s,
-          list.append(
-            [
-              "archive",
-              "--format=tar",
-              "--mtime=2000-01-01T00:00:00Z",
-              "--output",
-              path,
-              revision <> "^{tree}",
-              "--",
-            ],
-            paths,
-          ),
-        )
-    })
-
-    use info <- result.try(
-      simplifile.file_info(path)
-      |> result.replace_error("cannot inspect Git archive"),
-    )
-
-    // Check the protocol transfer bound before allocating the archive in memory.
-    use Nil <- result.try(case info.size <= blobs.limit {
-      True -> Ok(Nil)
-      False -> Error("source archive exceeds worker transfer limit")
-    })
-
-    use bytes <- result.try(
-      simplifile.read_bits(path)
-      |> result.replace_error("cannot read Git archive"),
-    )
+    use bytes <- result.try(archive(s, revision, action.inputs))
     use source <- result.try(blobs.put(cfg.blobs, bytes))
 
     let identity =
@@ -302,4 +356,80 @@ fn tasks(
     let recipe = blobs.digest(<<identity:utf8>>)
     Ok(queue.Task(action, source, recipe, repo.pool, repo.image))
   })
+}
+
+/// The tar bytes of an action's declared inputs at a revision.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // prepare.archive(s, revision, ["src"])
+/// ```
+fn archive(
+  s: git.Session,
+  revision: String,
+  inputs: List(String),
+) -> Result(BitArray, Fault) {
+  case inputs {
+    // An action with no inputs receives a valid empty archive.
+    [] -> Ok(empty_archive())
+    _ -> {
+      // The whole-tree projection maps to an empty Git pathspec.
+      let paths = case inputs {
+        ["."] -> []
+        other -> other
+      }
+
+      let path = git.scratch(s, "source.tar")
+      let read = {
+        use _ <- result.try(git.command(
+          s,
+          list.append(
+            [
+              "archive",
+              "--format=tar",
+              "--mtime=2000-01-01T00:00:00Z",
+              "--output",
+              path,
+              revision <> "^{tree}",
+              "--",
+            ],
+            paths,
+          ),
+        ))
+        use info <- result.try(
+          simplifile.file_info(path)
+          |> result.replace_error(fault.Unavailable(
+            "cannot inspect Git archive",
+          )),
+        )
+
+        // Check the protocol transfer bound before allocating the archive in memory.
+        use Nil <- result.try(case info.size <= blobs.limit {
+          True -> Ok(Nil)
+          False ->
+            Error(fault.Invalid("source archive exceeds worker transfer limit"))
+        })
+
+        simplifile.read_bits(path)
+        |> result.replace_error(fault.Unavailable("cannot read Git archive"))
+      }
+      let _ = simplifile.delete_file(path)
+      read
+    }
+  }
+}
+
+/// A tar archive of no members: two zero blocks, padded to tar's default
+/// ten-block record. GNU tar writes the same 10240 zero bytes for an empty
+/// member list, so the source digest of an action with no inputs is
+/// unchanged by writing the bytes natively.
+///
+/// ## Examples
+///
+/// ```gleam
+/// assert bit_array.byte_size(prepare.empty_archive()) == 10_240
+/// ```
+pub fn empty_archive() -> BitArray {
+  <<0:size(81_920)>>
 }

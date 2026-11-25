@@ -14,10 +14,27 @@ run(["swarm", S, C, E]) ->
     {Micros, ok} = timer:tc(fun() -> swarm(Seed, 1, Count, Events) end),
     io:format("swarm seed=~B schedules=~B events=~B seconds=~.3f schedules_per_second=~.1f~n",
         [Seed, Count, Events, Micros / 1000000, Count * 1000000 / max(1, Micros)]);
+run(["sweep", F, C, E]) ->
+    First = number(F, 1, 2147483646),
+    Count = number(C, 1, 1000000),
+    Events = number(E, 1, 4096),
+    {Micros, Violations} = timer:tc(fun() -> queue_churn_dst:sweep(First, Count, Events) end),
+    io:format("sweep first=~B seeds=~B events=~B seconds=~.3f safety_violations=~B~n",
+        [First, Count, Events, Micros / 1000000, Violations]),
+    case Violations of
+        0 -> ok;
+        _ -> halt(1)
+    end;
+run(["growth", N]) ->
+    {Largest, Held, Reused} = queue_churn_dst:growth(number(N, 1, 100000)),
+    io:format("growth runs=~s largest_state_bytes=~B runs_held=~B proofs_reused=~B~n",
+        [N, Largest, Held, Reused]);
+run(["churn", S, E]) ->
+    queue_churn_dst:describe(number(S, 1, 2147483646), number(E, 1, 4096));
 run(["replay", S, E]) ->
     io:format("~tp~n", [queue_dst:replay_seed(number(S, 1, 2147483646), number(E, 1, 4096))]);
 run(["ops", Mask | Ops]) when length(Ops) =< 4096 ->
-    io:format("~tp~n", [queue_dst:replay(number(Mask, 0, 127), [number(Op, 0, 255) || Op <- Ops])]);
+    io:format("~tp~n", [queue_dst:replay(number(Mask, 0, 1023), [number(Op, 0, 255) || Op <- Ops])]);
 run(["guided", S, C]) ->
     Seed = number(S, 1, 2147483646),
     Count = number(C, 1, 10000),
@@ -36,7 +53,7 @@ run(["guided", S, C]) ->
         [Seed, Count, length(Corpus), length(Seen), Micros / 1000000]);
 run(_) ->
     io:format(standard_error,
-        "Usage: scripts/queue-dst.sh swarm SEED COUNT EVENTS | replay SEED EVENTS | ops MASK [BYTE ...] | guided SEED COUNT~n", []),
+        "Usage: scripts/queue-dst.sh swarm SEED COUNT EVENTS | replay SEED EVENTS | ops MASK [BYTE ...] | guided SEED COUNT | sweep FIRST COUNT EVENTS | churn SEED EVENTS | growth RUNS~n", []),
     halt(2).
 
 number(Text, Low, High) ->
@@ -99,7 +116,7 @@ mutate({Mask, Ops}, Seed) ->
     Byte = next(Seed) rem 256,
     {Left, Right} = lists:split(Seed rem (length(Ops) + 1), Ops),
     case {Seed rem 4, Right, length(Ops) < 192} of
-        {0, _, _} -> {Byte rem 128, Ops};
+        {0, _, _} -> {Byte rem 1024, Ops};
         {1, [_ | Rest], _} -> {Mask, Left ++ Rest};
         {2, _, true} -> {Mask, Left ++ [Byte | Right]};
         {_, [_ | Rest], _} -> {Mask, Left ++ [Byte | Rest]};
@@ -123,7 +140,7 @@ load_corpus(Path) ->
 
 default_corpus() -> [{127, [0, 2, 34, 4, 9, 11, 13]}].
 
-valid_input({Mask, Ops}) when is_integer(Mask), Mask >= 0, Mask =< 127, is_list(Ops), length(Ops) =< 192 ->
+valid_input({Mask, Ops}) when is_integer(Mask), Mask >= 0, Mask =< 1023, is_list(Ops), length(Ops) =< 192 ->
     lists:all(fun(Op) -> is_integer(Op) andalso Op >= 0 andalso Op =< 255 end, Ops);
 valid_input(_) -> false.
 

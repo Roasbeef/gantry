@@ -1,9 +1,26 @@
 //// GitHub supplies pull request metadata. Git itself supplies and guards
 //// the refs, so a change to the base between validation and push still
 //// fails at the receiving server.
+////
+//// ## Flow
+////
+//// Admission calls `read_pull` for a REST response and `validate_submission`
+//// to check it. Landing calls `read_landing_pull` for the same pull over
+//// GraphQL, because GraphQL reports the merge state authoritatively, and
+//// `landing_verdict` judges it. Both
+//// decoders produce one `Pull`, so state and mergeability have one
+//// spelling in the controller. Network and decoding failures are `Fault`s
+//// that leave a landing intent open. A policy refusal is a `Verdict`, so
+//// the submit reconciler can resolve the intent instead of retrying it.
+////
+//// | `landing_verdict` input | Result |
+//// | --- | --- |
+//// | closed or merged pull, moved head, other base, narrowed branch policy, draft, or a settled merge state other than clean | `Denied` |
+//// | merge state GitHub has not computed yet | `Undetermined` |
+//// | open, current, non-draft, clean, and allowed | `Permitted` |
 
 import gantry/config.{type GitHubTarget, DefaultBranch, RegisteredBranch}
-import gantry_core/job.{type Request}
+import gantry/fault.{type Fault}
 import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
@@ -13,15 +30,11 @@ import gleam/json
 import gleam/result
 import gleam/string
 
-/// The pull state the queue needs before preparing or submitting a candidate.
-pub type Pull {
-  Pull(
-    branch: String,
-    default_branch: String,
-    head: String,
-    state: String,
-    readiness: Readiness,
-  )
+/// Whether the pull is still a candidate for merging.
+pub type PullState {
+  Open
+  Closed
+  Merged
 }
 
 /// Draft PRs can still receive build-only jobs.
@@ -30,21 +43,61 @@ pub type Readiness {
   Ready
 }
 
+/// GitHub's merge state for a pull against its base.
+pub type Mergeability {
+  Clean
+  Behind
+  Blocked
+  Dirty
+  DraftState
+  HasHooks
+  Unstable
+
+  /// GitHub has not computed the state yet, or the API omitted it.
+  Undetermined
+}
+
+/// The pull state the queue needs before preparing or submitting a candidate.
+pub type Pull {
+  Pull(
+    base: String,
+    default_branch: String,
+    head: String,
+    state: PullState,
+    readiness: Readiness,
+    mergeability: Mergeability,
+  )
+}
+
+/// The outcome of judging an observed pull against a landing intent.
+pub type Verdict {
+  Permitted
+  Denied(reason: String)
+
+  /// The merge state is not computed yet, so no decision is possible.
+  Pending
+}
+
 /// Read one pull request over verified HTTPS without following redirects.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // github.read_pull(token, request)
+/// // github.read_pull(token, "owner/project", 7)
 /// ```
-pub fn read_pull(token: String, pull: Request) -> Result(Pull, String) {
+pub fn read_pull(
+  token: String,
+  repository: String,
+  number: Int,
+) -> Result(Pull, Fault) {
   let url =
     "https://api.github.com/repos/"
-    <> pull.repository
+    <> repository
     <> "/pulls/"
-    <> job.pull_number(pull)
+    <> int.to_string(number)
   use req <- result.try(
-    request.to(url) |> result.replace_error("invalid GitHub API URL"),
+    request.to(url)
+    |> result.replace_error(fault.Internal("invalid GitHub API URL")),
   )
   let req =
     req
@@ -52,41 +105,135 @@ pub fn read_pull(token: String, pull: Request) -> Result(Pull, String) {
     |> request.set_header("accept", "application/vnd.github+json")
     |> request.set_header("user-agent", "gantry")
   use response <- result.try(
-    httpc.send(req) |> result.replace_error("GitHub API request failed"),
+    httpc.send(req)
+    |> result.replace_error(fault.Unavailable("GitHub API request failed")),
   )
 
   // Error response bodies may contain server-provided detail. Report the
   // status without copying an arbitrary response into the queue log.
   case response.status {
     200 ->
-      json.parse(response.body, pull_decoder())
-      |> result.replace_error("invalid GitHub pull response")
+      json.parse(response.body, rest_decoder())
+      |> result.replace_error(fault.Unavailable("invalid GitHub pull response"))
+    404 -> Error(fault.NotFound("pull request not found"))
     status ->
-      Error("GitHub pull request returned HTTP " <> int.to_string(status))
+      Error(fault.Unavailable(
+        "GitHub pull request returned HTTP " <> int.to_string(status),
+      ))
   }
 }
 
-/// Decode the handful of GitHub fields that govern admission and submission.
+/// Decode a REST pull response.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // json.parse(body, pull_decoder())
+/// // github.parse_rest(body)
 /// ```
-fn pull_decoder() -> decode.Decoder(Pull) {
+pub fn parse_rest(body: String) -> Result(Pull, Nil) {
+  json.parse(body, rest_decoder()) |> result.replace_error(Nil)
+}
+
+/// Decode a GraphQL pull response.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // github.parse_graphql(body)
+/// ```
+pub fn parse_graphql(body: String) -> Result(Pull, Nil) {
+  json.parse(body, graphql_decoder()) |> result.replace_error(Nil)
+}
+
+/// Decode the REST fields that govern admission.
+fn rest_decoder() -> decode.Decoder(Pull) {
   use head <- decode.subfield(["head", "sha"], decode.string)
-  use branch <- decode.subfield(["base", "ref"], decode.string)
+  use base <- decode.subfield(["base", "ref"], decode.string)
   use default_branch <- decode.subfield(
     ["base", "repo", "default_branch"],
     decode.string,
   )
-  use state <- decode.field("state", decode.string)
-  use draft <- decode.field("draft", decode.bool)
+  use state <- decode.field("state", state_decoder())
+  use draft <- decode.field("draft", readiness_decoder())
+  use mergeability <- decode.optional_field(
+    "mergeable_state",
+    Undetermined,
+    mergeability_decoder(),
+  )
+  decode.success(Pull(
+    base:,
+    default_branch:,
+    head:,
+    state:,
+    readiness: draft,
+    mergeability:,
+  ))
+}
 
-  // Convert the wire boolean at the boundary.
+/// Decode the GraphQL fields that govern landing.
+fn graphql_decoder() -> decode.Decoder(Pull) {
+  let pull = fn(field) { ["data", "repository", "pullRequest", field] }
+  use default_branch <- decode.subfield(
+    ["data", "repository", "defaultBranchRef", "name"],
+    decode.string,
+  )
+  use head <- decode.subfield(pull("headRefOid"), decode.string)
+  use base <- decode.subfield(pull("baseRefName"), decode.string)
+  use state <- decode.subfield(pull("state"), state_decoder())
+  use draft <- decode.subfield(pull("isDraft"), readiness_decoder())
+  use mergeability <- decode.subfield(
+    pull("mergeStateStatus"),
+    mergeability_decoder(),
+  )
+  decode.success(Pull(
+    base:,
+    default_branch:,
+    head:,
+    state:,
+    readiness: draft,
+    mergeability:,
+  ))
+}
+
+/// REST spells states in lowercase and GraphQL in uppercase.
+fn state_decoder() -> decode.Decoder(PullState) {
+  use text <- decode.then(decode.string)
+
+  // An unknown state is a decoding failure and never a guess.
+  case string.lowercase(text) {
+    "open" -> decode.success(Open)
+    "closed" -> decode.success(Closed)
+    "merged" -> decode.success(Merged)
+    _ -> decode.failure(Open, "PullState")
+  }
+}
+
+/// Convert the wire boolean into a domain variant at the boundary.
+fn readiness_decoder() -> decode.Decoder(Readiness) {
+  use draft <- decode.then(decode.bool)
+
+  // The wire boolean becomes a named state.
   case draft {
-    True -> decode.success(Pull(branch, default_branch, head, state, Draft))
-    False -> decode.success(Pull(branch, default_branch, head, state, Ready))
+    True -> decode.success(Draft)
+    False -> decode.success(Ready)
+  }
+}
+
+/// REST spells merge states in lowercase and GraphQL in uppercase.
+fn mergeability_decoder() -> decode.Decoder(Mergeability) {
+  use text <- decode.then(decode.string)
+
+  // An unknown merge state is a decoding failure and never a guess.
+  case string.lowercase(text) {
+    "clean" -> decode.success(Clean)
+    "behind" -> decode.success(Behind)
+    "blocked" -> decode.success(Blocked)
+    "dirty" -> decode.success(Dirty)
+    "draft" -> decode.success(DraftState)
+    "has_hooks" -> decode.success(HasHooks)
+    "unstable" -> decode.success(Unstable)
+    "unknown" -> decode.success(Undetermined)
+    _ -> decode.failure(Undetermined, "Mergeability")
   }
 }
 
@@ -95,52 +242,104 @@ fn pull_decoder() -> decode.Decoder(Pull) {
 /// ## Examples
 ///
 /// ```gleam
-/// // github.validate_pull(pull, request, "main")
+/// // github.validate_submission(pull, pinned_head, "main")
 /// ```
-pub fn validate_pull(
+pub fn validate_submission(
   pull: Pull,
-  request: Request,
+  head: String,
   branch: String,
-) -> Result(String, String) {
+) -> Result(String, Fault) {
   case
-    pull.state == "open",
-    pull.branch == branch,
-    pull.head == request.head,
-    request.mode,
+    pull.state == Open,
+    pull.base == branch,
+    pull.head == head,
     pull.readiness
   {
-    False, _, _, _, _ -> Error("pull request is closed")
-    True, False, _, _, _ ->
-      Error("pull request does not target the allowed branch")
-    True, True, False, _, _ ->
-      Error("pull request head changed; enqueue the current revision")
-    True, True, True, job.Submit, Draft ->
-      Error("draft pull requests can only be built")
-    True, True, True, job.Submit, Ready | True, True, True, job.Build, _ ->
-      Ok(pull.branch)
+    False, _, _, _ -> Error(fault.Invalid("pull request is closed"))
+    True, False, _, _ ->
+      Error(fault.Invalid("pull request does not target the allowed branch"))
+    True, True, False, _ ->
+      Error(fault.Invalid(
+        "pull request head changed; enqueue the current revision",
+      ))
+    True, True, True, Draft ->
+      Error(fault.Invalid("draft pull requests can only be built"))
+    True, True, True, Ready -> Ok(pull.base)
   }
 }
 
-/// Ask GitHub to evaluate the source pull against its configured branch
-/// policy. Unknown or blocked decisions leave the landing intent unresolved.
+/// Judge an observed pull against the branch, head and target policy that a
+/// landing intent was tested under. A pull the policy refuses is `Denied`,
+/// and one whose merge state GitHub is still computing is `Pending`.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // github.can_land(token, "owner/project", "main", DefaultBranch, 7, pinned_head)
+/// // github.landing_verdict(pull, "main", pinned_head, DefaultBranch)
 /// ```
-pub fn can_land(
+pub fn landing_verdict(
+  pull: Pull,
+  branch: String,
+  head: String,
+  target: GitHubTarget,
+) -> Verdict {
+  // A policy change can narrow the authority of an outstanding intent.
+  let allowed = case target {
+    DefaultBranch -> branch == pull.default_branch
+    RegisteredBranch -> True
+  }
+
+  // Check the facts that cannot recover before the merge state.
+  case pull.state, pull.head == head, pull.base == branch, allowed {
+    Closed, _, _, _ | Merged, _, _, _ ->
+      Denied("pull request is no longer open")
+    Open, False, _, _ -> Denied("pull request head moved after testing")
+    Open, True, False, _ ->
+      Denied("pull request no longer targets the registered branch")
+    Open, True, True, False ->
+      Denied("registered branch is no longer the repository default")
+    Open, True, True, True ->
+      case pull.readiness, pull.mergeability {
+        Draft, _ -> Denied("pull request is a draft")
+        Ready, Clean -> Permitted
+        Ready, Undetermined -> Pending
+        Ready, state ->
+          Denied("GitHub merge state is " <> mergeability_name(state))
+      }
+  }
+}
+
+/// The GitHub spelling of a merge state, for operator-facing reasons.
+fn mergeability_name(state: Mergeability) -> String {
+  case state {
+    Clean -> "clean"
+    Behind -> "behind"
+    Blocked -> "blocked"
+    Dirty -> "dirty"
+    DraftState -> "draft"
+    HasHooks -> "has_hooks"
+    Unstable -> "unstable"
+    Undetermined -> "unknown"
+  }
+}
+
+/// Read the pull's current state over GraphQL, where GitHub reports its
+/// merge state authoritatively.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // github.read_landing_pull(token, "owner/project", 7)
+/// ```
+pub fn read_landing_pull(
   token: String,
   repo: String,
-  branch: String,
-  target: GitHubTarget,
   number: Int,
-  head: String,
-) -> Result(Nil, String) {
+) -> Result(Pull, Fault) {
   // GraphQL takes the owner and repository as separate variables.
   use #(owner, name) <- result.try(case string.split(repo, "/") {
     [owner, name] -> Ok(#(owner, name))
-    _ -> Error("invalid GitHub repository")
+    _ -> Error(fault.Internal("invalid GitHub repository"))
   })
 
   let variables =
@@ -163,7 +362,7 @@ pub fn can_land(
 
   use req <- result.try(
     request.to("https://api.github.com/graphql")
-    |> result.replace_error("invalid GitHub API URL"),
+    |> result.replace_error(fault.Internal("invalid GitHub API URL")),
   )
   let req =
     req
@@ -173,48 +372,19 @@ pub fn can_land(
     |> request.set_header("content-type", "application/json")
     |> request.set_body(body)
   use response <- result.try(
-    httpc.send(req) |> result.replace_error("GitHub policy request failed"),
+    httpc.send(req)
+    |> result.replace_error(fault.Unavailable("GitHub policy request failed")),
   )
 
   // Only a successful HTTP exchange can convey a merge policy observation.
   use Nil <- result.try(case response.status {
     200 -> Ok(Nil)
-    status -> Error("GitHub policy returned HTTP " <> int.to_string(status))
+    status ->
+      Error(fault.Unavailable(
+        "GitHub policy returned HTTP " <> int.to_string(status),
+      ))
   })
 
-  let decoder = {
-    use oid <- decode.field("headRefOid", decode.string)
-    use base <- decode.field("baseRefName", decode.string)
-    use state <- decode.field("state", decode.string)
-    use draft <- decode.field("isDraft", decode.bool)
-    use status <- decode.field("mergeStateStatus", decode.string)
-    decode.success(#(oid, base, state, draft, status))
-  }
-  let envelope = {
-    use default_branch <- decode.subfield(
-      ["data", "repository", "defaultBranchRef", "name"],
-      decode.string,
-    )
-    use pull <- decode.subfield(["data", "repository", "pullRequest"], decoder)
-    decode.success(#(default_branch, pull))
-  }
-  use #(default_branch, observed) <- result.try(
-    json.parse(response.body, envelope)
-    |> result.replace_error("GitHub policy unavailable"),
-  )
-
-  // A policy change can narrow the authority of an outstanding intent.
-  let allowed = case target {
-    DefaultBranch -> branch == default_branch
-    RegisteredBranch -> True
-  }
-
-  // Bind GitHub’s decision to the same pull state and tested head.
-  case allowed && observed == #(head, branch, "OPEN", False, "CLEAN") {
-    True -> Ok(Nil)
-    False ->
-      Error(
-        "source pull revision or GitHub merge policy does not permit landing",
-      )
-  }
+  parse_graphql(response.body)
+  |> result.replace_error(fault.Unavailable("GitHub policy unavailable"))
 }

@@ -1,14 +1,32 @@
 //// Serve HTTP after the shared queue is online. Reconciliation runs
 //// independently so repository effects cannot hold up a worker.
+////
+//// ## Flow
+////
+//// `main` calls `start`, which loads configuration and opens the Khepri
+//// replica, which has its own OTP supervision under the Ra system. `start`
+//// then calls `supervise` to start one supervisor with two children, the
+//// HTTP listener and the submit reconciler. The children are independent, so
+//// the supervisor restarts only the one that crashes. Weft provides the
+//// reconciler's actor but has no supervisor of its own, so the tree uses the
+//// static supervisor from the OTP package, which accepts the child
+//// specifications of both Weft and Mist.
+////
+//// A child that crashes more than five times in a minute exceeds the
+//// supervisor's restart tolerance. The supervisor then exits, `main` sees
+//// it go down and stops the VM with status 1, and the service manager owns
+//// the restart.
 
-import gantry/config
+import gantry/config.{type Config}
 import gantry/http_api
 import gantry/internal/ffi_host
 import gantry/reconcile
 import gantry/store
 import gleam/erlang/process
-import gleam/io
+import gleam/otp/actor
+import gleam/otp/static_supervisor as supervisor
 import gleam/result
+import logging
 import mist
 
 /// Start the controller on its configured loopback port.
@@ -19,25 +37,48 @@ import mist
 /// // GANTRY_CONFIG=controller.toml gleam run
 /// ```
 pub fn main() -> Nil {
+  logging.configure()
+
   // Keep serving after startup or report the failed dependency to the supervisor.
   case start() {
-    Ok(Nil) -> process.sleep_forever()
+    Ok(tree) -> {
+      // Stopping with the supervisor makes a restart-intensity failure
+      // visible to the service manager instead of leaving a dead listener.
+      let monitor = process.monitor(tree)
+      process.new_selector()
+      |> process.select_specific_monitor(monitor, fn(_) { Nil })
+      |> process.selector_receive_forever
+      logging.log(logging.Critical, "controller supervisor stopped")
+      ffi_host.exit_failure()
+    }
     Error(reason) -> {
-      io.println_error(reason)
+      logging.log(logging.Critical, reason)
       ffi_host.exit_failure()
     }
   }
 }
 
-/// Bring the queue and reconciler online before binding the loopback listener.
-fn start() -> Result(Nil, String) {
+/// Bring the queue online, then start the supervised listener and reconciler.
+fn start() -> Result(process.Pid, String) {
   use cfg <- result.try(config.load())
   use Nil <- result.try(store.boot(cfg.data, cfg.seed))
-  use Nil <- result.try(reconcile.start(cfg))
-  mist.new(fn(req) { http_api.handle(cfg, req) })
-  |> mist.bind("127.0.0.1")
-  |> mist.port(cfg.port)
-  |> mist.start
-  |> result.replace_error("cannot start HTTP listener")
-  |> result.map(fn(_) { Nil })
+  supervise(cfg)
+  |> result.map(fn(started) { started.pid })
+  |> result.map_error(fn(_) { "cannot start the controller supervisor" })
+}
+
+/// One supervisor over the listener and the reconciler. Each restarts alone.
+fn supervise(
+  cfg: Config,
+) -> Result(actor.Started(supervisor.Supervisor), actor.StartError) {
+  let listener =
+    mist.new(fn(req) { http_api.handle(cfg, req) })
+    |> mist.bind("127.0.0.1")
+    |> mist.port(cfg.port)
+
+  supervisor.new(supervisor.OneForOne)
+  |> supervisor.restart_tolerance(intensity: 5, period: 60)
+  |> supervisor.add(reconcile.supervised(cfg))
+  |> supervisor.add(mist.supervised(listener))
+  |> supervisor.start
 }

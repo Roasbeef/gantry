@@ -25,6 +25,8 @@ cp -a packages/server/build/erlang-shipment/. "$stage/libs/"
 rm -f "$stage/libs/entrypoint.sh" "$stage/libs/entrypoint.ps1"
 rm -rf -- "$stage/libs/gantry/priv"
 install -D -m 0644 packages/server/priv/worker-schema.sql "$stage/libs/gantry/priv/worker-schema.sql"
+install -D -m 0644 packages/server/priv/gantry-schema.json "$stage/libs/gantry/priv/gantry-schema.json"
+install -D -m 0644 skills/gantry/SKILL.md "$stage/libs/gantry/priv/skill/SKILL.md"
 cat > "$stage/rebar.config" <<CONFIG
 {erl_opts, []}.
 {deps, []}.
@@ -46,24 +48,28 @@ erts_dir="${erts[0]#"$dist/"}"
 find "$dist/bin" -maxdepth 1 -type f ! -name '*.boot' -delete
 rm -f "$dist/releases/$version/vm.args" "$dist/releases/$version/sys.config"
 [[ -f "$dist/releases/$version/start.boot" ]]
-for launcher in gantryd gantry-worker; do
-  module=gantry
-  [[ "$launcher" != gantry-worker ]] || module=gantry@worker
-  cat > "$dist/bin/$launcher" <<BOOT
-#!/usr/bin/env bash
-set -euo pipefail
-root=\$(CDPATH= cd -- "\$(dirname -- "\$0")/.." && pwd -P)
-if [[ "\${1:-}" == --version ]]; then
-  printf '%s\\n' 'Gantry $version ($commit)'
-  exit 0
-fi
-exec "\$root/$erts_dir" -noshell -boot "\$root/releases/$version/start" -s '$module' main "\$@"
-BOOT
+for launcher in gantryd gantry-worker gantry; do
+  case $launcher in
+    gantryd) module=gantry ;;
+    gantry-worker) module=gantry@worker ;;
+    gantry) module=gantry@cli ;;
+  esac
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+      'root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)'
+    # The CLI reads its arguments after -extra and serves --version itself.
+    # Its +Bd lets Ctrl-C end the VM instead of opening the BREAK menu.
+    flags=
+    if [[ $launcher != gantry ]]; then
+      printf '%s\n' "if [[ \"\${1:-}\" == --version ]]; then printf '%s\\n' 'Gantry $version ($commit)'; exit 0; fi"
+    else
+      flags='+Bd '
+    fi
+    printf '%s\n' "exec \"\$root/$erts_dir\" $flags-noshell -boot \"\$root/releases/$version/start\" -s '$module' main -extra \"\$@\""
+  } > "$dist/bin/$launcher"
   chmod +x "$dist/bin/$launcher"
 done
-install -m 0755 scripts/gantry "$dist/bin/gantry"
-install -D -m 0644 scripts/gantry-schema.json "$dist/share/gantry/cli-schema.json"
-install -D -m 0644 scripts/gantry-onboarding "$dist/share/gantry/gantry-onboarding"
+install -D -m 0644 packages/server/priv/gantry-schema.json "$dist/share/gantry/cli-schema.json"
 install -D -m 0644 skills/gantry/SKILL.md "$dist/share/gantry/skill/SKILL.md"
 printf 'Gantry %s (%s)\n' "$version" "$commit" > "$dist/releases/gantry-version"
 chmod -R u+rwX,go+rX "$dist"

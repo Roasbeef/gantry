@@ -1,8 +1,42 @@
 //// The operator fixes repository, ref and toolchain authority. Agents
 //// select registered work within that policy.
+////
+//// ## Worker credentials
+////
+//// Each worker has its own token, and `controller.toml` lists the worker's
+//// ID with the SHA-256 digest of that token. The controller never stores a
+//// worker token. A request's bearer token selects the worker identity
+//// through `worker_for`, and the API rejects a body that names any other
+//// worker. Agent and submit tokens stay role tokens in the environment.
+////
+//// ```toml
+//// [[worker]]
+//// id = "linux-01"
+//// token_sha256 = "<sha256 of the token, as 64 lowercase hex digits>"
+//// ```
+////
+//// A configuration without any `[[worker]]` entry is the earlier format,
+//// where every worker shared `GANTRY_WORKER_TOKEN`. It fails to load.
+////
+//// ## Retention
+////
+//// The queue snapshot has a 4 MiB ceiling, so terminal runs and remembered
+//// proofs are bounded. The optional table sets the bounds, and a run that
+//// is not terminal is never dropped.
+////
+//// ```toml
+//// [retention]
+//// keep_runs = 200     # terminal runs kept for status (default 200)
+//// keep_proofs = 1000  # proofs kept for cache reuse (default 1000)
+//// ```
 
 import envoy
+import gantry/blobs
 import gantry_core/job
+import gantry_core/queue
+import gantry_core/request
+import gleam/bit_array
+import gleam/crypto
 import gleam/dict.{type Dict}
 import gleam/dynamic/decode
 import gleam/list
@@ -35,6 +69,11 @@ pub type Repository {
   )
 }
 
+/// One registered worker: its identity and the digest of its token.
+pub type Worker {
+  Worker(id: String, token_sha256: String)
+}
+
 /// Controller storage, listener and operator-registered projects.
 pub type Config {
   Config(
@@ -43,12 +82,23 @@ pub type Config {
     port: Int,
     seed: String,
     repositories: Dict(String, Repository),
+    workers: List(Worker),
+    retention: queue.Retention,
     agent_token: String,
-    worker_token: String,
     submit_token: String,
     github_token: String,
   )
 }
+
+/// The role credentials and GitHub token read from the environment.
+pub type Secrets {
+  Secrets(agent: String, submit: String, github: String)
+}
+
+/// The failure to report when a configuration uses the earlier shared worker
+/// token.
+const legacy_format =
+  "controller.toml must list each worker as [[worker]] with id and token_sha256. The shared GANTRY_WORKER_TOKEN is no longer accepted. Hash each worker's token with sha256 and see docs/running.md"
 
 /// Read configuration and role credentials.
 ///
@@ -60,42 +110,82 @@ pub type Config {
 pub fn load() -> Result(Config, String) {
   use path <- result.try(env("GANTRY_CONFIG"))
   use agent <- result.try(secret("GANTRY_TOKEN"))
-  use worker <- result.try(secret("GANTRY_WORKER_TOKEN"))
   use submit <- result.try(secret("GANTRY_SUBMIT_TOKEN"))
-
   use contents <- result.try(
     simplifile.read(path) |> result.replace_error("cannot read GANTRY_CONFIG"),
   )
+  let github = envoy.get("GH_TOKEN") |> result.unwrap("")
+  parse(contents, Secrets(agent, submit, github))
+}
+
+/// Decode a configuration document and check it against the role secrets.
+///
+/// ## Examples
+///
+/// ```gleam
+/// assert config.parse("", secrets) == Error("invalid configuration TOML")
+/// ```
+pub fn parse(contents: String, secrets: Secrets) -> Result(Config, String) {
   use value <- result.try(
     tom.parse_to_dynamic(contents)
     |> result.replace_error("invalid configuration TOML"),
   )
-  use #(data, blobs, port, seed, projects) <- result.try(
+  use #(data, blobs, port, seed, projects, workers, retention) <- result.try(
     decode.run(value, config_decoder())
     |> result.replace_error("invalid controller configuration"),
   )
   use repositories <- result.try(list.try_map(projects, validate_repository))
-
-  use Nil <- result.try(validate_controller(
-    data,
-    blobs,
-    port,
-    agent,
-    worker,
-    submit,
-  ))
-  let github = envoy.get("GH_TOKEN") |> result.unwrap("")
+  use workers <- result.try(validate_workers(workers, secrets))
+  use retention <- result.try(validate_retention(retention))
+  use Nil <- result.try(validate_controller(data, blobs, port, secrets))
   Ok(Config(
     data,
     blobs,
     port,
     seed,
     dict.from_list(repositories),
-    agent,
-    worker,
-    submit,
-    github,
+    workers,
+    retention,
+    secrets.agent,
+    secrets.submit,
+    secrets.github,
   ))
+}
+
+/// The SHA-256 of a worker token, as the 64 lowercase hex digits that
+/// `controller.toml` records.
+///
+/// ## Examples
+///
+/// ```gleam
+/// assert string.length(config.token_digest("secret")) == 64
+/// ```
+pub fn token_digest(token: String) -> String {
+  blobs.digest(bit_array.from_string(token))
+}
+
+/// The worker whose registered token digest matches a presented bearer
+/// token. Every entry is compared, in constant time, so the time taken does
+/// not reveal how many digests matched or where.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // config.worker_for(cfg, "bearer-token") == Ok("linux-01")
+/// ```
+pub fn worker_for(cfg: Config, token: String) -> Result(String, Nil) {
+  let presented = bit_array.from_string(token_digest(token))
+  list.fold(cfg.workers, Error(Nil), fn(found, worker) {
+    case
+      crypto.secure_compare(
+        presented,
+        bit_array.from_string(worker.token_sha256),
+      )
+    {
+      True -> Ok(worker.id)
+      False -> found
+    }
+  })
 }
 
 /// Read a required runtime setting.
@@ -121,28 +211,18 @@ fn secret(key: String) -> Result(String, String) {
 }
 
 /// Hold credentials and writable roots to the controller's local policy.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // validate_controller(data, blobs, port, agent, worker, submit)
-/// ```
 fn validate_controller(
   data: String,
   blobs: String,
   port: Int,
-  agent: String,
-  worker: String,
-  submit: String,
+  secrets: Secrets,
 ) -> Result(Nil, String) {
   case
     string.starts_with(data, "/")
     && string.starts_with(blobs, "/")
     && port > 0
     && port <= 65_535
-    && agent != worker
-    && submit != agent
-    && submit != worker
+    && secrets.submit != secrets.agent
   {
     True -> Ok(Nil)
     False ->
@@ -152,13 +232,54 @@ fn validate_controller(
   }
 }
 
+/// Check the worker table: at least one worker, valid unique identifiers,
+/// valid unique digests, and no digest that is also a role token's.
+fn validate_workers(
+  rows: List(#(String, String)),
+  secrets: Secrets,
+) -> Result(List(Worker), String) {
+  let workers = list.map(rows, fn(row) { Worker(row.0, row.1) })
+  let ids = list.map(workers, fn(worker) { worker.id })
+  let digests = list.map(workers, fn(worker) { worker.token_sha256 })
+  let roles = [token_digest(secrets.agent), token_digest(secrets.submit)]
+
+  // No entry at all is the earlier shared-token format.
+  case workers {
+    [] -> Error(legacy_format)
+    _ ->
+      case
+        list.all(ids, request.valid_id)
+        && list.all(digests, blobs.valid)
+        && list.unique(ids) == ids
+        && list.unique(digests) == digests
+        && !list.any(roles, list.contains(digests, _))
+      {
+        True -> Ok(workers)
+        False ->
+          Error(
+            "each [[worker]] needs a unique id and a unique token_sha256 of 64 lowercase hex digits that is not a role token's digest",
+          )
+      }
+  }
+}
+
+/// Hold the bounds to a range that keeps the snapshot under its ceiling. A
+/// run carries a few kilobytes and a proof under one, so these limits stay
+/// far below 4 MiB with the defaults and allow generous operator choices.
+fn validate_retention(bounds: #(Int, Int)) -> Result(queue.Retention, String) {
+  let #(runs, proofs) = bounds
+
+  // Zero would drop every finished run and break status and cache reuse.
+  case runs >= 1 && runs <= 1000 && proofs >= 1 && proofs <= 5000 {
+    True -> Ok(queue.Retention(runs, proofs))
+    False ->
+      Error(
+        "retention needs keep_runs from 1 to 1000 and keep_proofs from 1 to 5000",
+      )
+  }
+}
+
 /// Describe the configuration and its registered repositories.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // decode.run(toml, config_decoder())
-/// ```
 fn config_decoder() {
   let project = {
     use name <- decode.field("name", decode.string)
@@ -175,13 +296,24 @@ fn config_decoder() {
     )
     decode.success(#(name, branch, target, pool, image, local, github_target))
   }
+  let worker = {
+    use id <- decode.field("id", decode.string)
+    use digest <- decode.field("token_sha256", decode.string)
+    decode.success(#(id, digest))
+  }
   use data <- decode.field("data_dir", decode.string)
   use blobs <- decode.field("blob_dir", decode.string)
   use port <- decode.optional_field("port", 4737, decode.int)
   use seed <- decode.optional_field("seed", "", decode.string)
 
   use projects <- decode.field("repository", decode.list(project))
-  decode.success(#(data, blobs, port, seed, projects))
+  use workers <- decode.optional_field("worker", [], decode.list(worker))
+  use retention <- decode.optional_field("retention", #(200, 1000), {
+    use runs <- decode.optional_field("keep_runs", 200, decode.int)
+    use proofs <- decode.optional_field("keep_proofs", 1000, decode.int)
+    decode.success(#(runs, proofs))
+  })
+  decode.success(#(data, blobs, port, seed, projects, workers, retention))
 }
 
 /// Validate a Git remote and its pinned executor image.

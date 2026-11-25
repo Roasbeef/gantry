@@ -289,8 +289,24 @@
       "usage": "gantry init --local",
       "output": "json",
       "effect": "create or reopen the local profile and verify an uncached Docker build",
-      "options": ["--local", "--fields", "--output"],
-      "response_fields": ["status", "endpoint", "node", "worker_id", "pool", "run_id", "artifact", "profile", "services", "start", "client_env"]
+      "options": [
+        "--local",
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "status",
+        "endpoint",
+        "node",
+        "worker_id",
+        "pool",
+        "run_id",
+        "artifact",
+        "profile",
+        "services",
+        "start",
+        "client_env"
+      ]
     },
     "local": {
       "description": "Run the local controller and worker together in the foreground.",
@@ -303,10 +319,27 @@
       "description": "Prepare a single worker slot on a trusted HTTPS gateway and start it explicitly.",
       "usage": "gantry worker setup HTTPS_URL POOL [--token-stdin] | gantry worker start",
       "output": "json for setup, service logs for start",
-      "credential": ["GANTRY_WORKER_TOKEN", "--token-stdin", "saved worker profile"],
+      "credential": [
+        "GANTRY_WORKER_TOKEN",
+        "--token-stdin",
+        "saved worker profile"
+      ],
       "effect": "setup checks authenticated readiness without claiming work; start launches the worker",
-      "options": ["--token-stdin", "--fields", "--output"],
-      "response_fields": ["status", "endpoint", "pool", "worker_id", "profile", "journal", "worker", "start"]
+      "options": [
+        "--token-stdin",
+        "--fields",
+        "--output"
+      ],
+      "response_fields": [
+        "status",
+        "endpoint",
+        "pool",
+        "worker_id",
+        "profile",
+        "journal",
+        "worker",
+        "start"
+      ]
     },
     "describe": {
       "description": "Inspect command metadata without a controller or credentials.",
@@ -324,7 +357,7 @@
     },
     "--json": {
       "argument": "PAYLOAD",
-      "description": "Supply a full request object inline, or use - to read it from stdin. Use in place of positional arguments. jq parses the input before schema validation."
+      "description": "Supply a full request object inline, or use - to read it from stdin. Use in place of positional arguments. Unknown keys are rejected."
     },
     "--fields": {
       "argument": "PATHS",
@@ -360,12 +393,11 @@
   },
   "exit_codes": {
     "0": "Success, including a valid dry run.",
-    "1": "Local resource, transport, or service failure, watch deadline, or terminal failed or blocked run.",
-    "2": "Invalid command, arguments, request, or configuration.",
-    "3": "Missing credentials or HTTP 401/403.",
-    "4": "HTTP 404 or missing local profile.",
-    "5": "HTTP 429.",
-    "6": "HTTP 409 or a local profile conflict."
+    "1": "Local resource, transport, or service failure, an HTTP status without a more specific code, watch deadline, or terminal failed or blocked run.",
+    "2": "Invalid command, arguments, request, or configuration, or HTTP 400, 411, 413, or 422.",
+    "3": "Missing or invalid credentials, or HTTP 401/403.",
+    "4": "HTTP 404 or a missing local profile.",
+    "6": "HTTP 409, a local profile conflict, or a busy profile."
   },
   "$defs": {
     "id": {
@@ -465,7 +497,29 @@
         "name",
         "argv"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "examples": [
+        {
+          "name": "diagnostic",
+          "argv": [
+            "sh",
+            "-ec",
+            "echo fixture-ready"
+          ],
+          "inputs": [],
+          "outputs": [
+            "result.txt"
+          ]
+        },
+        {
+          "name": "check",
+          "argv": [
+            "make",
+            "check"
+          ],
+          "timeout": 600
+        }
+      ]
     },
     "build": {
       "type": "object",
@@ -499,7 +553,31 @@
         "revision",
         "target"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "examples": [
+        {
+          "id": "check-123",
+          "repo": "owner/project",
+          "revision": "0123456789abcdef0123456789abcdef01234567",
+          "target": "check"
+        },
+        {
+          "id": "adhoc-1",
+          "repo": "owner/project",
+          "revision": "0123456789abcdef0123456789abcdef01234567",
+          "target": "check",
+          "action": {
+            "name": "diagnostic",
+            "argv": [
+              "sh",
+              "-ec",
+              "echo ok"
+            ],
+            "inputs": [],
+            "outputs": []
+          }
+        }
+      ]
     },
     "submit": {
       "type": "object",
@@ -525,7 +603,17 @@
         "repo",
         "pulls"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "examples": [
+        {
+          "id": "group-12-13",
+          "repo": "owner/project",
+          "pulls": [
+            12,
+            13
+          ]
+        }
+      ]
     }
   }
 }

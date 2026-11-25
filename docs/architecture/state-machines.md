@@ -1,6 +1,15 @@
 # Pure decisions and durable effects
 
-**Status** · Proposed · 2026-11-21
+**Status** · Target design, partly built · written 2026-11-21, checked against the code 2026-11-24
+
+This page describes where the queue is meant to end up. It is not a
+description of the shipped code, which uses fewer states and has no resource
+reservations, quotas, priority, cancellation, or executor admission. Read
+[the runtime architecture](runtime.md) first for what is built, and the
+transition tables at the top of
+[`queue.gleam`](../../packages/core/src/gantry_core/queue.gleam) for the
+exact transitions. The [next section](#design-terms-and-the-code) maps the
+names used below to the types in the code.
 
 Gantry applies Loom's pure core and effect boundary to builds and Git
 submission. A Gleam state carries the evidence available at that phase.
@@ -15,6 +24,25 @@ commits intent before external work and records the result before
 advancing. Gantry adopts both boundaries.
 [Loom's pure execution relay](https://github.com/Roasbeef/loom/blob/9aa1383e620aff97aad4acfa3f1d91ce53642b50/packages/broker/src/broker/execution.gleam) ·
 [Loom durability design](https://github.com/Roasbeef/loom/blob/9aa1383e620aff97aad4acfa3f1d91ce53642b50/docs/loom-design.md#33-the-effect-sandwich)
+
+## Design terms and the code
+
+| Design term | Code today | Difference |
+| --- | --- | --- |
+| Action `Waiting` | `queue.Pending(previous_attempts)` | Not a separate state. `next_work` derives whether the prerequisites passed. |
+| Action `Ready` | none | Derived during `claim`, never stored. No execution class or resource requirements. |
+| Action `Leased`, `Running` | `queue.Active(lease)` | One state. No executor admission receipt or incarnation. |
+| Action `Cancelling` | none | Not built. There is no cancel route. |
+| Action `Succeeded` | `queue.Passed(proof)` and `queue.Reused(proof)` | Reuse is a separate step kind. A proof carries the key, output digests, and log. |
+| Action `Unsuccessful` | `queue.Failed(Reported or LeaseExpired, log)` and `queue.Skipped` | Typed reasons exist. `Skipped` marks actions stranded by a failure. A retry is a new run, except lease expiry, which retries up to three attempts. |
+| Attempt generation | `Lease.serial` and `Lease.attempt` | The serial is global and unique. The attempt counts per action. |
+| Lease renewal | none | A lease has a fixed deadline and is never renewed. `queue.expire` returns an action to `Pending` after it. |
+| Executor ledger | Worker journal (`worker/custody`) | One slot, one attempt, a start marker, and a recorded receipt. |
+| Submission `Queued` | `queue.Waiting` (pinned, not built) | The group holds no graph until its lane is free. |
+| Submission `Testing`, `Proven` | `queue.Queued(candidate)` | One state. `queue.landings` derives "every action passed" and moves it to `Landing`. |
+| Submission `Landing`, `Landed` | `queue.Landing`, `queue.Landed` | As designed. The intent is the `Landing` state itself. |
+| Submission `Stopped` | `queue.Blocked(candidate, reason)` and `queue.Unprepared(branch, members, reason)` | Blocked is a landing refused (`TargetAdvanced`, `PolicyDenied`). Unprepared is a group that could not become a candidate (`MemberMoved`, `Unmergeable`, `Refused`). A failed action leaves `Queued` and ends in phase `failed`. |
+| Effect interpreter `Push(IntentReceipt)` | `submit.reconcile` with an `Intent` | As designed. |
 
 ## The transition contract
 
@@ -53,8 +81,10 @@ or release resources.
 
 ## Action states
 
-This is a type sketch for the first protocol. The constructor modules
-will own opaque `ResolvedAction`, `AttemptLease`, and proof types.
+This is a type sketch of the target protocol, not the shipped states. The
+constructor modules would own opaque `ResolvedAction`, `AttemptLease`, and
+proof types. In the code, `Lease`, `Proof`, `Candidate`, `Intent`, and
+`Preparation` are opaque already.
 
 | State | Data it carries | Accepted transition |
 | --- | --- | --- |

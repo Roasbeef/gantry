@@ -9,3 +9,17 @@ branch = "main"
 target = "check"
 pool = "linux"
 image = "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
+
+# One entry per worker. token_sha256 is the SHA-256 of that worker's own
+# token, as 64 lowercase hex digits:
+#   printf '%s' "$token" | sha256sum | cut -d ' ' -f 1
+# The worker presents the token and sets GANTRY_WORKER_ID to this id.
+[[worker]]
+id = "linux-01"
+token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Optional bounds that keep the queue snapshot well under its 4 MiB ceiling.
+# Only finished runs are dropped, oldest first. These are the defaults.
+[retention]
+keep_runs = 200
+keep_proofs = 1000

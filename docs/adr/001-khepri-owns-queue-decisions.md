@@ -32,3 +32,22 @@ justifies the extra recovery boundary.
 
 [Beefstack council](https://github.com/Roasbeef/beefstack/blob/71134453b93d1f946203398ee8a8ebd739849e37/skills/council/SKILL.md) ·
 [Loom Khepri ownership](https://github.com/Roasbeef/loom/blob/9aa1383e620aff97aad4acfa3f1d91ce53642b50/docs/architecture/directory.md)
+
+## Addendum · 2026-11-24 · The benchmark meets the reconsideration trigger
+
+The decision above stands. The trigger it set has been met, though. The
+[controller load benchmark](../controller-load.md#measurements-on-the-gleam-benchmark)
+offered 100 repositories a steady rate of 50 ms actions on a four-vCPU host,
+and every cell at 25 actions per second either saturated or missed the one
+second p99 ready-to-dispatch target. The target in this record is four times
+that rate (100 actions per second). At 10 to 15 actions per second the drain
+kept pace, with a p99 of 57 to 110 ms. These runs predate the retention fix,
+so the retained-run cells overstate what a bounded snapshot costs.
+
+The ADR says to test an indexed, batched Khepri layout before moving to a
+queue-specific Ra state machine. That remains the next step. The measured
+causes point at it: every mutation rewrites and recompares the whole
+snapshot, CPU per operation grows with snapshot size, and CAS refusals grow
+with the number of polling slots. Compare the new layout against the current
+one on the same host and the same fixture, and keep the zero-duplicate,
+zero-stale-acceptance, and zero-overlap conditions above.

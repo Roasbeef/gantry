@@ -2,20 +2,26 @@
 
 import gantry/blobs
 import gantry/config.{type Config}
+import gantry/fault.{type Fault}
 import gantry/prepare
 import gantry/store
 import gantry_core/graph
-import gantry_core/job
 import gantry_core/protocol
 import gantry_core/queue
+import gantry_core/request
 import gleam/dict
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 import gleam/time/timestamp
+
+/// The typed failure every request operation reports. `http_api` maps its
+/// variant to an HTTP status.
+pub type Error =
+  Fault
 
 /// Choose whether to admit or inspect a graph.
 pub type BuildMode {
@@ -34,18 +40,18 @@ pub fn build(
   cfg: Config,
   body: String,
   mode: BuildMode,
-) -> Result(json.Json, String) {
-  use #(id, repository, revision, target, action) <- result.try(parse(
-    body,
-    build_decoder(),
-  ))
-  use Nil <- result.try(check_id(id))
-  use Nil <- result.try(require(
-    job.valid_sha(revision),
-    "expected a full lowercase Git SHA",
-  ))
-  use repo <- result.try(registered(cfg, repository))
-  use tasks <- result.try(prepare.build(cfg, repo, revision, target, id, action))
+) -> Result(json.Json, Error) {
+  use pinned <- result.try(
+    request.parse_build(body)
+    |> result.map_error(fn(rejection) {
+      fault.Invalid(request.message(rejection))
+    }),
+  )
+  use repo <- result.try(registered(cfg, request.build_repo(pinned)))
+  use tasks <- result.try(prepare.build(cfg, repo, pinned))
+  let id = request.build_id(pinned)
+  let revision = request.revision(pinned)
+  let target = request.target(pinned)
 
   // Planning returns the resolved graph. A run also records it in the queue.
   case mode {
@@ -63,38 +69,40 @@ pub fn build(
   }
 }
 
-/// Prepare an ordered group and commit its pinned graph.
+/// Pin an ordered group and admit it as waiting. The controller builds its
+/// candidate later, when the group heads a free lane.
 ///
 /// ## Examples
 ///
 /// ```gleam
 /// // api.group(config, body)
 /// ```
-pub fn group(cfg: Config, body: String) -> Result(json.Json, String) {
-  use #(id, repository, pulls) <- result.try(parse(body, group_decoder()))
-  use Nil <- result.try(check_id(id))
-  use Nil <- result.try(require(
-    pulls != []
-      && list.drop(pulls, 16) == []
-      && list.unique(pulls) == pulls
-      && list.all(pulls, fn(pull) { pull > 0 }),
-    "expected one to sixteen distinct PR numbers",
-  ))
-  use repo <- result.try(registered(cfg, repository))
+pub fn group(cfg: Config, body: String) -> Result(json.Json, Error) {
+  use group <- result.try(
+    request.parse_submit(body)
+    |> result.map_error(fn(rejection) {
+      fault.Invalid(request.message(rejection))
+    }),
+  )
+  use repo <- result.try(registered(cfg, request.submit_repo(group)))
   use saved <- result.try(store.read())
+  let id = request.submit_id(group)
+  let pulls = request.pulls(group)
 
-  // Replaying an admitted group keeps its original candidate and base.
+  // Replaying an admitted group keeps its original pins. A new group pins
+  // its members' heads and waits. It is built only when it heads a free
+  // lane, so a group queued behind another never builds on a stale base.
   case queue.find(saved, id) {
     Ok(run) -> replay_group(run, repo.name, pulls)
     Error(Nil) -> {
-      use #(candidate, tasks) <- result.try(prepare.group(cfg, repo, pulls))
+      use members <- result.try(prepare.pin(cfg, repo, group))
       admit(
         id,
         repo.name,
-        candidate.commit,
+        "",
         repo.target,
-        queue.Queued(candidate),
-        tasks,
+        queue.Waiting(repo.branch, members),
+        [],
       )
     }
   }
@@ -111,18 +119,25 @@ fn replay_group(
   run: queue.Run,
   repo: String,
   pulls: List(Int),
-) -> Result(json.Json, String) {
+) -> Result(json.Json, Error) {
   // A group retry must identify the same repository and ordered pull requests.
-  case run.submission {
-    queue.Build -> Error("run ID already has different inputs")
+  let members = case run.submission {
+    queue.Build -> Error(Nil)
+    queue.Waiting(_, members) | queue.Unprepared(_, members, _) -> Ok(members)
     queue.Queued(candidate)
     | queue.Landing(candidate)
     | queue.Landed(candidate)
-    | queue.Blocked(candidate, _) -> {
+    | queue.Blocked(candidate, _) -> Ok(queue.candidate_members(candidate))
+  }
+
+  // Only a run admitted as a group has members to compare.
+  case members {
+    Error(Nil) -> Error(fault.Conflict("run ID already has different inputs"))
+    Ok(members) -> {
       use Nil <- result.try(require(
         run.repo == repo
-          && list.map(candidate.members, fn(member) { member.pull }) == pulls,
-        "run ID already has different inputs",
+          && list.map(members, fn(member) { member.pull }) == pulls,
+        fault.Conflict("run ID already has different inputs"),
       ))
       Ok(protocol.encode_run(run))
     }
@@ -143,10 +158,11 @@ fn admit(
   target: String,
   intent: queue.Submission,
   tasks: List(queue.Task),
-) -> Result(json.Json, String) {
+) -> Result(json.Json, Error) {
   store.change(fn(state) {
     queue.admit(state, id, repo, revision, target, intent, tasks)
     |> result.map(fn(pair) { #(pair.0, protocol.encode_run(pair.1)) })
+    |> result.map_error(fault.Conflict)
   })
 }
 
@@ -157,24 +173,32 @@ fn admit(
 /// ```gleam
 /// // api.get("build-1")
 /// ```
-pub fn get(id: String) -> Result(json.Json, String) {
+pub fn get(id: String) -> Result(json.Json, Error) {
   use state <- result.try(store.read())
   queue.find(state, id)
-  |> result.replace_error("unknown run")
+  |> result.replace_error(fault.NotFound("unknown run"))
   |> result.map(protocol.encode_run)
 }
 
-/// Reissue the worker's lease or durably reserve one eligible action.
+/// Reissue the worker's lease or durably reserve one eligible action. The
+/// `identity` is the worker the request's credential names. A body that
+/// names any other worker is refused before the queue is read.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // api.claim("{...}")
+/// // api.claim("worker-1", "{...}")
 /// ```
-pub fn claim(body: String) -> Result(Option(json.Json), String) {
+pub fn claim(
+  identity: String,
+  body: String,
+) -> Result(Option(json.Json), Error) {
   use #(worker, pool) <- result.try(parse(body, claim_decoder()))
-  use Nil <- result.try(check_id(worker))
-  use Nil <- result.try(check_id(pool))
+  use Nil <- result.try(bound(identity, worker))
+  use Nil <- result.try(require(
+    request.valid_id(pool),
+    fault.Invalid("invalid identifier"),
+  ))
   let #(now, _) =
     timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
 
@@ -183,17 +207,24 @@ pub fn claim(body: String) -> Result(Option(json.Json), String) {
 }
 
 /// Accept a result only after the worker staged its log and output bytes.
+/// The `identity` is the worker the request's credential names, and the
+/// result must be reported under that same worker.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // api.finish(config, body)
+/// // api.finish(config, "worker-1", body)
 /// ```
-pub fn finish(cfg: Config, body: String) -> Result(json.Json, String) {
+pub fn finish(
+  cfg: Config,
+  identity: String,
+  body: String,
+) -> Result(json.Json, Error) {
   use #(run, action, worker, serial, completion) <- result.try(parse(
     body,
     completion_decoder(),
   ))
+  use Nil <- result.try(bound(identity, worker))
   use Nil <- result.try(verify_blobs(cfg.blobs, completion))
 
   store.change(fn(state) {
@@ -201,10 +232,14 @@ pub fn finish(cfg: Config, body: String) -> Result(json.Json, String) {
     |> result.map(fn(next) {
       #(next, json.object([#("accepted", json.bool(True))]))
     })
+    |> result.map_error(fault.Conflict)
   })
 }
 
-/// Read output and log bytes by identity before storing references.
+/// Check that every referenced object exists before storing references. An
+/// upload was verified against its digest when it was published, and objects
+/// are immutable, so a stat is enough. Re-hashing up to 64 MiB per object on
+/// every result would repeat that work.
 ///
 /// ## Examples
 ///
@@ -214,7 +249,7 @@ pub fn finish(cfg: Config, body: String) -> Result(json.Json, String) {
 fn verify_blobs(
   root: String,
   completion: queue.Completion,
-) -> Result(Nil, String) {
+) -> Result(Nil, Error) {
   // Verify every referenced log and each output that a successful report publishes.
   let ids = case completion {
     queue.Succeeded(files, log) -> [
@@ -224,56 +259,36 @@ fn verify_blobs(
     queue.Rejected(_, log) -> [log]
   }
 
-  list.try_map(ids, fn(id) { blobs.get(root, id) |> result.map(fn(_) { Nil }) })
-  |> result.map(fn(_) { Nil })
+  list.try_each(ids, blobs.require(root, _))
 }
 
 /// Resolve a repository against the operator's case-insensitive allowlist.
 fn registered(
   cfg: Config,
   repository: String,
-) -> Result(config.Repository, String) {
+) -> Result(config.Repository, Error) {
   dict.get(cfg.repositories, string.lowercase(repository))
-  |> result.replace_error("repository is not registered")
+  |> result.replace_error(fault.NotFound("repository is not registered"))
 }
 
-fn check_id(id: String) -> Result(Nil, String) {
+/// A worker may act only as the identity its credential registered.
+fn bound(identity: String, claimed: String) -> Result(Nil, Error) {
   require(
-    graph.valid_path(id) && !string.contains(id, "/"),
-    "invalid identifier",
+    identity == claimed,
+    fault.Forbidden("worker does not match the presented credential"),
   )
 }
 
-fn require(condition: Bool, reason: String) -> Result(Nil, String) {
+fn require(condition: Bool, otherwise: Error) -> Result(Nil, Error) {
   case condition {
     True -> Ok(Nil)
-    False -> Error(reason)
+    False -> Error(otherwise)
   }
 }
 
-fn parse(body: String, decoder: decode.Decoder(a)) -> Result(a, String) {
-  json.parse(body, decoder) |> result.replace_error("invalid request JSON")
-}
-
-/// Read the pinned revision, target and optional ad hoc action from a build request.
-fn build_decoder() {
-  use id <- decode.field("id", decode.string)
-  use repo <- decode.field("repo", decode.string)
-  use revision <- decode.field("revision", decode.string)
-  use target <- decode.field("target", decode.string)
-  use action <- decode.optional_field(
-    "action",
-    None,
-    decode.optional(graph.action_decoder()),
-  )
-  decode.success(#(id, repo, revision, target, action))
-}
-
-fn group_decoder() {
-  use id <- decode.field("id", decode.string)
-  use repo <- decode.field("repo", decode.string)
-  use pulls <- decode.field("pulls", decode.list(decode.int))
-  decode.success(#(id, repo, pulls))
+fn parse(body: String, decoder: decode.Decoder(a)) -> Result(a, Error) {
+  json.parse(body, decoder)
+  |> result.replace_error(fault.Invalid("invalid request JSON"))
 }
 
 fn claim_decoder() {

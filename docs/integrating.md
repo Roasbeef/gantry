@@ -1,9 +1,11 @@
 # Integrate a repository
 
-A project supplies a versioned `gantry.json`. The Gantry operator registers
-the repository, required target, and digest-pinned worker image. Agents can
-then build published commits through the API. A maintainer can submit an
-ordered group of PRs after the build-only path works.
+A project supplies a `gantry.json` at its root. The Gantry operator registers
+the repository, required target, worker pool, and digest-pinned worker image
+in `controller.toml`, so the image and pool belong to the repository, not to
+individual actions. Agents can then build published commits through the API.
+A maintainer can submit an ordered group of PRs after the build-only path
+works.
 
 ## Run an existing check on Gantry
 
@@ -67,6 +69,44 @@ phase and the digests of its declared outputs and retained log. Use
 `gantry blob <sha256>` to fetch the bytes. Keep the same run ID and inputs
 when retrying an admission after a lost response. [CLI and API](running.md#use-the-agent-and-submit-api)
 
+## Declare the graph
+
+The manifest has two keys, and the controller decodes nothing else
+(`graph.gleam`). The file has no version field, and unknown keys in it are
+ignored. Misspelled keys therefore do nothing, unlike in an API request,
+which rejects them.
+
+| Key | Meaning |
+| --- | --- |
+| `actions` | A list of actions, described below |
+| `targets` | An object from a target name to the list of actions that must pass |
+
+A target selects its listed actions and everything they reach through `deps`
+and `after`. The compiler rejects an empty target, an unknown action name, a
+duplicate name, a cycle, and two actions whose outputs overlap.
+
+| Action field | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | One path component, unique in the manifest |
+| `argv` | required | The command and arguments, executed directly with `exec "$@"` after the archives are extracted, so there is no shell expansion |
+| `inputs` | `["."]` | Repository paths staged into `/work`, or `"."` for the whole tree. `[]` stages only upstream outputs |
+| `outputs` | `[]` | Regular files the action must leave under `/work`. A passing action publishes exactly these |
+| `deps` | `[]` | Actions whose output files are staged here and become part of this action's cache key |
+| `after` | `[]` | Actions that must pass first, with no files passed and no effect on the key |
+| `timeout` | 300 | Wall seconds, 1 to 3600 |
+
+Paths are at most 240 bytes with components of letters, digits, `-`, `.`, and
+`_`, and none may be `.`, `..`, or `.git`. Everything else a project might
+want to say per action (the image, the pool, the CPU and memory it needs) is
+not in the manifest. Image and pool come from the repository entry, and a
+slot's resource limits come from the worker that runs it.
+
+Reuse works at the action. Two actions with the same recipe and the same
+upstream output bytes share a proof, even across commits. Narrow `inputs`
+and real `deps` edges are what turn an unrelated edit into a cache hit.
+How many actions run at once is the width of this graph. See
+[how work is spread](scheduling.md).
+
 ## Submit an ordered group
 
 Use a pilot repository where the configured controller identity can
@@ -125,7 +165,8 @@ verified both pinned heads as ancestors, downloaded the verified output,
 and replayed the workflow to check that each PR had one comment linking
 the final tested commit. GitHub marked both PRs merged. The pilot branch
 was unprotected. Rehearse your repository's branch rules and the
-controller's write identity as part of deployment.
+controller's write identity as part of deployment. Protected-branch rules are
+the one GitHub item still open ([status](architecture/runtime.md#status)).
 [Pilot run](https://github.com/Roasbeef/gantry/actions/runs/45058513752) ·
 [Pilot PR #6](https://github.com/Roasbeef/gantry/pull/6) ·
 [Pilot PR #7](https://github.com/Roasbeef/gantry/pull/7)
