@@ -544,8 +544,10 @@ fn run(
   // The runner killed the Docker client at the deadline. The container may
   // still be running, so remove it before reporting the timeout.
   case command.exit {
+    // The outcome is decided here, so a failed removal must not hide it. The
+    // recorded attempt's cleanup removes the container again.
     ffi_host.TimedOut -> {
-      use _ <- result.try(remove_container(name))
+      let _ = remove_container(name)
       Ok(queue.Rejected("action exceeded its wall deadline", log))
     }
     ffi_host.Exited(status) -> {
@@ -566,7 +568,7 @@ fn run(
             int.parse(number)
             |> result.replace_error(Unavailable("invalid Docker exit code")),
           )
-          use _ <- result.try(remove_container(name))
+          let _ = remove_container(name)
           complete(
             name,
             task.action.outputs,
@@ -643,7 +645,10 @@ fn start_action(
       let begin = fn() {
         let reply = process.new_subject()
         process.send(release, Launch(reply))
-        wait_for_client(reply, wall + client_grace)
+
+        // The deadline below is the backstop. This wait outlasts it, so a
+        // client that never returns always resolves as a timeout.
+        wait_for_client(reply, wall + client_grace + 5000)
       }
       let outcomes =
         weft.new_prepared([weft.prepared_leaf(owner:, cancel:, begin:)])
