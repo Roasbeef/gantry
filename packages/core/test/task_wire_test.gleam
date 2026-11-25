@@ -89,8 +89,10 @@ pub fn legacy_task_decodes_as_whole_blob_test() {
     |> string.replace("\"source_layout\":\"blob\",", "")
     |> string.replace("\"git\":null,", "")
     |> string.replace(",\"sandbox\":\"strict\"", "")
+  assert string.contains(encoded, "source_layout")
+  assert !string.contains(legacy, "source_layout")
+  assert !string.contains(legacy, "\"git\"")
   assert !string.contains(legacy, "sandbox")
-  assert legacy != encoded
   let assert Ok(assignment) = json.parse(legacy, protocol.assignment_decoder())
   assert assignment.task == task(queue.Whole(digest), None)
 }

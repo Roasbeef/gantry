@@ -30,7 +30,7 @@ pub fn churn_corpus_is_safe_live_and_exercised_test() {
       "reassignments", "expired_results_rejected", "returned_after_expiry",
       "poisoned_runs", "skipped_actions", "prepared_groups",
       "preparation_refusals", "policy_denials", "retained_dropped",
-      "oversized_reasons",
+      "oversized_reasons", "staging_refusals",
     ],
     fn(name) {
       assert count(name) > 0 as name

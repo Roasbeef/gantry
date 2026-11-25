@@ -1,6 +1,6 @@
 # Git metadata and chunked inputs
 
-Status: proposed, slices 4 and 5 of the [handoff](../next.md).
+Status: built, slices 4 and 5 of the [handoff](../next.md).
 
 Gantry stages each action a `git archive` tree under a 64 MiB blob limit.
 Probing Loom's CI lanes under the worker's exact flags found two causes this
@@ -79,14 +79,14 @@ worker needs them, and they are additive.
 
 `queue.Input` is one of:
 
-- `Blob(digest)`: the object is the archive, as today.
+- `Whole(digest)`: the object is the archive, as today.
 - `Chunked(digest)`: the object is a chunk manifest.
 
 `queue.Task.source` becomes an `Input`. On the wire the task keeps its
 `source` string (the blob or manifest digest) and adds `source_layout`,
 `"blob"` or `"chunks"`, defaulting to `"blob"`. An old snapshot and an old
-worker's claim response therefore read the same, and only a chunked source
-carries the new tag.
+worker's claim response therefore read the same. The encoder always writes
+`source_layout` and `git` (null when absent).
 
 ### The chunk manifest
 
@@ -99,10 +99,10 @@ A chunk manifest is a small JSON blob, decoded by `gantry_core/chunks`:
 
 The decoder is total and constructs only valid values. It refuses a version
 other than 1, an empty chunk list, a chunk of length zero or above
-`chunk_limit` (32 MiB), a chunk count above 64, a `total` that is not the sum
+`chunk_limit` (32 MiB), a chunk count above 16 (`max_chunks`), a `total` that is not the sum
 of the lengths, and a `total` above `input_limit` (512 MiB). Chunks are byte
 ranges of one tar stream, so the planner is pure arithmetic
-(`chunks.plan(total, chunk_limit)`), is testable on both targets, and never
+(`chunks.plan(total)`), is testable on both targets, and never
 splits a file's header from its data because the worker reassembles before
 anyone reads the tar.
 
@@ -135,9 +135,8 @@ reassembled digest. These all reject the action as an invalid input (a
 `Rejected` completion, like a failed digest today), and a missing chunk is
 the same transient `Offline` that a missing blob is. The queue never sees
 chunks, so its model does not change. The fault schedule in
-`packages/core/test/queue_dst.gleam` already injects a worker result that is
-lost or corrupted at staging, and gains an `InputCorrupt` kind whose seeded
-occurrence yields a `Rejected("input failed SHA-256 verification")` for a task
+`packages/core/test/queue_churn_dst.gleam` gains mask bit 10, a worker that
+refuses an input it cannot stage, whose seeded occurrence yields a `Rejected("input failed SHA-256 verification")` for a task
 with a chunked source. The existing invariants (one lease per slot, a rejected
 action fails the run, no proof from a rejection) must hold under it.
 
@@ -152,6 +151,21 @@ action fails the run, no proof from a rejection) must hold under it.
 - Slice 5 guard: unit tests for each chunk violation above, a property test
   that `plan` covers `total` exactly with no chunk above the limit, and the
   existing blob tests.
+
+## Review findings kept as rules
+
+- The action runs as uid 65534 and Git refuses a worktree another user owns,
+  so the workspace tmpfs is mounted `uid=65534,gid=65534`.
+- A replayed build rebuilds the metadata archive, and Git may encode its pack
+  differently, so `queue.same_tasks` does not compare the metadata blob
+  digest. The recipe already names the commit.
+- With `inputs` narrower than `["."]`, `/work` lacks files the index lists, so
+  `git status` reports them deleted. An action that needs a clean status
+  declares the whole tree.
+- Upgrade every controller and worker before any manifest declares `git` or
+  an input over one blob: an older replica ignores the new task fields.
+- `lease_slack` assumed one 64 MiB transfer; a 512 MiB staged input on a slow
+  link can outlast it. It is unchanged here.
 
 ## Not in this note
 

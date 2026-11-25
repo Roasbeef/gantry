@@ -294,3 +294,25 @@ pub fn the_durable_image_omits_the_derived_phase_test() {
     "\"phase\":\"waiting\"",
   )
 }
+
+pub fn a_replayed_build_may_rebuild_its_git_metadata_blob_test() {
+  let digest = fn(c) { string.repeat(c, 64) }
+  let with_git = fn(blob: String) {
+    queue.Task(..task("s", "check", []), git: Some(queue.Whole(blob)))
+  }
+  let assert Ok(#(state, _)) =
+    queue.admit(queue.empty(), "r", "repo", "s", "check", queue.Build, [
+      with_git(digest("a")),
+    ])
+
+  // Git may encode the same commit's pack differently, so a retry is accepted.
+  let assert Ok(_) =
+    queue.admit(state, "r", "repo", "s", "check", queue.Build, [
+      with_git(digest("b")),
+    ])
+
+  // Any other difference, such as the source, is still a different request.
+  let other = queue.Task(..with_git(digest("a")), source: queue.Whole("t"))
+  let assert Error(_) =
+    queue.admit(state, "r", "repo", "s", "check", queue.Build, [other])
+}

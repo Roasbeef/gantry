@@ -16,6 +16,7 @@
 //// Memory holds one chunk at a time, and the whole-archive digest is
 //// computed as the chunks are appended.
 
+import gantry/blobs
 import gantry/worker/controllers.{Invalid, Offline}
 import gantry_core/chunks
 import gantry_core/queue
@@ -99,15 +100,15 @@ fn stage_chunks(
       fn(state, listed, index) {
         use hasher <- result.try(state)
 
-        // The fetch checked the chunk against its address, which is the
-        // digest the manifest lists. The manifest rule checks its length.
+        // Test the bytes against the manifest entry itself, so the check does
+        // not depend on how the fetch verified them.
         use bytes <- result.try(fetch(listed.digest))
         use Nil <- result.try(
           chunks.check_chunk(
             manifest,
             index,
             bit_array.byte_size(bytes),
-            listed.digest,
+            blobs.digest(bytes),
           )
           |> result.map_error(fn(violation) {
             Invalid(chunks.describe(violation))

@@ -334,18 +334,27 @@ fn tasks(
     )),
   )
 
+  // Every action of one commit shares its metadata archive, so it is built
+  // once and only when some action declared it.
+  use metadata <- result.try(
+    case list.any(actions, fn(action) { action.git == graph.Shallow }) {
+      False -> Ok(None)
+      True -> {
+        use bytes <- result.try(git.shallow_metadata(s, revision))
+        blobs.put_input(cfg.blobs, bytes) |> result.map(Some)
+      }
+    },
+  )
+
   list.try_map(actions, fn(action) {
     use bytes <- result.try(archive(s, revision, action.inputs))
     use source <- result.try(blobs.put_input(cfg.blobs, bytes))
 
-    // Only an action that declared metadata pays for a `.git` archive.
-    use git_input <- result.try(case action.git {
-      graph.NoGit -> Ok(None)
-      graph.Shallow -> {
-        use metadata <- result.try(git.shallow_metadata(s, revision))
-        blobs.put_input(cfg.blobs, metadata) |> result.map(Some)
-      }
-    })
+    // Only an action that declared metadata receives the archive.
+    let git_input = case action.git {
+      graph.NoGit -> None
+      graph.Shallow -> metadata
+    }
 
     let recipe =
       graph.identity(

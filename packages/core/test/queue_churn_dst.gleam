@@ -510,7 +510,7 @@ fn tick(world: World, mask: Int, op: Int) -> World {
   // The same op byte picks one of the worker's possible refusals.
   let verdict = case op / 64 {
     0 if reject_on -> Planted
-    1 if staging_on -> Refused(staging_violation(op / 16))
+    1 if staging_on -> Refused(staging_violation(op))
     _ -> Honest
   }
   case op % 16 {

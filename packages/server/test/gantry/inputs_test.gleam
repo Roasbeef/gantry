@@ -10,7 +10,6 @@ import gantry_core/chunks
 import gantry_core/queue
 import gleam/bit_array
 import gleam/crypto
-import gleam/dict
 import gleam/list
 import gleam/result
 import gleam/string
@@ -33,11 +32,9 @@ fn fetch_from(directory: String) -> inputs.Fetch {
 }
 
 fn pattern(size: Int) -> BitArray {
-  let block = <<"0123456789abcdef":utf8>>
   let repeated = string.repeat("0123456789abcdef", size / 16 + 1)
   let assert Ok(bytes) =
     bit_array.slice(bit_array.from_string(repeated), 0, size)
-  let _ = block
   bytes
 }
 
@@ -115,16 +112,16 @@ pub fn a_chunk_with_the_wrong_length_is_refused_test() {
 pub fn a_chunk_that_fails_its_digest_is_refused_test() {
   let directory = root()
   let #(_, id) = publish(directory, [pattern(10), pattern(5)])
-  // The real fetch verifies the address, so model its refusal.
+  // Serve other bytes of the right length under the second chunk's address.
   let fetch = fn(digest) {
     case digest == blobs.digest(pattern(5)) {
-      True -> Error(controllers.Invalid("input failed SHA-256 verification"))
+      True -> Ok(<<"zzzzz":utf8>>)
       False -> fetch_from(directory)(digest)
     }
   }
   let #(outcome, present) = staged(fetch, queue.Chunked(id))
   assert outcome
-    == Error(controllers.Invalid("input failed SHA-256 verification"))
+    == Error(controllers.Invalid("input chunk 1 failed SHA-256 verification"))
   assert !present
 }
 
@@ -176,8 +173,6 @@ pub fn an_unlisted_blob_is_never_asked_for_test() {
   // Only digests the manifest lists, and the manifest itself, are fetched.
   let directory = root()
   let #(manifest, id) = publish(directory, [pattern(10), pattern(5)])
-  let asked = dict.new()
-  let _ = asked
   let allowed = [
     id,
     ..list.map(chunks.chunks(manifest), fn(chunk) { chunk.digest })

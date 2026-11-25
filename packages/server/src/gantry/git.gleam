@@ -470,12 +470,11 @@ pub fn shallow_metadata(s: Session, commit: String) -> Result(BitArray, Fault) {
     }
     use _ <- result.try(in_repo(["init", "--quiet", "--template="]))
 
-    // `-c` reaches the upload-pack Git starts for a local path, so an object
-    // ID that is not a ref tip may be requested.
+    // The commit is named by object ID, which a protocol v2 upload-pack
+    // serves whether or not a ref points at it. That is how an integration
+    // commit that no ref names yet can be read from the mirror.
     use _ <- result.try(
       in_repo([
-        "-c",
-        "uploadpack.allowAnySHA1InWant=true",
         "fetch",
         "--quiet",
         "--no-tags",

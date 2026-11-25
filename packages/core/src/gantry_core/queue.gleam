@@ -59,7 +59,9 @@
 //// `Landing`. A `Waiting` run has no actions. A worker holds at most one
 //// `Active` lease and every lease serial is issued once. `finish` and
 //// `record_landing` accept only the live generation and the exact intent.
-//// Failure text is capped at `max_detail_bytes` where it is recorded.
+//// Failure text is capped at `max_detail_bytes` where it is recorded. A retry
+//// of an admitted run is accepted when `same_tasks` finds the same staged
+//// tasks, ignoring the rebuilt Git metadata blob.
 
 import gantry_core/graph.{type Action}
 import gantry_core/sandbox
@@ -533,15 +535,26 @@ fn same_request(
     Build ->
       prior.submission == Build
       && prior.revision == revision
-      && list.map(prior.work, fn(work) { work.task }) == tasks
+      && same_tasks(list.map(prior.work, fn(work) { work.task }), tasks)
     Waiting(branch, members) ->
       pins(prior.submission) == Some(#(branch, members))
     Queued(candidate) ->
       prior.revision == revision
       && candidate_of(prior.submission) == Some(candidate)
-      && list.map(prior.work, fn(work) { work.task }) == tasks
+      && same_tasks(list.map(prior.work, fn(work) { work.task }), tasks)
     Landing(_) | Landed(_) | Blocked(_, _) | Unprepared(_, _, _) -> False
   }
+}
+
+/// Whether two preparations of one request staged the same tasks. A Git
+/// metadata archive is rebuilt on every preparation and Git may encode its
+/// pack differently each time, so its blob digest is not compared. The recipe
+/// already covers it, since a Shallow action's recipe names the commit.
+fn same_tasks(prior: List(Task), tasks: List(Task)) -> Bool {
+  let erase = fn(task: Task) {
+    Task(..task, git: option.map(task.git, fn(_) { Whole("") }))
+  }
+  list.map(prior, erase) == list.map(tasks, erase)
 }
 
 /// The branch and members a submission was admitted with.

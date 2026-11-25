@@ -32,7 +32,8 @@ archive_add(Archive, Path, Bytes) ->
 
 archive_add_tree(Archive, Directory, Name) ->
     archive_result(erl_tar:add(Archive, unicode:characters_to_list(Directory),
-                               unicode:characters_to_list(Name), [])).
+                               unicode:characters_to_list(Name),
+                               [{mtime, 0}, {atime, 0}, {ctime, 0}, {uid, 0}, {gid, 0}])).
 
 archive_close(Archive) -> archive_result(erl_tar:close(Archive)).
 

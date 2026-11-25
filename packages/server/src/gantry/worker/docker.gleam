@@ -705,7 +705,10 @@ fn run(
       "--opt",
       "device=tmpfs",
       "--opt",
-      "o=size=" <> limits.workspace <> "m,nr_inodes=1048576,mode=1777",
+      // The action runs as 65534, and Git refuses a worktree another user owns.
+      "o=size="
+        <> limits.workspace
+        <> "m,nr_inodes=1048576,mode=1777,uid=65534,gid=65534",
       name,
     ],
     "",
