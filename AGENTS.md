@@ -1,8 +1,13 @@
 # Gantry
 
 Start with [the handoff](docs/next.md), then read the
+[runtime architecture](docs/architecture/runtime.md), which says what is
+built, and the [tour of the code](docs/guide/tour.md), which follows one
+request through it. The
 [build and submit architecture](docs/architecture/build-and-submit.md) and
-[pure decisions and durable effects](docs/architecture/state-machines.md).
+[pure decisions and durable effects](docs/architecture/state-machines.md)
+are target design. Their tables map design names to the types in the code,
+and they describe reservations, quotas, and cancellation that do not exist.
 
 Apply Loom's pinned Gleam style. Keep graph and transition decisions in a
 portable core. Use opaque types and exhaustive matches. Put storage, clocks,

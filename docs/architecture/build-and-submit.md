@@ -1,6 +1,6 @@
 # Build and submit architecture
 
-**Status** · Proposed · 2026-11-21
+**Status** · Target design, partly built · written 2026-11-21, checked against the code 2026-11-24
 
 Gantry needs to answer two questions after losing a controller. Which work
 can another controller finish, and which externally visible effects might
@@ -25,6 +25,25 @@ flowchart LR
     C1 --> Git["Git target ref"]
     C2 --> Git
 ```
+
+## What is built
+
+Most of this page is the target. [The runtime architecture](runtime.md)
+describes the shipped system, and the table below says where this page runs
+ahead of it. The [state names](state-machines.md#design-terms-and-the-code)
+differ too.
+
+| This page describes | The code today |
+| --- | --- |
+| A versioned manifest with working directory, environment, toolchain, platform, isolation, and resource needs | `gantry.json` has no version. The decoder reads only `actions` and `targets`, and an action is `name`, `argv`, `inputs`, `outputs`, `deps`, `after`, and `timeout` (`graph.gleam`). Other keys are ignored. The image and pool belong to the repository in `controller.toml`. |
+| An action key over a versioned encoding of toolchain and execution policy | The recipe digest covers a fixed tag, the cache scope, repository, pool, image, source archive digest, and the action. The resolved dependency files complete the key (`prepare.tasks`, `queue.Key`). |
+| Overlays to test before committing | Not built. A run pins a full commit SHA. |
+| CPU, memory, and slot reservations, project quotas, and bounded priority | Not built. A slot is one action. See [how work is spread](../scheduling.md). |
+| Executor incarnation, retirement proof, and capacity returned on retirement | Not built. A lease expires on a deadline and the action is leased again, up to three attempts. |
+| Lifecycle events with a resumable cursor, explanation of invalidation, retry, and cancel | Not built. A client polls the run status ([API](../api.md)). |
+| Short-lived scoped executor access, OIDC admission, and a GitHub App | Not built. Each worker has a long-lived token whose digest the controller holds, and the submit token covers every registered repository. |
+| Reuse of Loom's executor | Not done. [ADR 003](../adr/003-gantry-docker-worker.md) records why. |
+| A conditional queue claim, content-addressed blobs, a worker journal, ordered groups, and a guarded Git push that is replayed from a committed intent | Built. |
 
 ## The graph an agent can inspect
 
