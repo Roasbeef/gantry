@@ -162,7 +162,14 @@ the third slice.
 9. **Smaller follow-ups found in review.**
    - Bind a worker credential to its pool as well as its ID.
    - Let an attempt interrupted after `docker start` lapse and be reassigned
-     instead of recording a failure.
+     instead of recording a failure. The upgrade drill showed that every
+     worker restart, including a routine `make update`, fails the runs it
+     was serving, so this one is first.
+   - Version the queue snapshot so a release can refuse an unknown format
+     by name, and so a format change can be rolled out in two steps: read
+     both formats, then write the new one. The drill showed that an older
+     controller cannot read a newer snapshot
+     ([operations](operations.md#upgrade-across-a-queue-format-change)).
    - Scale Git's 120 s deadline for a first mirror fetch.
    - Give the churn simulation an oracle that tells a wrongly rejected result
      from a poison action. Both now end as an expired run.

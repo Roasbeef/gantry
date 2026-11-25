@@ -70,8 +70,14 @@ target in `PREFIX/lib/gantry/previous`. Running services keep using
 their original release tree until the operator restarts them through
 their service supervisor. For a three-voter deployment, restart
 one controller at a time and wait for it to rejoin before restarting the
-next. Restart workers with their existing IDs and directories so they
-reopen their SQLite journals and recover local custody.
+next, unless the new release changes the queue snapshot's format, as the
+release after f4cc695 does. An older controller cannot read a newer
+snapshot, so in that case stop every voter, upgrade, and start them
+together ([upgrade across a format change](operations.md#upgrade-across-a-queue-format-change)).
+Restart workers with their existing IDs and directories so they
+reopen their SQLite journals and recover local custody. Let each worker
+finish its action first: a worker restarted mid-action reports it as
+interrupted, and that fails the run.
 
 When editing the [worker schema](../packages/server/priv/worker-schema.sql)
 or [Parrot queries](../packages/server/src/gantry/worker/sql/custody.sql),
