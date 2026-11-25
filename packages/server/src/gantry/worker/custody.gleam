@@ -236,7 +236,7 @@ pub fn claim(
   use existing <- result.try(query(
     db,
     sql.find_attempt(
-      serial: claim.lease.serial,
+      serial: queue.lease_serial(claim.lease),
       run: claim.run,
       action: claim.task.action.name,
     ),
@@ -309,10 +309,10 @@ pub fn record(
 ) -> Result(Nil, String) {
   let payload =
     json.object([
-      #("worker", json.string(assignment.lease.worker)),
+      #("worker", json.string(queue.lease_worker(assignment.lease))),
       #("run", json.string(assignment.run)),
       #("action", json.string(assignment.task.action.name)),
-      #("serial", json.int(assignment.lease.serial)),
+      #("serial", json.int(queue.lease_serial(assignment.lease))),
       #("completion", protocol.encode_completion(completion)),
     ])
   update(db, sql.save_receipt(receipt: Some(json.to_string(payload)), name:))
@@ -407,10 +407,10 @@ fn validate_receipt(
     decode.success(#(worker, run, action, serial))
   }
   let expected = #(
-    assignment.lease.worker,
+    queue.lease_worker(assignment.lease),
     assignment.run,
     assignment.task.action.name,
-    assignment.lease.serial,
+    queue.lease_serial(assignment.lease),
   )
 
   // Both the wire shape and the durable assignment identity must match.

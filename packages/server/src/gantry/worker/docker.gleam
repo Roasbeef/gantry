@@ -234,26 +234,32 @@ fn stage(
     ffi_worker.archive_open(archive_path) |> result.map_error(Unavailable),
   )
   let added =
-    list.try_fold(assignment.lease.key.dependencies, 1024, fn(size, item) {
-      use Nil <- result.try(check_destination(item.path, blocked, occupied))
-      use bytes <- result.try(
-        controllers.fetch(network, item.digest)
-        |> result.map_error(transfer_fault),
-      )
+    list.try_fold(
+      queue.lease_key(assignment.lease).dependencies,
+      1024,
+      fn(size, item) {
+        use Nil <- result.try(check_destination(item.path, blocked, occupied))
+        use bytes <- result.try(
+          controllers.fetch(network, item.digest)
+          |> result.map_error(transfer_fault),
+        )
 
-      // Account for the file header, block padding, and end-of-archive blocks.
-      let total = size + 512 + { bit_array.byte_size(bytes) + 511 } / 512 * 512
+        // Account for the file header, block padding, and end-of-archive blocks.
+        let total =
+          size + 512 + { bit_array.byte_size(bytes) + 511 } / 512 * 512
 
-      // The archive has the same byte budget as the source blob.
-      use Nil <- result.try(case total <= blobs.limit {
-        True -> Ok(Nil)
-        False -> Error(Rejected("dependency archive exceeds worker size limit"))
-      })
+        // The archive has the same byte budget as the source blob.
+        use Nil <- result.try(case total <= blobs.limit {
+          True -> Ok(Nil)
+          False ->
+            Error(Rejected("dependency archive exceeds worker size limit"))
+        })
 
-      ffi_worker.archive_add(archive, item.path, bytes)
-      |> result.map_error(Unavailable)
-      |> result.replace(total)
-    })
+        ffi_worker.archive_add(archive, item.path, bytes)
+        |> result.map_error(Unavailable)
+        |> result.replace(total)
+      },
+    )
   let closed =
     ffi_worker.archive_close(archive) |> result.map_error(Unavailable)
   use _ <- result.try(added)

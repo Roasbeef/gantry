@@ -84,7 +84,7 @@ pub fn group(cfg: Config, body: String) -> Result(json.Json, String) {
       admit(
         id,
         repo.name,
-        candidate.commit,
+        queue.candidate_commit(candidate),
         repo.target,
         queue.Queued(candidate),
         tasks,
@@ -106,15 +106,24 @@ fn replay_group(
   pulls: List(Int),
 ) -> Result(json.Json, String) {
   // A group retry must identify the same repository and ordered pull requests.
-  case run.submission {
-    queue.Build -> Error("run ID already has different inputs")
+
+  // A group retry must identify the same repository and ordered pull requests.
+  let members = case run.submission {
+    queue.Build -> Error(Nil)
+    queue.Waiting(_, members) | queue.Unprepared(_, members, _) -> Ok(members)
     queue.Queued(candidate)
     | queue.Landing(candidate)
     | queue.Landed(candidate)
-    | queue.Blocked(candidate, _) -> {
+    | queue.Blocked(candidate, _) -> Ok(queue.candidate_members(candidate))
+  }
+
+  // Only a run admitted as a group has members to compare.
+  case members {
+    Error(Nil) -> Error("run ID already has different inputs")
+    Ok(members) -> {
       use Nil <- result.try(require(
         run.repo == repo
-          && list.map(candidate.members, fn(member) { member.pull }) == pulls,
+          && list.map(members, fn(member) { member.pull }) == pulls,
         "run ID already has different inputs",
       ))
       Ok(protocol.encode_run(run))

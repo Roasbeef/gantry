@@ -1192,12 +1192,14 @@ fn observe(
 
   // Terminal phases end the watch with their documented outcome.
   case queue.phase(run), run.submission {
-    "landed", _ | "passed", queue.Build -> Ok(Finished)
-    "failed" as phase, _ | "blocked" as phase, _ ->
+    queue.PhaseLanded, _ | queue.PhasePassed, queue.Build -> Ok(Finished)
+    queue.PhaseFailed as phase, _ | queue.PhaseBlocked as phase, _ -> {
+      let label = protocol.phase_label(phase)
       Error(failed(
-        "run_" <> phase,
-        "Run " <> poll.id <> " finished with phase " <> phase <> ".",
+        "run_" <> label,
+        "Run " <> poll.id <> " finished with phase " <> label <> ".",
       ))
+    }
     _, _ -> Ok(Continue(line))
   }
 }

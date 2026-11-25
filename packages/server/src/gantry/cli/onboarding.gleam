@@ -1135,8 +1135,9 @@ fn saved_smoke(
 
   // Exit 4 means the controller lost the run, so it is admitted again.
   case status, phase, found {
-    0, Ok("failed"), _ | 0, Ok("blocked"), _ -> Ok(#(None, None, Fresh))
-    0, Ok("passed"), Ok(run) -> Ok(#(Some(saved), Some(run), Resumed))
+    0, Ok(queue.PhaseFailed), _ | 0, Ok(queue.PhaseBlocked), _ ->
+      Ok(#(None, None, Fresh))
+    0, Ok(queue.PhasePassed), Ok(run) -> Ok(#(Some(saved), Some(run), Resumed))
     0, _, _ -> Ok(#(Some(saved), None, Resumed))
     4, _, _ -> Ok(#(Some(saved), None, Fresh))
     _, _, _ ->
@@ -1230,28 +1231,35 @@ fn smoke_attempt(
 /// Whether recovery fenced a run's attempt as interrupted, the one failure
 /// a resumed smoke build may retry.
 fn was_interrupted(run: queue.Run) -> Bool {
-  queue.phase(run) == "failed"
+  queue.phase(run) == queue.PhaseFailed
   && list.any(run.work, fn(work) {
     case work.step {
-      queue.Failed(reason, _) -> reason == interrupted
-      queue.Pending(_) | queue.Active(_) | queue.Passed(_) | queue.Reused(_) ->
-        False
+      queue.Failed(queue.Reported(reason), _) -> reason == interrupted
+      queue.Failed(queue.LeaseExpired(_), _)
+      | queue.Pending(_)
+      | queue.Active(_)
+      | queue.Passed(_)
+      | queue.Reused(_)
+      | queue.Skipped -> False
     }
   })
 }
 
 /// The digest of `result.txt` from the first action of a passed run.
 fn passed_digest(run: queue.Run) -> Result(String, Nil) {
-  use <- bool.guard(queue.phase(run) != "passed", Error(Nil))
+  use <- bool.guard(queue.phase(run) != queue.PhasePassed, Error(Nil))
   use first <- result.try(list.first(run.work))
 
   // A reused proof came from a cache, which a smoke build must not trust.
   case first.step {
     queue.Passed(proof) ->
-      list.find(proof.files, fn(file) { file.path == "result.txt" })
+      list.find(queue.proof_files(proof), fn(file) { file.path == "result.txt" })
       |> result.map(fn(file) { file.digest })
-    queue.Pending(_) | queue.Active(_) | queue.Reused(_) | queue.Failed(_, _) ->
-      Error(Nil)
+    queue.Pending(_)
+    | queue.Active(_)
+    | queue.Reused(_)
+    | queue.Failed(_, _)
+    | queue.Skipped -> Error(Nil)
   }
 }
 
