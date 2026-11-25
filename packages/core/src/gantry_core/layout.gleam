@@ -821,10 +821,6 @@ pub fn claim(
   pool: String,
   now: Int,
 ) -> Result(Plan(Option(queue.Assignment)), Failure) {
-  use #(serial, serial_text) <- result.try(counter(
-    reader,
-    counter_key("serial"),
-  ))
   use active <- result.try(children(reader, ["active"]))
   use leased <- result.try(
     list.try_map(active, fn(pair) {
@@ -839,6 +835,17 @@ pub fn claim(
     |> list.map(fn(entry) { entry.id })
   let ready_prefix = ["ready", name(pool)]
   use ready <- result.try(children(reader, ready_prefix))
+
+  // Nothing leased to this worker, nothing lapsed, and nothing ready is an
+  // empty poll, which reads no run and no counter.
+  use <- bool.guard(
+    involved == [] && ready == [],
+    plan([Keys(ready_prefix, [])], [], None),
+  )
+  use #(serial, serial_text) <- result.try(counter(
+    reader,
+    counter_key("serial"),
+  ))
   let #(first, rest) = list.split(ids(ready), window)
   use #(loaded, run_expects) <- result.try(load(
     reader,

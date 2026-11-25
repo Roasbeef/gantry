@@ -260,17 +260,40 @@ fn commit(plan: layout.Plan(a)) -> Result(ffi_khepri.Outcome, Fault) {
 }
 
 /// Plan against fresh reads and commit, recomputing after a competing write.
-/// The lock keeps this controller's own operations from racing each other, so
-/// a refused commit means another controller wrote one of the keys read.
+/// An operation that writes a counter first plans without the lock, because a
+/// plan that writes nothing, such as an empty poll, needs no ordering and
+/// must not queue behind the others. A plan that writes takes the lock and
+/// plans again, so a refused commit then means another controller wrote one
+/// of the keys read.
 fn transact(
   lock: Lock,
   plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
 ) -> Result(a, Fault) {
   case lock {
-    Admission -> ffi_khepri.gated("admission", fn() { attempt(plan, attempts) })
-    Claiming -> ffi_khepri.gated("claiming", fn() { attempt(plan, attempts) })
-    Finishing -> ffi_khepri.gated("finishing", fn() { attempt(plan, attempts) })
+    Admission -> ordered("admission", plan)
+    Claiming -> ordered("claiming", plan)
+    Finishing -> ordered("finishing", plan)
     Unordered -> attempt(plan, attempts)
+  }
+}
+
+/// Take the lock only when the first plan has something to write.
+fn ordered(
+  name: String,
+  plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
+) -> Result(a, Fault) {
+  use first <- result.try(plan(reader()) |> result.map_error(fault_of))
+
+  // Nothing to write: confirm it, and only a stale read needs the lock.
+  case layout.writes(first) {
+    [] -> {
+      use outcome <- result.try(commit(first))
+      case outcome {
+        Accepted -> Ok(layout.receipt(first))
+        Stale -> ffi_khepri.gated(name, fn() { attempt(plan, attempts) })
+      }
+    }
+    [_, ..] -> ffi_khepri.gated(name, fn() { attempt(plan, attempts) })
   }
 }
 
