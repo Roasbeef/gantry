@@ -41,8 +41,10 @@ In a source checkout, run `scripts/gantry skill`.
    `GANTRY_WORKER_ID`, a persistent local `GANTRY_WORKER_DIR`, and a
    `GANTRY_POOL` matching the repository. Set `GANTRY_ENDPOINT` to the
    comma-separated HTTP(S) origins for its quorum. Use HTTPS between
-   hosts. Workers can fail over between origins and need only the
-   shared worker token and HTTP API access.
+   hosts. Each worker has its own token, and every controller lists the
+   worker's ID and the token's SHA-256 as a `[[worker]]` entry. Workers can
+   fail over between origins and need only their own token and HTTP API
+   access.
 4. Check `GET /health` on every origin for queue access, then run an
    uncached build in the new slot's pool and verify the worker and
    artifact paths. Use `make e2e` from a checkout for the local failover
