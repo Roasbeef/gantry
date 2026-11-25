@@ -223,6 +223,40 @@ pub fn fetch(s: Session, reference: String) -> Result(String, Fault) {
   }
 }
 
+/// The result of merging two commits without a work tree.
+pub type Merge {
+  /// A clean merge, and the tree object that holds it.
+  Merged(tree: String)
+
+  /// The commits conflict. The text is Git's conflict report.
+  Conflicted(detail: String)
+}
+
+/// Merge two commits into a new tree object. Git reserves exit code one for
+/// a conflict, so a conflict is an answer and any other failure is an error.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // git.merge_tree(s, base, head)
+/// ```
+pub fn merge_tree(
+  s: Session,
+  parent: String,
+  head: String,
+) -> Result(Merge, Fault) {
+  use #(status, out) <- result.try(
+    raw(s, ["merge-tree", "--write-tree", parent, head]),
+  )
+
+  // The first line of a clean merge is the tree.
+  case status {
+    0 -> Ok(Merged(string.trim(out)))
+    1 -> Ok(Conflicted(string.trim(out)))
+    _ -> Error(fault.Unavailable("Git operation failed: " <> string.trim(out)))
+  }
+}
+
 /// Resolve an object as a full commit identity.
 ///
 /// ## Examples

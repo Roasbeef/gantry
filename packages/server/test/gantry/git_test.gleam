@@ -2,6 +2,7 @@ import gantry/config
 import gantry/git
 import gantry/internal/ffi_host
 import gantry/prepare
+import gantry_core/queue
 import gleam/bit_array
 import gleam/crypto
 import gleam/dict
@@ -39,6 +40,7 @@ fn config_for(
       repositories: dict.from_list([#(repo.name, repo)]),
       agent_token: "",
       workers: [],
+      retention: queue.Retention(200, 1000),
       submit_token: "",
       github_token: "",
     )

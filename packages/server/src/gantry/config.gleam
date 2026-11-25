@@ -17,10 +17,23 @@
 ////
 //// A configuration without any `[[worker]]` entry is the earlier format,
 //// where every worker shared `GANTRY_WORKER_TOKEN`. It fails to load.
+////
+//// ## Retention
+////
+//// The queue snapshot has a 4 MiB ceiling, so terminal runs and remembered
+//// proofs are bounded. The optional table sets the bounds, and a run that
+//// is not terminal is never dropped.
+////
+//// ```toml
+//// [retention]
+//// keep_runs = 200     # terminal runs kept for status (default 200)
+//// keep_proofs = 1000  # proofs kept for cache reuse (default 1000)
+//// ```
 
 import envoy
 import gantry/blobs
 import gantry_core/job
+import gantry_core/queue
 import gantry_core/request
 import gleam/bit_array
 import gleam/crypto
@@ -70,6 +83,7 @@ pub type Config {
     seed: String,
     repositories: Dict(String, Repository),
     workers: List(Worker),
+    retention: queue.Retention,
     agent_token: String,
     submit_token: String,
     github_token: String,
@@ -116,12 +130,13 @@ pub fn parse(contents: String, secrets: Secrets) -> Result(Config, String) {
     tom.parse_to_dynamic(contents)
     |> result.replace_error("invalid configuration TOML"),
   )
-  use #(data, blobs, port, seed, projects, workers) <- result.try(
+  use #(data, blobs, port, seed, projects, workers, retention) <- result.try(
     decode.run(value, config_decoder())
     |> result.replace_error("invalid controller configuration"),
   )
   use repositories <- result.try(list.try_map(projects, validate_repository))
   use workers <- result.try(validate_workers(workers, secrets))
+  use retention <- result.try(validate_retention(retention))
   use Nil <- result.try(validate_controller(data, blobs, port, secrets))
   Ok(Config(
     data,
@@ -130,6 +145,7 @@ pub fn parse(contents: String, secrets: Secrets) -> Result(Config, String) {
     seed,
     dict.from_list(repositories),
     workers,
+    retention,
     secrets.agent,
     secrets.submit,
     secrets.github,
@@ -247,6 +263,22 @@ fn validate_workers(
   }
 }
 
+/// Hold the bounds to a range that keeps the snapshot under its ceiling. A
+/// run carries a few kilobytes and a proof under one, so these limits stay
+/// far below 4 MiB with the defaults and allow generous operator choices.
+fn validate_retention(bounds: #(Int, Int)) -> Result(queue.Retention, String) {
+  let #(runs, proofs) = bounds
+
+  // Zero would drop every finished run and break status and cache reuse.
+  case runs >= 1 && runs <= 5000 && proofs >= 1 && proofs <= 20_000 {
+    True -> Ok(queue.Retention(runs, proofs))
+    False ->
+      Error(
+        "retention needs keep_runs from 1 to 5000 and keep_proofs from 1 to 20000",
+      )
+  }
+}
+
 /// Describe the configuration and its registered repositories.
 fn config_decoder() {
   let project = {
@@ -276,7 +308,12 @@ fn config_decoder() {
 
   use projects <- decode.field("repository", decode.list(project))
   use workers <- decode.optional_field("worker", [], decode.list(worker))
-  decode.success(#(data, blobs, port, seed, projects, workers))
+  use retention <- decode.optional_field("retention", #(200, 1000), {
+    use runs <- decode.optional_field("keep_runs", 200, decode.int)
+    use proofs <- decode.optional_field("keep_proofs", 1000, decode.int)
+    decode.success(#(runs, proofs))
+  })
+  decode.success(#(data, blobs, port, seed, projects, workers, retention))
 }
 
 /// Validate a Git remote and its pinned executor image.

@@ -69,7 +69,8 @@ pub fn build(
   }
 }
 
-/// Prepare an ordered group and commit its pinned graph.
+/// Pin an ordered group and admit it as waiting. The controller builds its
+/// candidate later, when the group heads a free lane.
 ///
 /// ## Examples
 ///
@@ -88,18 +89,20 @@ pub fn group(cfg: Config, body: String) -> Result(json.Json, Error) {
   let id = request.submit_id(group)
   let pulls = request.pulls(group)
 
-  // Replaying an admitted group keeps its original candidate and base.
+  // Replaying an admitted group keeps its original pins. A new group pins
+  // its members' heads and waits. It is built only when it heads a free
+  // lane, so a group queued behind another never builds on a stale base.
   case queue.find(saved, id) {
     Ok(run) -> replay_group(run, repo.name, pulls)
     Error(Nil) -> {
-      use #(candidate, tasks) <- result.try(prepare.group(cfg, repo, group))
+      use members <- result.try(prepare.pin(cfg, repo, group))
       admit(
         id,
         repo.name,
-        candidate.commit,
+        "",
         repo.target,
-        queue.Queued(candidate),
-        tasks,
+        queue.Waiting(repo.branch, members),
+        [],
       )
     }
   }
@@ -118,15 +121,22 @@ fn replay_group(
   pulls: List(Int),
 ) -> Result(json.Json, Error) {
   // A group retry must identify the same repository and ordered pull requests.
-  case run.submission {
-    queue.Build -> Error(fault.Conflict("run ID already has different inputs"))
+  let members = case run.submission {
+    queue.Build -> Error(Nil)
+    queue.Waiting(_, members) | queue.Unprepared(_, members, _) -> Ok(members)
     queue.Queued(candidate)
     | queue.Landing(candidate)
     | queue.Landed(candidate)
-    | queue.Blocked(candidate, _) -> {
+    | queue.Blocked(candidate, _) -> Ok(queue.candidate_members(candidate))
+  }
+
+  // Only a run admitted as a group has members to compare.
+  case members {
+    Error(Nil) -> Error(fault.Conflict("run ID already has different inputs"))
+    Ok(members) -> {
       use Nil <- result.try(require(
         run.repo == repo
-          && list.map(candidate.members, fn(member) { member.pull }) == pulls,
+          && list.map(members, fn(member) { member.pull }) == pulls,
         fault.Conflict("run ID already has different inputs"),
       ))
       Ok(protocol.encode_run(run))

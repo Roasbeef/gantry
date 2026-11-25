@@ -436,6 +436,39 @@ pub fn schema_examples_pass_the_request_rules_test() {
   })
 }
 
+pub fn schema_bounds_match_the_request_rules_test() {
+  let assert Ok(text) = simplifile.read("priv/gantry-schema.json")
+  assert field(
+      text,
+      ["$defs", "submit", "properties", "pulls", "maxItems"],
+      decode.int,
+    )
+    == Ok(request.pull_limit)
+  assert field(text, ["$defs", "pull", "maximum"], decode.int)
+    == Ok(request.largest_pull)
+}
+
+pub fn empty_settings_mean_unset_test() {
+  let host =
+    Fake(..offline(), environment: [
+      #("GANTRY_URL", ""),
+      #("GANTRY_WATCH_SECONDS", ""),
+    ])
+  let outcome =
+    invoke(host, [
+      "plan", "local", "fixture/project", revision, "check", "--dry-run",
+    ])
+  assert outcome.code == 0
+  assert field(outcome.stdout, ["url"], decode.string)
+    == Ok("http://127.0.0.1:4737/v1/plans")
+
+  // An empty deadline falls back to the default, so watch reaches the
+  // credential check (exit 3) instead of rejecting the setting (exit 2).
+  let outcome = invoke(host, ["watch", "local"])
+  assert outcome.code == 3
+  assert error_code(outcome) == "missing_credentials"
+}
+
 pub fn schema_exit_codes_match_the_cli_test() {
   let assert Ok(text) = simplifile.read("priv/gantry-schema.json")
   let assert Ok(codes) =
@@ -659,7 +692,9 @@ fn pending_retry_body() -> String {
 }
 
 fn failed_body() -> String {
-  run_body("failed", [queue.Work(task(), queue.Failed("exit 23", blob))])
+  run_body("failed", [
+    queue.Work(task(), queue.Failed(queue.Reported("exit 23"), blob)),
+  ])
 }
 
 // ---------------------------------------------------------------------------

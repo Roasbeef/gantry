@@ -150,11 +150,6 @@ pub fn text(value: String) -> Document {
   Leaf(json.string(value))
 }
 
-/// Wrap any encoded JSON value as a document leaf.
-pub fn value(value: json.Json) -> Document {
-  Leaf(value)
-}
-
 /// Read the top-level field of an object document.
 ///
 /// ## Examples

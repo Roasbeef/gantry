@@ -84,7 +84,7 @@ pub type Host {
     write: fn(BitArray) -> Nil,
     /// Write one line to standard error.
     report: fn(String) -> Nil,
-    /// Read a monotonic clock in milliseconds.
+    /// Read the wall clock in milliseconds, for deadlines.
     clock: fn() -> Int,
     /// Wait for a number of milliseconds.
     sleep: fn(Int) -> Nil,
@@ -1100,7 +1100,7 @@ fn read(
 /// Read `GANTRY_WATCH_SECONDS`: one to nine digits without a leading zero.
 fn watch_seconds(host: Host) -> Result(Int, Failure) {
   let text =
-    host.environment("GANTRY_WATCH_SECONDS")
+    present(host, "GANTRY_WATCH_SECONDS")
     |> result.lazy_unwrap(fn() { "1800" })
   let shaped =
     string.drop_start(text, 9) == "" && !string.starts_with(text, "0")
@@ -1192,12 +1192,17 @@ fn observe(
 
   // Terminal phases end the watch with their documented outcome.
   case queue.phase(run), run.submission {
-    "landed", _ | "passed", queue.Build -> Ok(Finished)
-    "failed" as phase, _ | "blocked" as phase, _ ->
+    queue.PhaseLanded, _ | queue.PhasePassed, queue.Build -> Ok(Finished)
+    queue.PhaseFailed as phase, _
+    | queue.PhaseBlocked as phase, _
+    | queue.PhaseUnprepared as phase, _
+    -> {
+      let label = protocol.phase_label(phase)
       Error(failed(
-        "run_" <> phase,
-        "Run " <> poll.id <> " finished with phase " <> phase <> ".",
+        "run_" <> label,
+        "Run " <> poll.id <> " finished with phase " <> label <> ".",
       ))
+    }
     _, _ -> Ok(Continue(line))
   }
 }
@@ -1210,7 +1215,7 @@ fn observe(
 /// query, or fragment, so a credential can only travel in the header.
 fn controller_url(host: Host) -> Result(String, Failure) {
   let url =
-    host.environment("GANTRY_URL") |> result.lazy_unwrap(fn() { default_url })
+    present(host, "GANTRY_URL") |> result.lazy_unwrap(fn() { default_url })
 
   // One trailing slash is tolerated, as a shell user would type it.
   let url = case string.ends_with(url, "/") {
@@ -1249,6 +1254,15 @@ fn controller_url(host: Host) -> Result(String, Failure) {
     Some(port) if port > 65_535 ->
       Error(invalid("Controller port must be at most 65535.", "GANTRY_URL"))
     _ -> Ok(url)
+  }
+}
+
+/// Read a setting, treating an empty value as unset, as `${VAR:-default}`
+/// did in the Bash CLI.
+fn present(host: Host, name: String) -> Result(String, Nil) {
+  case host.environment(name) {
+    Ok("") | Error(Nil) -> Error(Nil)
+    Ok(value) -> Ok(value)
   }
 }
 
@@ -1319,12 +1333,11 @@ fn send(
   body: Option(String),
   seconds: Int,
 ) -> Result(Response(BitArray), Nil) {
-  use base <- result.try(http_request.to(url))
+  use base <- result.try(origin.request(url))
   let base =
     base
     |> http_request.set_method(method)
     |> http_request.set_header("authorization", "Bearer " <> token)
-    |> http_request.set_body(<<>>)
 
   // Only an admission carries a JSON body.
   let outgoing = case body {

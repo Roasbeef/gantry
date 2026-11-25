@@ -44,65 +44,170 @@ pub fn build(
   )
 }
 
-/// Integrate ordered pull heads into a candidate, then stage its action graph.
+/// Pin the heads of an ordered group at admission. The pins are what the
+/// submitter reviewed, and preparation later refuses a group whose pulls moved.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // prepare.group(cfg, repo, group)
+/// // prepare.pin(cfg, repo, group)
 /// ```
-pub fn group(
+pub fn pin(
   cfg: config.Config,
   repo: config.Repository,
   group: request.Submit,
-) -> Result(#(queue.Candidate, List(queue.Task)), Fault) {
-  // Each distinct pull in the validated request contributes one ordered
-  // integration step.
-  let pulls = request.pulls(group)
+) -> Result(List(queue.Member), Fault) {
   use s <- git.session(cfg, repo)
-  use base <- result.try(git.fetch(s, "refs/heads/" <> repo.branch))
-  use members <- result.try(
-    list.try_map(pulls, fn(n) { member(cfg, repo, s, n) }),
-  )
-  use commit <- result.try(
-    list.try_fold(members, base, fn(parent, m) {
-      use tree <- result.try(
-        git.command(s, ["merge-tree", "--write-tree", parent, m.head]),
-      )
-      use date <- result.try(merge_date(s, parent, m.head))
-      let author =
-        git.Session(..s, env: [
-          #("GIT_AUTHOR_DATE", date),
-          #("GIT_COMMITTER_DATE", date),
-          ..s.env
-        ])
-      use sha <- result.try(
-        git.command(author, [
-          "commit-tree",
-          string.trim(tree),
-          "-p",
-          parent,
-          "-p",
-          m.head,
-          "-m",
-          "Integrate pull " <> int.to_string(m.pull),
-        ]),
-      )
-      git.oid(s, string.trim(sha))
-    }),
-  )
-  use plan <- result.try(tasks(
-    cfg,
-    repo,
-    s,
-    base,
-    commit,
-    repo.target,
-    "",
-    None,
-  ))
-  use Nil <- result.try(git.preserve(cfg, repo, s, base, commit))
-  Ok(#(queue.Candidate(repo.branch, base, commit, members), plan))
+  list.try_map(request.pulls(group), fn(n) { member(cfg, repo, s, n) })
+}
+
+/// What preparing a waiting group produced.
+pub type Prepared {
+  /// The candidate on the current branch tip, and its staged action graph.
+  Ready(candidate: queue.Candidate, tasks: List(queue.Task))
+
+  /// A definite refusal that the queue records. A `Fault` instead means the
+  /// outcome is unknown, and the caller retries later.
+  Refusal(failure: queue.PrepareFailure)
+}
+
+/// Build a waiting group's candidate on the branch's current tip and stage
+/// its action graph. This is the one place a group is integrated, and it
+/// runs only when the group heads a free lane, so the base it records is the
+/// tip that the landing will expect.
+///
+/// A pinned member that moved, a merge that conflicts, and a provider or
+/// manifest refusal are `Refusal`s. A Git or GitHub failure is a `Fault`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // prepare.candidate(cfg, repo, preparation)
+/// ```
+pub fn candidate(
+  cfg: config.Config,
+  repo: config.Repository,
+  preparation: queue.Preparation,
+) -> Result(Prepared, Fault) {
+  let pinned = queue.preparation_members(preparation)
+  let branch = queue.preparation_branch(preparation)
+
+  // The registered branch is the one lane this repository can land on.
+  use Nil <- result.try(case branch == repo.branch {
+    True -> Ok(Nil)
+    False -> Error(fault.Internal("registered branch changed while waiting"))
+  })
+
+  use s <- git.session(cfg, repo)
+  use base <- result.try(git.fetch(s, "refs/heads/" <> branch))
+  use moved <- result.try(first_moved(cfg, repo, s, pinned))
+
+  // A moved pin is refused before any merge work.
+  case moved {
+    Some(failure) -> Ok(Refusal(failure))
+    None -> {
+      use merged <- result.try(integrate(s, base, pinned))
+
+      // A conflict is refused. Otherwise stage the graph on the merge commit.
+      case merged {
+        Error(failure) -> Ok(Refusal(failure))
+        Ok(commit) -> stage(cfg, repo, s, base, commit, pinned)
+      }
+    }
+  }
+}
+
+/// Re-read each pinned pull and report the first one that no longer matches
+/// its pin, or that the provider now refuses.
+fn first_moved(
+  cfg: config.Config,
+  repo: config.Repository,
+  s: git.Session,
+  pinned: List(queue.Member),
+) -> Result(Option(queue.PrepareFailure), Fault) {
+  list.try_fold(pinned, None, fn(found, pin) {
+    // The earliest failure stands, and later pulls are not read.
+    case found {
+      Some(_) -> Ok(found)
+      None ->
+        case member(cfg, repo, s, pin.pull) {
+          Ok(current) if current == pin -> Ok(None)
+          Ok(_) -> Ok(Some(queue.MemberMoved(pin.pull)))
+          Error(fault.Invalid(detail)) | Error(fault.NotFound(detail)) ->
+            Ok(Some(queue.Refused(detail)))
+          Error(other) -> Error(other)
+        }
+    }
+  })
+}
+
+/// Merge the pinned heads onto the base in order, one integration commit per
+/// member. A conflict returns the typed refusal instead of a commit.
+fn integrate(
+  s: git.Session,
+  parent: String,
+  members: List(queue.Member),
+) -> Result(Result(String, queue.PrepareFailure), Fault) {
+  // Each member's commit becomes the parent of the next.
+  case members {
+    [] -> Ok(Ok(parent))
+    [m, ..rest] -> {
+      use merged <- result.try(git.merge_tree(s, parent, m.head))
+
+      // A conflicted tree has no commit to build on.
+      case merged {
+        git.Conflicted(detail) ->
+          Ok(
+            Error(queue.Unmergeable(
+              "pull " <> int.to_string(m.pull) <> ": " <> detail,
+            )),
+          )
+        git.Merged(tree) -> {
+          use date <- result.try(merge_date(s, parent, m.head))
+          let author =
+            git.Session(..s, env: [
+              #("GIT_AUTHOR_DATE", date),
+              #("GIT_COMMITTER_DATE", date),
+              ..s.env
+            ])
+          use sha <- result.try(
+            git.command(author, [
+              "commit-tree",
+              tree,
+              "-p",
+              parent,
+              "-p",
+              m.head,
+              "-m",
+              "Integrate pull " <> int.to_string(m.pull),
+            ]),
+          )
+          use commit <- result.try(git.oid(s, string.trim(sha)))
+          integrate(s, commit, rest)
+        }
+      }
+    }
+  }
+}
+
+/// Stage the manifest's action graph for the integration commit and publish
+/// its bundle. A manifest or input the controller rejects is a refusal.
+fn stage(
+  cfg: config.Config,
+  repo: config.Repository,
+  s: git.Session,
+  base: String,
+  commit: String,
+  pinned: List(queue.Member),
+) -> Result(Prepared, Fault) {
+  case tasks(cfg, repo, s, base, commit, repo.target, "", None) {
+    Error(fault.Invalid(detail)) -> Ok(Refusal(queue.Refused(detail)))
+    Error(other) -> Error(other)
+    Ok(plan) -> {
+      use Nil <- result.try(git.preserve(cfg, repo, s, base, commit))
+      Ok(Ready(queue.candidate(repo.branch, base, commit, pinned), plan))
+    }
+  }
 }
 
 /// A merge timestamp one second after its newest parent is stable on replay.
@@ -182,8 +287,11 @@ fn tasks(
   use #(actions, scope) <- result.try(case adhoc {
     Some(action) -> Ok(#([action], "ad-hoc:" <> id))
     None -> {
+      // The commit is already local, so a missing manifest is a refusal and
+      // not a transient failure.
       use oid <- result.try(
-        git.command(s, ["rev-parse", "--verify", base <> ":gantry.json"]),
+        git.command(s, ["rev-parse", "--verify", base <> ":gantry.json"])
+        |> result.replace_error(fault.Invalid("revision has no gantry.json")),
       )
       use file <- result.try(git.command(s, ["unpack-file", string.trim(oid)]))
 

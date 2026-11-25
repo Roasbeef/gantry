@@ -14,7 +14,7 @@
 //// as on SIGINT, SIGTERM, or a crash.
 ////
 //// `handle` appends output to the log, records the exit and answers anyone
-//// waiting in `await_first` or asking `running`, which reads `is_running`. `stop` is the graceful teardown in `halt`:
+//// waiting in `await_first` or asking `running`, which reads `is_running`. `stop` is the graceful teardown:
 //// SIGTERM to the group, then SIGKILL to the group after ten seconds if the
 //// child is still running, and a final SIGKILL sweep once it exits so no
 //// grandchild outlives the group.
@@ -146,11 +146,13 @@ fn open(spec: Spec) -> Result(ServicePort, String) {
   let arguments =
     list.flatten([
       list.flat_map(spec.unset, fn(key) { ["-u", key] }),
-      list.map(spec.set, fn(pair) { pair.0 <> "=" <> pair.1 }),
       ["setpriv", "--pdeathsig", "TERM", spec.program],
       spec.arguments,
     ])
-  ffi_host.open_service("env", arguments, [], spec.directory)
+
+  // Values, credentials among them, travel in the port environment so they
+  // never appear on an argument list in /proc. The env tool only removes.
+  ffi_host.open_service("env", arguments, spec.set, spec.directory)
 }
 
 /// Apply one event to the child's state. See the transition table.
@@ -269,15 +271,4 @@ pub fn stop(service: Service) -> Nil {
   // by the grace period plus the time a killed process takes to be reaped.
   let _ = process.receive(reply, grace_milliseconds + 15_000)
   Nil
-}
-
-/// Stop several children, the most recently started first.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // service.halt([worker, controller])
-/// ```
-pub fn halt(services: List(Service)) -> Nil {
-  list.each(services, stop)
 }

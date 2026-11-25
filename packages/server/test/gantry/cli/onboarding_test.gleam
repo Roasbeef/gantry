@@ -160,3 +160,13 @@ pub fn the_local_controller_config_registers_its_worker_test() {
   // The token itself is never written to the file.
   assert !string.contains(text, profile.local_worker_token(local))
 }
+
+pub fn ipv6_request_keeps_its_brackets_test() {
+  // `request.to` drops the brackets, and httpc cannot send to a bare `::1`.
+  let assert Ok(outgoing) = origin.request("http://[::1]:4737/ready")
+  assert outgoing.host == "[::1]"
+  assert outgoing.port == option.Some(4737)
+  let assert Ok(named) =
+    origin.request("https://gantry.example/v1/worker/ready")
+  assert named.host == "gantry.example"
+}

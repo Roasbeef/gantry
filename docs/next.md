@@ -1,6 +1,6 @@
 # Current handoff
 
-**2026-11-21**
+**2026-11-24**
 
 The initial runnable slice implements immutable Git inputs, a native action
 graph, restricted ad hoc actions, durable claims and results, and guarded
@@ -60,6 +60,22 @@ Environment reads, the worker schema lookup, and Docker environment
 policy use Gleam bindings. The queue store distinguishes authorization,
 snapshot conflicts, and the quiet-queue path through typed adapter
 outcomes. [Runtime boundaries](architecture/runtime.md#components)
+
+The CLI and onboarding are Gleam. `gantry_core/request` owns the build
+and submit request rules for both the controller and `gantry/cli`, and
+unknown keys are rejected on both sides
+([ADR 002](adr/002-one-owner-for-request-rules.md)). The release's third
+launcher runs `gantry@cli`, so the CLI needs no jq, curl, or OpenSSL.
+`gantry/cli/onboarding` replaces the Bash helper with the same profile
+layout. A Weft actor in `gantry/cli/service` owns each controller and
+worker child and tears down its process group, and
+`setpriv --pdeathsig TERM` covers a signalled CLI. Gleeunit tests with an
+injected transport replace `scripts/check-cli.sh`. A BEAM CLI call costs
+about 230 to 340 ms on the loaded four-core Linux test host, where bash
+took 7 to 24 ms. A bare `erl` boot there is about 160 ms. A `start_clean`
+boot would save about 50 ms if that ever matters. The interrupt behaviour
+is checked by hand on Linux, not by `make e2e`.
+[CLI reference](cli.md)
 
 The fleet bootstrap slice adds a managed local smoke build and remote
 worker profiles. Local init and worker setup preserve profile identity

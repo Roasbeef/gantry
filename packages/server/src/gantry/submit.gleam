@@ -39,8 +39,8 @@ pub type Outcome {
   /// The candidate is part of the target's history.
   Landed
 
-  /// The landing can never proceed, for the stated reason.
-  Refused(reason: String)
+  /// The landing can never proceed, for the typed reason.
+  Refused(block: queue.Block)
 }
 
 /// Return the observed landing outcome. An error keeps the intent open.
@@ -55,18 +55,21 @@ pub fn reconcile(
   repo: config.Repository,
   intent: queue.Intent,
 ) -> Result(Outcome, Fault) {
-  let c = intent.candidate
+  let c = queue.intent_candidate(intent)
 
   // Confirm the registered remote still owns the intent’s lane.
   use Nil <- result.try(
-    case intent.repo == repo.name && c.branch == repo.branch {
+    case
+      queue.intent_repo(intent) == repo.name
+      && queue.candidate_branch(c) == repo.branch
+    {
       True -> Ok(Nil)
       False -> Error(fault.Internal("landing configuration changed"))
     },
   )
 
   use s <- git.session(cfg, repo)
-  let target = "refs/heads/" <> c.branch
+  let target = "refs/heads/" <> queue.candidate_branch(c)
   use observed <- result.try(git.fetch(s, target))
   use _ <- result.try(
     git.command(s, [
@@ -74,26 +77,30 @@ pub fn reconcile(
       "--quiet",
       "--no-tags",
       "--",
-      git.bundle(cfg, repo, c.commit),
+      git.bundle(cfg, repo, queue.candidate_commit(c)),
       "refs/heads/candidate",
     ]),
   )
   use restored <- result.try(git.oid(s, "FETCH_HEAD"))
-  use ff <- result.try(git.ancestor(s, c.base, c.commit))
+  use ff <- result.try(git.ancestor(
+    s,
+    queue.candidate_base(c),
+    queue.candidate_commit(c),
+  ))
 
   // The bundle must restore the tested commit and preserve the expected base.
-  use Nil <- result.try(case ff && restored == c.commit {
+  use Nil <- result.try(case ff && restored == queue.candidate_commit(c) {
     True -> Ok(Nil)
     False ->
       Error(fault.Internal("invalid stored candidate ancestry or identity"))
   })
 
-  use landed <- result.try(git.ancestor(s, c.commit, observed))
+  use landed <- result.try(git.ancestor(s, queue.candidate_commit(c), observed))
 
   // History confirms a landing, excludes it, or permits replay of the same update.
-  case landed, observed == c.base {
+  case landed, observed == queue.candidate_base(c) {
     True, _ -> Ok(Landed)
-    False, False -> Ok(Refused(advanced))
+    False, False -> Ok(Refused(queue.TargetAdvanced))
     False, True -> {
       use verdict <- result.try(check_members(cfg, repo, s, c))
 
@@ -105,10 +112,10 @@ pub fn reconcile(
             git.command(s, [
               "push",
               "--porcelain",
-              "--force-with-lease=" <> target <> ":" <> c.base,
+              "--force-with-lease=" <> target <> ":" <> queue.candidate_base(c),
               "--",
               s.url,
-              c.commit <> ":" <> target,
+              queue.candidate_commit(c) <> ":" <> target,
             ]),
           )
           Ok(Landed)
@@ -121,8 +128,6 @@ pub fn reconcile(
   }
 }
 
-const advanced = "target advanced outside the tested candidate"
-
 /// Look at the target once more before a policy refusal becomes final. A
 /// push that was in flight when the first observation ran can have applied
 /// since, and that landing must not be recorded as a block.
@@ -133,13 +138,13 @@ fn confirm_refusal(
   reason: String,
 ) -> Result(Outcome, Fault) {
   use observed <- result.try(git.fetch(s, target))
-  use landed <- result.try(git.ancestor(s, c.commit, observed))
+  use landed <- result.try(git.ancestor(s, queue.candidate_commit(c), observed))
 
   // The second look can show a landing, an advance, or the same base.
-  case landed, observed == c.base {
+  case landed, observed == queue.candidate_base(c) {
     True, _ -> Ok(Landed)
-    False, False -> Ok(Refused(advanced))
-    False, True -> Ok(Refused(reason))
+    False, False -> Ok(Refused(queue.TargetAdvanced))
+    False, True -> Ok(Refused(queue.PolicyDenied(reason)))
   }
 }
 
@@ -151,7 +156,7 @@ fn check_members(
   s: git.Session,
   c: queue.Candidate,
 ) -> Result(github.Verdict, Fault) {
-  list.try_fold(c.members, github.Permitted, fn(verdict, m) {
+  list.try_fold(queue.candidate_members(c), github.Permitted, fn(verdict, m) {
     case verdict {
       github.Permitted -> check_member(cfg, repo, s, c, m)
       github.Denied(_) | github.Pending -> Ok(verdict)
@@ -176,7 +181,7 @@ fn check_member(
         repo.name,
         m.pull,
       ))
-      Ok(github.landing_verdict(pull, c.branch, m.head, target))
+      Ok(github.landing_verdict(pull, queue.candidate_branch(c), m.head, target))
     }
     config.Local(_) -> {
       use actual <- result.try(prepare.member(cfg, repo, s, m.pull))

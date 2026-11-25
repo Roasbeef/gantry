@@ -24,12 +24,14 @@
 
 import gantry/config.{type Config}
 import gantry/fault.{type Fault}
+import gantry/prepare
 import gantry/store
 import gantry/submit
 import gantry_core/queue
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/supervision
 import gleam/result
 import logging
@@ -52,9 +54,21 @@ pub type Retry {
   Retry(not_before: Int, delay: Int)
 }
 
+/// The reconciler's memory. `retries` backs off landing intents,
+/// `preparing` backs off waiting groups, and `next_retain` is the monotonic
+/// time of the next retention pass, or `None` before the first one. Monotonic
+/// time can be negative, so no integer stands for "due now".
 type State {
-  State(cfg: Config, retries: Dict(String, Retry))
+  State(
+    cfg: Config,
+    retries: Dict(String, Retry),
+    preparing: Dict(String, Retry),
+    next_retain: Option(Int),
+  )
 }
+
+/// How often the queue is trimmed to its retention bounds, in milliseconds.
+const retain_every = 60_000
 
 /// Describe a linked, periodic submission reconciler for a supervisor.
 ///
@@ -68,24 +82,139 @@ type State {
 /// // supervisor.add(supervisor, reconcile.supervised(config))
 /// ```
 pub fn supervised(cfg: Config) -> supervision.ChildSpecification(Nil) {
-  actor.new(State(cfg, dict.new()))
+  actor.new(State(cfg, dict.new(), dict.new(), None))
   |> actor.on_message(on_message)
   |> actor.periodic(every: 1000, sending: Reconcile)
   |> actor.supervised
   |> supervision.map_data(fn(_) { Nil })
 }
 
-fn on_message(state: State, _message: Message) -> actor.Next(State, Message) {
-  actor.continue(tick(maintain_queue(state), poll.monotonic().now()))
+/// Run one reconciler pass with an empty memory: maintenance first, then
+/// every outstanding landing intent. The periodic actor does the same on each
+/// tick, and tests drive the queue through this entry instead of waiting.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // reconcile.pass(config)
+/// ```
+pub fn pass(cfg: Config) -> Nil {
+  let now = poll.monotonic().now()
+  let fresh = State(cfg, dict.new(), dict.new(), None)
+  let _ = tick(maintain_queue(fresh, now), now)
+  Nil
 }
 
-/// The place where periodic queue maintenance runs once the core queue
-/// exposes it: lease expiry, terminal skipping and retention. Each will be
-/// one committed transition through `store.change`, run before the landing
-/// step so a freed lane is visible in the same tick. Nothing is scheduled
-/// yet.
-fn maintain_queue(state: State) -> State {
-  state
+fn on_message(state: State, _message: Message) -> actor.Next(State, Message) {
+  let now = poll.monotonic().now()
+  actor.continue(tick(maintain_queue(state, now), now))
+}
+
+/// Periodic queue maintenance, run before the landing step so a lane that
+/// a landing freed is visible in the same tick. First every waiting group at
+/// the head of a free lane is built, and then, on a schedule, finished runs
+/// beyond the retention bounds are dropped. Lease expiry needs no step here,
+/// because every claim runs it.
+fn maintain_queue(state: State, now: Int) -> State {
+  state |> prepare_waiting(now) |> retain_finished(now)
+}
+
+/// Build each group that heads a free lane, record its candidate and graph
+/// or its refusal, and back off a group whose outcome is unknown.
+fn prepare_waiting(state: State, now: Int) -> State {
+  // A read is enough, because recording re-checks the lane under the swap.
+  case store.read() {
+    Error(reason) -> {
+      log_failure("cannot read waiting groups", reason)
+      state
+    }
+    Ok(snapshot) -> {
+      let waiting = queue.preparations(snapshot)
+      let names = list.map(waiting, queue.preparation_run)
+      let kept =
+        dict.filter(state.preparing, fn(name, _) { list.contains(names, name) })
+      let preparing =
+        list.fold(waiting, kept, fn(table, preparation) {
+          prepare_attempt(state.cfg, table, preparation, now)
+        })
+      State(..state, preparing:)
+    }
+  }
+}
+
+/// Prepare one group if its backoff has elapsed and update the table.
+fn prepare_attempt(
+  cfg: Config,
+  table: Dict(String, Retry),
+  preparation: queue.Preparation,
+  now: Int,
+) -> Dict(String, Retry) {
+  let name = queue.preparation_run(preparation)
+
+  // A group inside its backoff window waits for a later tick.
+  case due(table, name, now) {
+    False -> table
+    True ->
+      // A recorded outcome clears the entry, and an unknown one doubles it.
+      case prepare_one(cfg, preparation) {
+        Ok(Nil) -> resolved(table, name)
+        Error(reason) -> {
+          log_failure("cannot prepare run " <> name, reason)
+          failed(table, name, now)
+        }
+      }
+  }
+}
+
+/// Build one group's candidate and record exactly what the queue offered. A
+/// moved pin, a conflict and a refusal are durable outcomes. A Git or GitHub
+/// failure is an error, so the group stays waiting and is retried.
+fn prepare_one(
+  cfg: Config,
+  preparation: queue.Preparation,
+) -> Result(Nil, Fault) {
+  use repo <- result.try(
+    dict.get(cfg.repositories, queue.preparation_repo(preparation))
+    |> result.replace_error(fault.Internal(
+      "repository configuration unavailable",
+    )),
+  )
+  use outcome <- result.try(prepare.candidate(cfg, repo, preparation))
+  let recorded = case outcome {
+    prepare.Ready(candidate, tasks) -> Ok(#(candidate, tasks))
+    prepare.Refusal(failure) -> Error(failure)
+  }
+
+  store.change(fn(state) {
+    queue.record_preparation(state, preparation, recorded)
+    |> result.map(fn(next) { #(next, Nil) })
+    |> result.map_error(fault.Conflict)
+  })
+}
+
+/// Drop finished runs and proofs beyond the configured bounds once per
+/// interval. An unchanged snapshot is confirmed and not rewritten, so a
+/// queue within its bounds costs one read.
+fn retain_finished(state: State, now: Int) -> State {
+  // Between passes the queue is left alone.
+  let due = case state.next_retain {
+    Some(at) -> now >= at
+    None -> True
+  }
+  case due {
+    False -> state
+    True -> {
+      let outcome =
+        store.change(fn(snapshot) {
+          Ok(#(queue.retain(snapshot, state.cfg.retention), Nil))
+        })
+      case outcome {
+        Ok(Nil) -> Nil
+        Error(reason) -> log_failure("cannot apply retention", reason)
+      }
+      State(..state, next_retain: Some(now + retain_every))
+    }
+  }
 }
 
 /// Reconcile faults outside the HTTP path. Unknown outcomes retain authority.
@@ -126,7 +255,10 @@ fn attempt(
       case reconcile_one(cfg, intent) {
         Ok(Nil) -> resolved(retries, name)
         Error(reason) -> {
-          log_failure("cannot reconcile run " <> intent.run, reason)
+          log_failure(
+            "cannot reconcile run " <> queue.intent_run(intent),
+            reason,
+          )
           failed(retries, name, now)
         }
       }
@@ -136,7 +268,9 @@ fn attempt(
 /// The retry table's identity for an intent. The candidate commit is part
 /// of it, so a replaced candidate never inherits another's backoff.
 fn key(intent: queue.Intent) -> String {
-  intent.run <> "@" <> intent.candidate.commit
+  queue.intent_run(intent)
+  <> "@"
+  <> queue.candidate_commit(queue.intent_candidate(intent))
 }
 
 /// Whether an intent may be attempted now.
@@ -194,7 +328,7 @@ pub fn resolved(
 /// Replay the exact effect for one target, keeping ambiguous outcomes durable.
 fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
   use repo <- result.try(
-    dict.get(cfg.repositories, intent.repo)
+    dict.get(cfg.repositories, queue.intent_repo(intent))
     |> result.replace_error(fault.Internal(
       "repository configuration unavailable",
     )),
@@ -204,7 +338,7 @@ fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
   // A refusal is a durable block, so the lane is released with its reason.
   let recorded = case outcome {
     submit.Landed -> Ok(Nil)
-    submit.Refused(reason) -> Error(reason)
+    submit.Refused(block) -> Error(block)
   }
 
   store.change(fn(state) {
