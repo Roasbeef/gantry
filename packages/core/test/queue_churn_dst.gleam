@@ -18,6 +18,7 @@
 //// only. A vanished worker never returns, so its lease must expire and be
 //// reassigned for the queue to finish.
 
+import gantry_core/chunks
 import gantry_core/graph
 import gantry_core/image.{type Image}
 import gantry_core/protocol
@@ -120,7 +121,7 @@ pub const coverage = [
   "returned_after_expiry", "poisoned_runs", "poison_drops", "skipped_actions",
   "prepared_groups", "preparation_refusals", "policy_denials",
   "retained_dropped", "oversized_reasons", "interrupted_reports",
-  "interrupted_at_bound",
+  "interrupted_at_bound", "staging_refusals",
 ]
 
 /// Expand a seed with the same Park–Miller stream as `queue_dst`.
@@ -352,7 +353,7 @@ fn schedule(seed: Int, events: Int) -> #(Int, List(Int)) {
       let next = next_seed(state.0)
       #(next, [next % 256, ..state.1])
     })
-  #(mask % 1024, list.reverse(ops))
+  #(mask % 2048, list.reverse(ops))
 }
 
 fn next_seed(seed: Int) -> Int {
@@ -488,8 +489,9 @@ fn denial_key(id: String) -> Int {
 /// crashes, 3 outside ref writes, 4 vanishing workers, 5 same-ID restarts,
 /// half of which report the held attempt `Interrupted`, and late results,
 /// 6 rejected completions, 7 refused preparations, 8 provider policy
-/// denials, 9 poison actions that never report. A disabled fault runs the
-/// honest op.
+/// denials, 9 poison actions that never report, 10 inputs the worker refuses
+/// to stage (a chunk or manifest that fails its checks). A disabled fault
+/// runs the honest op.
 fn tick(world: World, mask: Int, op: Int) -> World {
   let k = op / 16 % 2
   let pool = case op / 32 % 2 {
@@ -503,12 +505,20 @@ fn tick(world: World, mask: Int, op: Int) -> World {
   let restart_on = mask / 32 % 2 == 1
   let reject_on = mask / 64 % 2 == 1
   let refuse_on = mask / 128 % 2 == 1
+  let staging_on = mask / 1024 % 2 == 1
+
+  // The same op byte picks one of the worker's possible refusals.
+  let verdict = case op / 64 {
+    0 if reject_on -> Planted
+    1 if staging_on -> Refused(staging_violation(op / 16))
+    _ -> Honest
+  }
   case op % 16 {
     0 | 1 -> poll(world, k, pool, False)
     2 -> poll(world, k, pool, mask % 2 == 1)
-    3 | 4 -> complete(world, k, pool, False, False)
-    5 -> complete(world, k, pool, lose_result, False)
-    6 -> complete(world, k, pool, False, reject_on && op / 64 == 0)
+    3 | 4 -> complete(world, k, pool, False, Honest)
+    5 -> complete(world, k, pool, lose_result, Honest)
+    6 -> complete(world, k, pool, False, verdict)
     7 | 8 | 9 -> step(world, k)
     10 if crash_on -> crash(world, k)
     10 -> step(world, k)
@@ -519,7 +529,7 @@ fn tick(world: World, mask: Int, op: Int) -> World {
     13 if restart_on -> restart_worker(world, k, pool, op / 64 % 2 == 0)
     13 -> poll(world, k, pool, False)
     14 if restart_on || vanish_on -> late(world, k)
-    14 -> complete(world, k, pool, False, False)
+    14 -> complete(world, k, pool, False, Honest)
     _ ->
       case op / 64 % 4 {
         1 -> elapse(world, k)
@@ -929,14 +939,34 @@ fn poll(world: World, k: Int, pool: String, lose: Bool) -> World {
   }
 }
 
-fn completion(job: queue.Assignment, reject: Bool) -> queue.Completion {
-  case reject {
-    True ->
+/// What a worker reports for an assignment it ran or tried to stage.
+type Verdict {
+  Honest
+  Planted
+  Refused(chunks.Violation)
+}
+
+/// One of the ways a worker refuses a chunked input, picked by `n`.
+fn staging_violation(n: Int) -> chunks.Violation {
+  case n % 5 {
+    0 -> chunks.ChunkLength(n)
+    1 -> chunks.ChunkDigest(n)
+    2 -> chunks.NoChunk(n)
+    3 -> chunks.TotalDigest
+    _ -> chunks.InvalidManifest("total is not the sum")
+  }
+}
+
+fn completion(job: queue.Assignment, verdict: Verdict) -> queue.Completion {
+  case verdict {
+    Planted ->
       queue.Rejected(
         "planted rejection " <> string.repeat("x", 3000),
         job.run <> "-rejected",
       )
-    False ->
+    Refused(violation) ->
+      queue.Rejected(chunks.describe(violation), job.run <> "-refused")
+    Honest ->
       queue.Succeeded(
         list.map(job.task.action.outputs, queue.Artifact(_, job.run <> "-out")),
         job.run <> "-" <> job.task.action.name,
@@ -1056,7 +1086,7 @@ fn complete(
   k: Int,
   pool: String,
   lose: Bool,
-  reject: Bool,
+  verdict: Verdict,
 ) -> World {
   let w = worker(world, pool)
   let poison = case w.held {
@@ -1069,7 +1099,13 @@ fn complete(
     Some(_), True ->
       set_worker(bump(world, "poison_drops"), Worker(..w, held: None))
     Some(job), False -> {
-      let #(world, accepted) = report(world, k, job, completion(job, reject))
+      let #(world, accepted) = report(world, k, job, completion(job, verdict))
+
+      // Count a refused input only when the queue took the result.
+      let world = case verdict, accepted {
+        Refused(_), True -> bump(world, "staging_refusals")
+        _, _ -> world
+      }
       let held = case accepted && lose {
         True -> Some(job)
         False -> None
@@ -1151,7 +1187,7 @@ fn late(world: World, k: Int) -> World {
     [] -> world
     [job, ..rest] -> {
       let #(world, accepted) =
-        report(World(..world, ghosts: rest), k, job, completion(job, False))
+        report(World(..world, ghosts: rest), k, job, completion(job, Honest))
       case accepted {
         True -> bump(world, "late_accepted")
         False -> bump(world, "late_rejected")
@@ -1425,9 +1461,9 @@ fn heal(world: World, round: Int, rounds: Int, mode: Heal) -> World {
       |> event(prepare(_, k, False))
       |> event(prepare(_, k, False))
       |> event(poll(_, k, "build", False))
-      |> event(complete(_, k, "build", False, False))
+      |> event(complete(_, k, "build", False, Honest))
       |> event(poll(_, k, "test", False))
-      |> event(complete(_, k, "test", False, False))
+      |> event(complete(_, k, "test", False, Honest))
       |> drain(k, 12)
       |> drain(1 - k, 12)
       |> heal_expiry(k, mode)

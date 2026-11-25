@@ -98,14 +98,14 @@ minute ends the supervisor and the VM, and the service manager restarts it.
 The project commits `gantry.json`: `actions`, and `targets` that name the
 actions to satisfy ([example](../examples/gantry.json)). The decoder reads
 those two keys and nothing else
-(`gantry_core/graph.gleam:120`), and each action decodes with
-defaults (`gantry_core/graph.gleam:136`): `inputs` is `["."]`,
-`timeout` 300). `graph.compile` (`gantry_core/graph.gleam:32`)
-checks names, edges, outputs, and paths (`gantry_core/graph.gleam:194`),
-orders the actions topologically (`gantry_core/graph.gleam:243`), and keeps
+(`gantry_core/graph.gleam:149`), and each action decodes with
+defaults (`gantry_core/graph.gleam:165`): `inputs` is `["."]`,
+`timeout` 300). `graph.compile` (`gantry_core/graph.gleam:61`)
+checks names, edges, outputs, and paths (`gantry_core/graph.gleam:292`),
+orders the actions topologically (`gantry_core/graph.gleam:341`), and keeps
 the closure of the requested target. Path components are restricted so
 nothing reaches `.git` or escapes the workspace
-(`gantry_core/graph.gleam:65`). The image and pool are not in
+(`gantry_core/graph.gleam:94`). The image and pool are not in
 the manifest. They come from the repository entry, which is how an operator,
 and not a pull request, controls where code runs.
 
@@ -133,19 +133,23 @@ in the [API reference](../api.md).
 **Admission.** `api.build` parses the body (unknown keys are rejected), looks the
 repository up in the operator's allowlist (`gantry/api.gleam:257`),
 then calls `prepare.build` (`gantry/prepare.gleam:26`). That opens a
-Git session on the repository's mirror (`gantry/git.gleam:53`),
+Git session on the repository's mirror (`gantry/git.gleam:54`),
 which takes a node-local lock, fetches the pinned commit
-(`gantry/git.gleam:220`), and runs `tasks`
+(`gantry/git.gleam:221`), and runs `tasks`
 (`gantry/prepare.gleam:275`). `tasks` reads `gantry.json` at that commit,
 compiles the target, and for each action archives its declared inputs from the
-Git tree (`gantry/prepare.gleam:363`) and stores the archive as a blob
-(`gantry/blobs.gleam:81`). `blobs.put` writes under a random name,
+Git tree (`gantry/prepare.gleam:372`) and stores the archive with
+`blobs.put_input` (`gantry/blobs.gleam:122`): one blob up to 64 MiB, or chunks
+of at most 32 MiB plus a manifest above that. An action that declares
+`"git": "shallow"` also gets a `.git` archive for its commit
+(`gantry/git.gleam:431`). `blobs.put` writes under a random name,
 syncs the file and directories, and renames it to `objects/<sha256>`, so a
 reader sees the whole object or none.
 
 **The recipe.** Each task gets a recipe, the SHA-256 of a fixed tag, the cache
 scope, the repository, the pool, the image, the source archive's digest, and
-the encoded action (`gantry/prepare.gleam:351`). A declared
+the encoded action, plus the commit when the action declared Git metadata
+(`gantry_core/graph.gleam:213`, called at `gantry/prepare.gleam:351`). A declared
 target shares one scope. An ad hoc action is scoped to its run ID, so its
 results cannot satisfy a declared target. `gantry plan` stops here and returns
 the action list.
@@ -170,7 +174,7 @@ one as unavailable (`layout.max_runs`).
 The run is durable and nothing has executed. An action runs when a polling
 slot qualifies for it, and four things decide that.
 
-**Prerequisites.** `queue.next_work` (`gantry_core/queue.gleam:860`)
+**Prerequisites.** `queue.next_work` (`gantry_core/queue.gleam:901`)
 returns a `Pending` action only when every action named in `deps` and `after`
 has passed or been reused, and it builds the cache key from the recipe and the
 resolved dependency files. The `ready` index lists a run under each pool where
@@ -181,21 +185,21 @@ resolved dependency files. The `ready` index lists a run under each pool where
 Admission copied the repository's pool into the task, so editing
 `controller.toml` later does not move queued work.
 
-**Serving.** A run is served (`gantry_core/queue.gleam:848`) if it is a
+**Serving.** A run is served (`gantry_core/queue.gleam:889`) if it is a
 `Build`, or a `Queued` group that has not failed. A failed run's pending
 actions are `Skipped` at the moment of failure
-(`gantry_core/queue.gleam:990`), which keeps an idle queue
+(`gantry_core/queue.gleam:1031`), which keeps an idle queue
 recognizably quiet.
 
 **Lanes and preparation.** A group submission is different. It is admitted as
 `Waiting`, holds no graph, and waits for its lane (repository and branch) to
-be free. `queue.preparations` (`gantry_core/queue.gleam:539`)
+be free. `queue.preparations` (`gantry_core/queue.gleam:580`)
 offers the first waiting run of each free lane, and a lane is held by a
 `Queued` run that has not failed or by a `Landing` run
-(`gantry_core/queue.gleam:661`). The reconciler acts on the offer
+(`gantry_core/queue.gleam:702`). The reconciler acts on the offer
 once a second (`gantry/reconcile.gleam:124`) and records the
 result with `queue.record_preparation`
-(`gantry_core/queue.gleam:590`), which accepts it only
+(`gantry_core/queue.gleam:631`), which accepts it only
 for the exact run it offered, so a stale controller's outcome is refused.
 Section 9 follows a group through that.
 
@@ -205,7 +209,7 @@ A slot is one `gantry-worker` process. `worker.boot`
 (`gantry/worker.gleam:68`) reads its identity, pool, endpoint, token, and
 limits, opens the journal with its exclusive lock
 (`gantry/worker/custody.gleam:51`), and checks that the collector image
-exists (`gantry/worker/docker.gleam:186`). The slot loop runs as a
+exists (`gantry/worker/docker.gleam:189`). The slot loop runs as a
 supervised actor (`gantry/worker.gleam:121`). Each tick calls
 `slot.step` (`gantry/worker/slot.gleam:96`), which reads the journal's
 phase first and claims new work only when the journal is empty. After an empty
@@ -237,10 +241,10 @@ It takes no lock, so empty polls never wait behind real claims.
 a lapsed lease, the worker's own lease, and the oldest ready ones. It runs
 `queue.expire` first. Then it
 returns the lease this worker already holds, if any
-(`gantry_core/queue.gleam:782`), so a replayed poll costs
+(`gantry_core/queue.gleam:823`), so a replayed poll costs
 nothing. Otherwise `offer` walks the runs in admission order
-(`gantry_core/queue.gleam:799`) and `allocate`
-(`gantry_core/queue.gleam:816`) handles the first action `next_work`
+(`gantry_core/queue.gleam:840`) and `allocate`
+(`gantry_core/queue.gleam:857`) handles the first action `next_work`
 returns. A cached proof for the same repository and key turns the action into
 `Reused` and the scan continues, so cache hits are resolved at claim time.
 A miss writes `Active` with a lease: a new global serial, the worker, an attempt
@@ -250,10 +254,10 @@ before the answer leaves the controller, so a worker never runs an action the
 queue does not know about. [How slots share work](../scheduling.md).
 
 **Expiry.** Nothing renews a lease. `queue.expire`
-(`gantry_core/queue.gleam:731`) returns every action past its deadline
+(`gantry_core/queue.gleam:772`) returns every action past its deadline
 to `Pending` with one more attempt, and the third lapse fails the action as
 `LeaseExpired` (`gantry_core/queue.gleam:71`,
-`gantry_core/queue.gleam:736`). Because the next lease has a new
+`gantry_core/queue.gleam:777`). Because the next lease has a new
 serial, a result for the old one is refused. A result that arrives before any
 claim has expired the lease is still accepted, since expiry runs only inside
 a claim.
@@ -269,25 +273,27 @@ journal is the slot's memory: at most one attempt exists, and its phase
 tells `slot.step` what to do next.
 
 **Staging.** `slot.perform` (`gantry/worker/slot.gleam:193`) calls
-`docker.execute` (`gantry/worker/docker.gleam:279`). It first removes
+`docker.execute` (`gantry/worker/docker.gleam:282`). It first removes
 any container, volume, or staging directory left under the attempt's name
-(`gantry/worker/docker.gleam:172`), so a retry starts clean. It
-fetches the source archive and each dependency's output through
-`controllers.fetch`, which rejects bytes whose SHA-256 differs from the
-requested digest (`gantry/worker/controllers.gleam:187`), and builds
-two tar files without extracting anything on the host
-(`gantry/worker/docker.gleam:319`).
+(`gantry/worker/docker.gleam:175`), so a retry starts clean. It
+fetches the source archive, the Git metadata archive if there is one, and
+each dependency's output through `controllers.fetch`, which rejects bytes
+whose SHA-256 differs from the requested digest
+(`gantry/worker/controllers.gleam:187`). A chunked input goes through
+`inputs.stage` (`gantry/worker/inputs.gleam:41`), which checks each chunk's
+length and digest and the reassembled digest. Staging builds the tar files
+without extracting anything on the host (`gantry/worker/docker.gleam:322`).
 
 **The sandbox.** `docker.run` creates a tmpfs volume sized by
 `GANTRY_WORKSPACE_MIB`, starts a read-only collector container that mounts it,
-and creates the action container (`gantry/worker/docker.gleam:463`). Every
+and creates the action container (`gantry/worker/docker.gleam:527`). Every
 container gets `--network=none`, `--cap-drop=ALL`, a read-only root, user
 65534, `no-new-privileges`, and no log driver
-(`gantry/worker/docker.gleam:32`). The action container adds the
-slot's limits (`gantry/worker/docker.gleam:154`): CPUs,
+(`gantry/worker/docker.gleam:35`). The action container adds the
+slot's limits (`gantry/worker/docker.gleam:157`): CPUs,
 memory, a process limit, an open-file limit, and a `/tmp` tmpfs, each from a
 `GANTRY_WORKER_*` variable read once at boot
-(`gantry/worker/docker.gleam:94`). These flags are the only use of
+(`gantry/worker/docker.gleam:97`). These flags are the only use of
 the limits. The controller never sees them. The container's command extracts
 the two archives into `/work` and then `exec`s the action's `argv`.
 
@@ -305,13 +311,13 @@ to report the attempt `Interrupted` itself.
 
 **Running.** `start_action` runs `docker start -a` as a Weft task with a
 deadline of the action's timeout plus a grace period, and removing the
-containers is the task's cancel (`gantry/worker/docker.gleam:606`).
+containers is the task's cancel (`gantry/worker/docker.gleam:678`).
 Output is capped and spooled into the journal. On a normal exit the
 declared output files are read through the collector, which refuses symlinks,
 non-regular files, and files over the limit
-(`gantry/worker/docker.gleam:711`). A nonzero status, a timeout,
+(`gantry/worker/docker.gleam:783`). A nonzero status, a timeout,
 or a bad output becomes a `Rejected` completion, and the log is kept either
-way (`gantry/worker/docker.gleam:682`).
+way (`gantry/worker/docker.gleam:754`).
 
 ## 7. Publishing
 
@@ -331,7 +337,7 @@ matches the credential, that every referenced blob exists
 (`gantry_core/queue.gleam:921`). The queue accepts a result only for the
 live serial held by that worker. A success must list exactly the action's
 declared outputs, and it becomes a `Passed` proof that is also indexed for
-reuse (`gantry_core/queue.gleam:945`). A rejection becomes `Failed`
+reuse (`gantry_core/queue.gleam:986`). A rejection becomes `Failed`
 and strands the run's pending actions as `Skipped`
 (`gantry_core/queue.gleam:978`). An interruption lapses the lease as an
 expiry would.
@@ -380,7 +386,7 @@ parents, so a replay produces the same OIDs. A conflict refuses the group as
 `unmergeable`. Otherwise `stage` reads the manifest at the tip, archives the
 inputs from the candidate, and `git.preserve` writes the candidate's objects as
 a bundle in shared storage (`gantry/prepare.gleam:195`,
-`gantry/git.gleam:363`). `queue.record_preparation` makes the run
+`gantry/git.gleam:364`). `queue.record_preparation` makes the run
 `Queued`, with the candidate (branch, base, commit, members) and the graph.
 A Git or GitHub failure records nothing, and the reconciler retries the group
 with its own backoff.
