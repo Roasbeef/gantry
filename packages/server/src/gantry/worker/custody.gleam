@@ -77,16 +77,18 @@ pub fn open(
 
 /// Preserve an established slot's existing tables and identity on restart.
 fn reopen(path: String, worker: String) -> Result(sqlight.Connection, String) {
-  // Taking the exclusive lock on an empty file makes SQLite write its header,
-  // so an empty journal is refused before it is opened. It has no identity.
   use info <- result.try(
     simplifile.file_info(path)
     |> result.replace_error("cannot check the managed worker journal"),
   )
+
+  // Taking the exclusive lock on an empty file makes SQLite write its header,
+  // so an empty journal is refused before it is opened. It has no identity.
   use Nil <- result.try(case info.size {
     0 -> Error("managed worker journal has no readable identity")
     _ -> Ok(Nil)
   })
+
   let db_uri = "file:" <> uri.percent_encode(path) <> "?mode=rw"
   use db <- result.try(sqlight.open(db_uri) |> result.map_error(sql_fault))
   use Nil <- result.try(lock(db))
