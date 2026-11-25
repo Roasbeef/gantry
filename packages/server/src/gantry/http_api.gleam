@@ -5,6 +5,7 @@ import gantry/api
 import gantry/blobs
 import gantry/config.{type Config}
 import gantry/store
+import gantry_core/request as admission
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/crypto
@@ -160,7 +161,7 @@ fn accepts(req: Request(Connection), token: String) -> Bool {
 /// // use body <- with_json(request)
 /// ```
 fn with_json(req: Request(Connection), then: fn(String) -> Reply) -> Reply {
-  use body <- with_body(req, 262_144)
+  use body <- with_body(req, admission.body_limit)
 
   // Only valid UTF-8 can reach the JSON decoder.
   case bit_array.to_string(body) {

@@ -94,7 +94,7 @@ pub type Effects {
     write: fn(BitArray) -> Nil,
     /// Write one notice line to standard error.
     report: fn(String) -> Nil,
-    /// Read a monotonic clock in milliseconds.
+    /// Read the wall clock in milliseconds, for deadlines.
     clock: fn() -> Int,
     /// Wait for a number of milliseconds.
     sleep: fn(Int) -> Nil,
@@ -150,7 +150,7 @@ pub fn init_local(
   effects: Effects,
   fields: Option(Fields),
 ) -> Result(Nil, Failure) {
-  use binaries <- result.try(release(effects))
+  use binaries <- result.try(release(effects, Both))
   use directory <- result.try(profile_directory(effects, LocalKind))
   use directory <- result.try(open_profile(directory))
   use prepared <- result.try(prepare_local(effects, directory))
@@ -168,7 +168,7 @@ pub fn init_local(
 /// // onboarding.local_start(effects)
 /// ```
 pub fn local_start(effects: Effects) -> Result(Nil, Failure) {
-  use binaries <- result.try(release(effects))
+  use binaries <- result.try(release(effects, Both))
   use directory <- result.try(profile_directory(effects, LocalKind))
   use <- bool.lazy_guard(!is_file(directory <> "/profile.json"), fn() {
     Error(failure.new(
@@ -331,7 +331,7 @@ pub fn worker_setup(
 /// // onboarding.worker_start(effects)
 /// ```
 pub fn worker_start(effects: Effects) -> Result(Int, Failure) {
-  use binaries <- result.try(release(effects))
+  use binaries <- result.try(release(effects, WorkerOnly))
   use directory <- result.try(profile_directory(effects, WorkerKind))
   use <- bool.lazy_guard(!is_file(directory <> "/profile.json"), fn() {
     Error(failure.new(
@@ -355,15 +355,15 @@ pub fn worker_start(effects: Effects) -> Result(Int, Failure) {
   let unset = ["GANTRY_TOKEN", "GANTRY_SUBMIT_TOKEN", "GH_TOKEN"]
 
   // The worker's logs are its output, so it shares this terminal. The
-  // death signal stops it if this VM is signalled.
+  // death signal stops it if this VM is signalled. The token travels in
+  // the port environment, never on an argument list in /proc.
   ffi_host.run_attached(
     "env",
     list.flatten([
       list.flat_map(unset, fn(key) { ["-u", key] }),
-      list.map(set, fn(pair) { pair.0 <> "=" <> pair.1 }),
       ["setpriv", "--pdeathsig", "TERM", binaries.worker],
     ]),
-    [],
+    set,
   )
   |> result.map_error(fn(reason) { failed("worker_unavailable", reason) })
 }
@@ -377,16 +377,35 @@ type Binaries {
   Binaries(controller: String, worker: String)
 }
 
-/// Find the controller and worker launchers beside this CLI. Onboarding
+/// Which launchers a command starts.
+type Roles {
+  Both
+  WorkerOnly
+}
+
+/// Find the launchers a command starts beside this CLI, and the `kill`
+/// tool that service teardown signals process groups with. Onboarding
 /// starts only the installed release, never a source build.
-fn release(effects: Effects) -> Result(Binaries, Failure) {
+fn release(effects: Effects, roles: Roles) -> Result(Binaries, Failure) {
   let binaries =
     Binaries(effects.bin <> "/gantryd", effects.bin <> "/gantry-worker")
+
+  // A remote slot runs only the worker, so it needs only that launcher.
+  let needed = case roles {
+    Both -> [binaries.controller, binaries.worker]
+    WorkerOnly -> [binaries.worker]
+  }
+
+  let executable = fn(path) {
+    case simplifile.file_info(path) {
+      Ok(info) -> int.bitwise_and(info.mode, 0o111) != 0
+      Error(_) -> False
+    }
+  }
+  let signals = ffi_host.run("kill", ["-l"], [], 5000)
   let present =
-    list.all([binaries.controller, binaries.worker], fn(path) {
-      ffi_host.run("test", ["-x", path], [], 5000) |> result.map(fn(r) { r.0 })
-      == Ok(0)
-    })
+    list.all(needed, executable)
+    && result.map(signals, fn(reply) { reply.0 }) == Ok(0)
   use <- bool.lazy_guard(!present, fn() {
     Error(failed(
       "missing_release",
@@ -569,7 +588,12 @@ fn prepare_local(
   directory: String,
 ) -> Result(Prepared, Failure) {
   let file = directory <> "/profile.json"
-  let requested = effects.environment("GANTRY_LOCAL_PORT")
+
+  // An empty port setting means unset, as `${VAR:-default}` did in Bash.
+  let requested = case effects.environment("GANTRY_LOCAL_PORT") {
+    Ok("") | Error(Nil) -> Error(Nil)
+    Ok(port) -> Ok(port)
+  }
 
   // A first init mints identities. A fresh profile beside an existing
   // controller or journal would orphan their custody, so it is refused.
@@ -935,8 +959,8 @@ fn await_ready(
 /// Whether the endpoint answers `/ready` with a ready status.
 fn answers_ready(effects: Effects, endpoint: String) -> Bool {
   let reply = {
-    use outgoing <- result.try(http_request.to(endpoint <> "/ready"))
-    effects.transport(http_request.set_body(outgoing, <<>>), 6000)
+    use outgoing <- result.try(origin.request(endpoint <> "/ready"))
+    effects.transport(outgoing, 6000)
   }
 
   // Readiness needs both the status and the body.
@@ -1346,11 +1370,10 @@ fn check_remote(
   token: String,
 ) -> Result(Nil, Failure) {
   let reply = {
-    use outgoing <- result.try(http_request.to(endpoint <> "/v1/worker/ready"))
+    use outgoing <- result.try(origin.request(endpoint <> "/v1/worker/ready"))
     outgoing
     |> http_request.set_method(http.Get)
     |> http_request.set_header("authorization", "Bearer " <> token)
-    |> http_request.set_body(<<>>)
     |> effects.transport(10_000)
   }
 

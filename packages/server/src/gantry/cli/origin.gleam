@@ -2,9 +2,11 @@
 //// only travel in a header. The CLI's controller URL and a worker's gateway
 //// origin both use `parse_authority`, which splits a host from an optional
 //// port and checks the host with `valid_host`. Every character class here
-//// is ASCII, read through `alphanumeric`.
+//// is ASCII, read through `alphanumeric`. `request` builds the outgoing
+//// request for a checked URL.
 
 import gleam/bool
+import gleam/http/request.{type Request}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -99,4 +101,25 @@ pub fn alphanumeric(c: String) -> Bool {
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
     c,
   )
+}
+
+/// Build an empty request for a checked URL. `request.to` drops the
+/// brackets of an IPv6 literal host, and httpc cannot parse the URL it
+/// rebuilds from a bare `::1`, so a host with a colon is bracketed again.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // origin.request("http://[::1]:4737/ready")
+/// ```
+pub fn request(url: String) -> Result(Request(BitArray), Nil) {
+  use outgoing <- result.map(request.to(url))
+
+  // Only an IPv6 literal has a colon in its host.
+  let host = case string.contains(outgoing.host, ":") {
+    True -> "[" <> outgoing.host <> "]"
+    False -> outgoing.host
+  }
+
+  request.Request(..outgoing, host:) |> request.set_body(<<>>)
 }
