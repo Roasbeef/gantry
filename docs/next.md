@@ -10,7 +10,7 @@ not appended to. [Tour of the code](guide/tour.md) ·
 (2026-11-25), ahead of `main` at `f4cc695`. At that commit `make check` exits 0
 (37 core tests on BEAM and JavaScript, 129 server tests, Loom lint with 0
 errors and 3 warnings). The 1,000-seed `sweep` reports 0 safety and 0 liveness
-violations. On a Linux host (blue-knight, Ubuntu 24.04, 4 vCPU) the release,
+violations. On a Linux host (Ubuntu 24.04, 4 vCPU) the release,
 install, and `make e2e` exit 0 with 9 checks passing, and `make model-check`
 exits 0 with 109,896 distinct states. The previous edition of this file was
 carried forward from earlier slices, and several of its claims no longer held.
@@ -67,7 +67,7 @@ Not re-checked in this pass, and carried as historical: the Loom pilot
 numbers (318 and 319 tests, the landed commit `676951e`), the CLI latency
 comparison (about 230 to 340 ms against 7 to 24 ms for the old Bash CLI), and
 the hand-checked interrupt behaviour of `gantry local start`. `make e2e` needs Linux and Docker; the
-baseline above records the run on blue-knight.
+baseline above records the run on the controller host.
 
 ## What to do next
 
@@ -100,7 +100,7 @@ the third slice.
    and `make e2e`. **Cut:** no custom Ra state machine unless the indexed
    Khepri layout misses the exit.
 3. **Let a trusted repository ask for a wider sandbox.** Real Loom lanes run
-   on gilgamesh under the worker's exact flags: `static` and `mid` pass; the
+   on the 32-core worker host under the worker's exact flags: `static` and `mid` pass; the
    `fast`, `conformance`, and `client` lanes fail, mostly because Loom's own
    `bwrap` jail cannot create user namespaces under `--cap-drop=ALL`, plus
    tests that write outside `/work`. Loom's jail and self-test lanes cannot pass
@@ -129,12 +129,12 @@ the third slice.
    critical path, and no lane is more than 14% of the work, so the action
    graph is not what limits speed. Six to eight four-CPU slots reach the
    floor. Cut the manifest along the CI lanes, then run it with the
-   controller on blue-knight and slots on gilgamesh. **Exit:** makespan
+   controller on its own host and slots on the 32-core worker host. **Exit:** makespan
    within 1.15 times max(critical path, total work divided by slots).
    **Guard:** the same pass and fail per lane as Loom's CI at that commit.
    Depends on slices 3 to 5.
 7. **Deploy the first fleet.** The gateway and one controller on
-   blue-knight.exe.xyz, worker slots on gilgamesh, and the laptop's Docker as
+   a four-vCPU controller host, worker slots on the 32-core worker host, and the laptop's Docker as
    an optional worker running the Linux release in a container with the
    Docker socket mounted (untested; the worker directory must have the same
    path inside and outside the container, because input archives are bind
@@ -142,14 +142,14 @@ the third slice.
    and third voter for failover only when there are three machines that stay
    up. **Status (2026-11-24):** the gateway, controller and four slots are up
    at 10fd0ef. The gateway is `tailscale serve` on
-   `https://blue-knight.tail0a99b.ts.net`, in front of `gantryd` on loopback
-   (systemd unit `gantryd`, files in `~/gantry-fleet`). Gilgamesh runs the
-   slots `gilgamesh-01` to `-04` as user units `gantry-worker@NN`, each with
+   the controller host's tailnet HTTPS name, in front of `gantryd` on loopback
+   (systemd unit `gantryd`, files in `~/gantry-fleet`). The worker host runs the
+   slots `worker-01` to `-04` as user units `gantry-worker@NN`, each with
    4 CPUs and 3 GiB, in pool `linux`. The fan-out fixture `fleet/fanout`
    (eight 20-second shards and a collector) passed in 66 s through the
    gateway, with four containers running at once in each of two waves; the
    floor is about 40 s, and each wave added about 7 s for collector start,
-   cleanup and the poll gap. Gilgamesh's `/etc/resolv.conf` bypasses
+   cleanup and the poll gap. The worker host's `/etc/resolv.conf` bypasses
    MagicDNS, so the slots resolve the gateway through `ERL_INETRC`
    (`~/gantry-fleet/inetrc`) until that host's DNS uses Tailscale. The Loom
    group and the laptop worker are still open.

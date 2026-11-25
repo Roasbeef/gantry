@@ -8,7 +8,8 @@ with per-action status, logs, and artifacts. When several changes are ready,
 Gantry builds their combined commit and lands that exact commit if it passes
 and the target branch still matches the tested base.
 
-[Try it locally](#get-started) · [Integrate a repository](docs/integrating.md) ·
+[Website](https://roasbeef.github.io/gantry/) · [Try it locally](#get-started) ·
+[Integrate a repository](docs/integrating.md) ·
 [Run a worker pool](docs/running.md) · [CLI](docs/cli.md) ·
 [HTTP API](docs/api.md) · [Architecture](docs/architecture/runtime.md) ·
 [Tour of the code](docs/guide/tour.md)
