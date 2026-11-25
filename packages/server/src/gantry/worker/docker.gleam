@@ -2,6 +2,11 @@
 //// Cleanup looks up persisted names. Starting an action uses its immutable
 //// container ID so a delayed request cannot start a replacement.
 //// The transfer_fault boundary rejects bad evidence and retries offline reads.
+////
+//// The journal's start marker is committed immediately before `docker start`,
+//// the only effect that runs action code. A fault before that point leaves
+//// only Docker resources under the attempt's own name, which `execute`
+//// removes before it begins, so the slot can retry the attempt unchanged.
 
 import envoy
 import gantry/blobs
@@ -92,7 +97,30 @@ pub fn cleanup(directory: String, name: String) -> Result(Nil, Fault) {
   unstage(directory, name)
 }
 
-/// Run one attempt after the journal acknowledges its start.
+/// Check that the collector image is present before the slot claims work.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.preflight()
+/// ```
+pub fn preflight() -> Result(Nil, String) {
+  case control(["image", "inspect", "--format", "{{.Id}}", collector], "") {
+    Ok(_) -> Ok(Nil)
+    Error(Unavailable(reason))
+    | Error(Rejected(reason))
+    | Error(JournalFault(reason)) ->
+      Error(
+        "the collector image is not usable; run `docker pull "
+        <> collector
+        <> "` on this host ("
+        <> reason
+        <> ")",
+      )
+  }
+}
+
+/// Run one attempt, committing the start marker just before Docker starts it.
 ///
 /// ## Examples
 ///
@@ -110,7 +138,9 @@ pub fn execute(
 ) -> Result(queue.Completion, Fault) {
   use Nil <- result.try(validate_image(assignment.task.image))
   let path = directory <> "/" <> name <> ".staging"
-  use Nil <- result.try(unstage(directory, name))
+
+  // An earlier try can have stopped after creating resources but before start.
+  use Nil <- result.try(cleanup(directory, name))
   use Nil <- result.try(
     simplifile.create_directory(path)
     |> result.replace_error(Unavailable(
@@ -118,8 +148,7 @@ pub fn execute(
     )),
   )
   use Nil <- result.try(stage(path, assignment, network))
-  use Nil <- result.try(start() |> result.map_error(JournalFault))
-  run(path, name, assignment.task, limits, spool)
+  run(path, name, assignment.task, limits, start, spool)
 }
 
 /// Delete the slot-owned staging directory after its archives are unused.
@@ -281,6 +310,7 @@ fn run(
   name: String,
   task: queue.Task,
   limits: Limits,
+  start: fn() -> Result(Nil, String),
   spool: fn(BitArray) -> Result(String, String),
 ) -> Result(queue.Completion, Fault) {
   use _ <- result.try(control(
@@ -349,6 +379,8 @@ fn run(
     False -> Error(Unavailable("Docker returned an invalid container ID"))
   })
 
+  // From here the action can run, so a restart must treat it as started.
+  use Nil <- result.try(start() |> result.map_error(JournalFault))
   use command <- result.try(
     ffi_worker.docker(
       ["start", "-a", container],
