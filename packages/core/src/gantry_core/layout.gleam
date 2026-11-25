@@ -944,8 +944,9 @@ fn claim_from(
         ),
       )
     }
+    // A replayed lease issues no serial, so it never overtakes anything.
     Some(job), [_, ..] ->
-      case overtook_unread(scan, job) {
+      case next.serial != scan.serial.0 && overtook_unread(scan, job) {
         True -> {
           use #(more, rest, more_expects) <- result.try(next_window(
             reader,

@@ -374,3 +374,39 @@ pub fn a_republished_proof_becomes_the_newest_test() {
   let both = finish(both, a) |> finish(c) |> finish(b)
   assert list.length(both.state.cache) == 2
 }
+
+pub fn replaying_a_lease_does_not_read_the_ready_index_test() {
+  // A worker holds a lease on the newest run while twenty older runs are ready.
+  let both =
+    numbers(1, 21)
+    |> list.fold(start(), fn(both, n) {
+      admit(both, "r" <> int.to_string(n), False)
+    })
+  let both = {
+    // Lease the newest run by making it the only ready run for a moment.
+    let assert Ok(#(state, _)) =
+      queue.admit(both.state, "late", "repo", "late", "check", queue.Build, [
+        task_in("late", "build", "late", "solo"),
+      ])
+    let assert Ok(store) =
+      audit.admit(
+        both.store,
+        both.state,
+        "late",
+        "repo",
+        "late",
+        "check",
+        queue.Build,
+        [task_in("late", "build", "late", "solo")],
+      )
+    Both(state, store)
+  }
+  let #(both, leased) = claim_in(both, "w", "solo", 0)
+  let assert Some(job) = leased
+
+  // The replay in the busy pool returns the same lease, and its plan expects
+  // far fewer keys than the twenty ready runs it would otherwise load.
+  let assert Ok(plan) = layout.claim(image.reader(both.store), "w", "pool", 1)
+  assert layout.receipt(plan) == Some(job)
+  assert list.length(layout.expects(plan)) < 20
+}

@@ -340,7 +340,8 @@ fn fresh_plan(
   // Only a refusal can come from a stale view, so only it is planned twice.
   case plan(reader()) {
     Error(layout.Refused(_)) -> {
-      let _ = ffi_khepri.fence()
+      // A refusal that cannot be confirmed is unavailable, not a conflict.
+      use Nil <- result.try(ffi_khepri.fence())
       plan(reader()) |> result.map_error(fault_of)
     }
     other -> result.map_error(other, fault_of)
