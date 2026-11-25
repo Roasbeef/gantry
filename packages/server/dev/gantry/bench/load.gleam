@@ -60,6 +60,8 @@ pub type Settings {
     retries: Int,
     /// The per-request HTTP deadline, in milliseconds.
     timeout_ms: Int,
+    /// Finished runs each voter keeps, which `[retention]` calls `keep_runs`.
+    retained: Int,
   )
 }
 
@@ -109,6 +111,8 @@ pub fn parse(
     600_000,
   ))
 
+  use retained <- result.try(setting("GANTRY_BENCH_RETAINED", 200, 1, 1000))
+
   // Raft needs a majority, and the driver supports the two documented sizes.
   case voters {
     1 | 3 ->
@@ -126,6 +130,7 @@ pub fn parse(
         inflight:,
         retries:,
         timeout_ms:,
+        retained:,
       ))
     _ -> Error("use one or three voters")
   }

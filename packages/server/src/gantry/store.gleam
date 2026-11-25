@@ -1,18 +1,17 @@
-//// One quorum snapshot holds the proof deployment's queue metadata. Every
-//// mutation compares the exact bytes read before computing its proposal.
-//// A proposal with no changes confirms the same bytes with the Ra leader
-//// and its quorum. A losing proposal recomputes from a fresh snapshot.
-//// Each mutation reads and writes the full document. The 4 MiB ceiling
-//// bounds replicated metadata and makes this unsuitable for unbounded history.
+//// The durable queue lives in Khepri under an indexed layout, defined in
+//// `gantry_core/layout`: each run under its own key with small index entries
+//// derived from it. An operation reads the few keys it needs, the core
+//// decides, and the resulting plan commits in one transaction that compares
+//// every key the decision relied on. A plan that changes nothing is
+//// confirmed by a quorum read and appends nothing to the log. A losing plan
+//// is recomputed from fresh reads.
 ////
 //// ## Policy in Gleam
 ////
-//// The Erlang bridge performs single Khepri, Ra and ETS calls. This module
-//// decides what to do with them: whether a node bootstraps or joins, which
-//// marker it trusts, how large a snapshot may be, and when a remembered
-//// quiet snapshot may answer a poll. The remembered snapshot and every
-//// leader comparison use the SHA-256 `digest` of its bytes, so a poll
-//// sends 32 bytes to the leader and receives a boolean.
+//// The Erlang bridge performs single Khepri and Ra calls. This module decides
+//// what to do with them: whether a node bootstraps or joins, which marker it
+//// trusts, how often a lost race is retried, which lock orders an
+//// operation, and how an earlier release's snapshot is imported.
 ////
 //// | Marker file | Seed | Decision |
 //// | --- | --- | --- |
@@ -28,21 +27,31 @@
 
 import gantry/fault.{type Fault}
 import gantry/internal/ffi_host
-import gantry/internal/ffi_khepri.{
-  type ProposalOutcome, Accepted, SnapshotChanged,
-}
+import gantry/internal/ffi_khepri.{Accepted, Stale}
+import gantry_core/layout
 import gantry_core/protocol
 import gantry_core/queue
-import gleam/bit_array
-import gleam/crypto
+import gleam/bool
+import gleam/erlang/process
+import gleam/int
 import gleam/json
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import simplifile
 
-/// The ceiling on one replicated snapshot, in bytes.
-const max_bytes = 4_194_304
+/// How many times an operation recomputes after a competing write.
+const attempts = 8
+
+/// How many runs and proofs one retention commit may drop.
+const retention_batch = 250
+
+/// How many batches one retention pass may commit.
+const retention_passes = 40
+
+/// The longest pause before a recomputation, in milliseconds. A replica that
+/// lags the leader needs a few milliseconds to catch up.
+const longest_pause = 40
 
 /// The longest accepted seed node name.
 const max_seed_bytes = 255
@@ -60,10 +69,12 @@ pub type Opening {
   Join(seed: String)
 }
 
-/// Whether a worker poll can return before running the full claim decision.
-type QuietCheck {
-  ConfirmedQuiet
-  NeedsClaim
+/// The lock that orders one controller's operations writing the same counter.
+type Lock {
+  Admission
+  Claiming
+  Finishing
+  Unordered
 }
 
 /// Decide how this node opens its replica from its marker and configured
@@ -147,9 +158,50 @@ fn open_replica(directory: String, seed: String) -> Result(Nil, Fault) {
     }
   })
 
-  use Nil <- result.try(ffi_khepri.create(encode(queue.empty())))
-  ffi_khepri.hint_open()
-  Ok(Nil)
+  initialize()
+}
+
+/// Create the layout, importing an earlier release's snapshot, unless a
+/// voter already did. The marker is the last key written, in the same
+/// transaction as everything it describes, and the transaction expects it to
+/// be absent, so the first voter to boot wins and the others find it.
+fn initialize() -> Result(Nil, Fault) {
+  use legacy <- result.try(ffi_khepri.legacy())
+  use marker <- result.try(
+    ffi_khepri.get(layout.format_key())
+    |> result.map_error(fault.Unavailable),
+  )
+
+  // The marker says the layout exists, and the old snapshot says there is
+  // something to import or to clean up.
+  case marker, legacy {
+    Some(_), None -> Ok(Nil)
+
+    // An earlier import finished and the delete after it did not.
+    Some(_), Some(_) -> ffi_khepri.forget_legacy()
+    None, _ -> import_snapshot(legacy)
+  }
+}
+
+/// Create the layout from an earlier release's snapshot, or from an empty
+/// queue when there is none, and then delete the snapshot. Losing the race to
+/// another voter is success, because that voter's layout is the same.
+fn import_snapshot(legacy: Option(String)) -> Result(Nil, Fault) {
+  use state <- result.try(decode_snapshot(legacy))
+  use _ <- result.try(commit(layout.bootstrap(state)))
+  use <- bool.guard(legacy == None, Ok(Nil))
+  ffi_khepri.forget_legacy()
+}
+
+/// The queue an earlier release stored, or an empty one when it stored none.
+fn decode_snapshot(legacy: Option(String)) -> Result(queue.State, Fault) {
+  // No snapshot means a fresh disk.
+  case legacy {
+    None -> Ok(queue.empty())
+    Some(bytes) ->
+      json.parse(bytes, protocol.state_decoder())
+      |> result.replace_error(fault.Internal("invalid durable queue snapshot"))
+  }
 }
 
 /// Read the node name that an earlier boot recorded.
@@ -180,43 +232,72 @@ fn write_marker(directory: String, node: String) -> Result(Nil, Fault) {
   ffi_host.sync_path(directory) |> result.replace_error(failure)
 }
 
-fn encode(state: queue.State) -> String {
-  state |> protocol.encode_state |> json.to_string
-}
-
-/// The SHA-256 of snapshot bytes, which a leader compares instead of
-/// receiving the document.
-fn digest(bytes: String) -> BitArray {
-  crypto.hash(crypto.Sha256, bit_array.from_string(bytes))
-}
-
-/// Decode the fenced document and retain its exact bytes for conditional replacement.
-fn snapshot() -> Result(#(String, queue.State), Fault) {
-  use bytes <- result.try(ffi_khepri.read())
-
-  // A document above the ceiling was not written by this release.
-  use Nil <- result.try(case string.byte_size(bytes) > max_bytes {
-    True -> Error(fault.Internal("invalid durable queue snapshot"))
-    False -> Ok(Nil)
-  })
-
-  use state <- result.try(
-    json.parse(bytes, protocol.state_decoder())
-    |> result.replace_error(fault.Internal("invalid durable queue snapshot")),
+/// The reader the layout uses, over this node's replica.
+fn reader() -> layout.Reader {
+  layout.Reader(
+    get: ffi_khepri.get,
+    many: ffi_khepri.many,
+    list: ffi_khepri.list,
   )
-  Ok(#(bytes, state))
 }
 
-/// Read a quorum-fenced queue snapshot.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // store.read()
-/// ```
-pub fn read() -> Result(queue.State, Fault) {
-  use #(_, state) <- result.try(snapshot())
-  Ok(state)
+/// Map a layout failure to the fault a caller handles.
+fn fault_of(failure: layout.Failure) -> Fault {
+  case failure {
+    layout.Refused(detail) -> fault.Conflict(detail)
+    layout.Unreadable(detail) -> fault.Unavailable(detail)
+    layout.Corrupt(detail) -> fault.Internal(detail)
+  }
+}
+
+/// Commit one plan, returning whether its expectations held.
+fn commit(plan: layout.Plan(a)) -> Result(ffi_khepri.Outcome, Fault) {
+  case layout.expects(plan), layout.writes(plan) {
+    [], [] -> Ok(Accepted)
+    expects, writes -> ffi_khepri.commit(expects, writes)
+  }
+}
+
+/// Plan against fresh reads and commit, recomputing after a competing write.
+/// The lock keeps this controller's own operations from racing each other, so
+/// a refused commit means another controller wrote one of the keys read.
+fn transact(
+  lock: Lock,
+  plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
+) -> Result(a, Fault) {
+  case lock {
+    Admission -> ffi_khepri.gated("admission", fn() { attempt(plan, attempts) })
+    Claiming -> ffi_khepri.gated("claiming", fn() { attempt(plan, attempts) })
+    Finishing -> ffi_khepri.gated("finishing", fn() { attempt(plan, attempts) })
+    Unordered -> attempt(plan, attempts)
+  }
+}
+
+/// Plan against fresh reads, commit, and recompute while a competing write
+/// keeps invalidating the plan, up to the remaining attempts.
+fn attempt(
+  plan: fn(layout.Reader) -> Result(layout.Plan(a), layout.Failure),
+  remaining: Int,
+) -> Result(a, Fault) {
+  use planned <- result.try(plan(reader()) |> result.map_error(fault_of))
+  use outcome <- result.try(commit(planned))
+
+  // A competing write invalidates the plan and its receipt.
+  case outcome, remaining {
+    Accepted, _ -> Ok(layout.receipt(planned))
+    Stale, 1 ->
+      Error(fault.Unavailable("queue contention exceeded retry budget"))
+    Stale, _ -> {
+      process.sleep(pause(remaining))
+      attempt(plan, remaining - 1)
+    }
+  }
+}
+
+/// A growing, jittered pause before the next recomputation.
+fn pause(remaining: Int) -> Int {
+  let tried = attempts - remaining + 1
+  int.min(longest_pause, tried * 2 + int.random(tried * 2 + 1))
 }
 
 /// Probe queue quorum access for a gateway's backend selection.
@@ -230,23 +311,59 @@ pub fn ready() -> Result(Nil, Fault) {
   ffi_khepri.ready()
 }
 
-/// Run a pure proposal and return its receipt after a majority confirms the
-/// unchanged snapshot or commits a mutation.
-/// A storage timeout leaves the outcome unknown. Recover by operation identity.
-/// The proposal refuses a transition with a `Fault`, usually `Conflict`.
+/// Read every run and proof as one state. Tests and tools use this, and the
+/// controller's hot paths never do.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // store.change(fn(state) { Ok(#(state, Nil)) })
+/// // store.read()
 /// ```
-pub fn change(
-  propose: fn(queue.State) -> Result(#(queue.State, a), Fault),
-) -> Result(a, Fault) {
-  attempt(propose, 8)
+pub fn read() -> Result(queue.State, Fault) {
+  layout.materialize(reader()) |> result.map_error(fault_of)
 }
 
-/// Return a confirmed empty poll or run the full durable claim decision.
+/// Look up a run by its stable ID. A majority confirms the answer.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.find("run-1")
+/// ```
+pub fn find(id: String) -> Result(Option(queue.Run), Fault) {
+  transact(Unordered, layout.find(_, id))
+}
+
+/// Admit a run exactly as `queue.admit` does, or return the stored run when
+/// the same inputs arrive again. A storage timeout leaves the outcome
+/// unknown, so retry with the same ID.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.admit("run-1", "owner/project", sha, "check", queue.Build, tasks)
+/// ```
+pub fn admit(
+  id: String,
+  repo: String,
+  revision: String,
+  target: String,
+  submission: queue.Submission,
+  tasks: List(queue.Task),
+) -> Result(queue.Run, Fault) {
+  transact(Admission, layout.admit(
+    _,
+    id,
+    repo,
+    revision,
+    target,
+    submission,
+    tasks,
+  ))
+}
+
+/// Lease or reuse one action for a worker, expiring lapsed leases first. An
+/// empty poll is confirmed by a majority and writes nothing.
 ///
 /// ## Examples
 ///
@@ -258,84 +375,101 @@ pub fn claim(
   pool: String,
   now: Int,
 ) -> Result(Option(queue.Assignment), Fault) {
-  use confirmed <- result.try(confirm_quiet())
-
-  // A quiet snapshot cannot offer a lease to any worker.
-  case confirmed {
-    ConfirmedQuiet -> Ok(None)
-    NeedsClaim ->
-      change(fn(state) { Ok(queue.claim(state, worker, pool, now)) })
-  }
+  transact(Claiming, layout.claim(_, worker, pool, now))
 }
 
-/// Ask the leader whether the remembered quiet snapshot is still current.
-/// A changed snapshot drops the hint, and the poll takes the full path.
-fn confirm_quiet() -> Result(QuietCheck, Fault) {
-  // With nothing remembered there is nothing to confirm.
-  case ffi_khepri.hint_read() {
-    Error(Nil) -> Ok(NeedsClaim)
-    Ok(remembered) -> {
-      use outcome <- result.try(ffi_khepri.matches(remembered))
-
-      // The leader's answer decides whether the poll may stop here.
-      case outcome {
-        Accepted -> Ok(ConfirmedQuiet)
-        SnapshotChanged -> {
-          ffi_khepri.hint_forget(remembered)
-          Ok(NeedsClaim)
-        }
-      }
-    }
-  }
+/// Accept a worker's result for the live lease, or refuse it as stale.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.finish("run", "build", "worker", 3, completion)
+/// ```
+pub fn finish(
+  run: String,
+  action: String,
+  worker: String,
+  serial: Int,
+  completion: queue.Completion,
+) -> Result(Nil, Fault) {
+  transact(Finishing, layout.finish(_, run, action, worker, serial, completion))
 }
 
-/// Recompute a pure transition from the latest snapshot after a competing write.
-fn attempt(
-  propose: fn(queue.State) -> Result(#(queue.State, a), Fault),
-  remaining: Int,
-) -> Result(a, Fault) {
-  use #(prior, state) <- result.try(snapshot())
-  use #(next, receipt) <- result.try(propose(state))
-
-  // A quorum can confirm an unchanged receipt without appending a write.
-  use accepted <- result.try(case next == state {
-    True -> confirm(prior, state)
-    False -> commit(prior, next)
-  })
-
-  // A competing write invalidates the proposal and its receipt.
-  case accepted, remaining {
-    Accepted, _ -> Ok(receipt)
-    SnapshotChanged, 1 ->
-      Error(fault.Unavailable("queue contention exceeded retry budget"))
-    SnapshotChanged, _ -> attempt(propose, remaining - 1)
-  }
+/// The waiting run at the head of each free lane.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.preparations()
+/// ```
+pub fn preparations() -> Result(List(queue.Preparation), Fault) {
+  transact(Unordered, layout.preparations)
 }
 
-/// Remember a quiet snapshot after it authorizes an unchanged receipt.
-fn confirm(
-  prior: String,
-  state: queue.State,
-) -> Result(ProposalOutcome, Fault) {
-  let hash = digest(prior)
-  use accepted <- result.try(ffi_khepri.matches(hash))
-
-  // Pending and active work require the full decision even on a snapshot hit.
-  case accepted == Accepted && queue.quiescent(state) {
-    True -> ffi_khepri.hint_remember(hash)
-    False -> Nil
-  }
-
-  Ok(accepted)
+/// Record a built candidate or a refusal for exactly the run that was offered.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.record_preparation(preparation, outcome)
+/// ```
+pub fn record_preparation(
+  preparation: queue.Preparation,
+  outcome: Result(#(queue.Candidate, List(queue.Task)), queue.PrepareFailure),
+) -> Result(Nil, Fault) {
+  transact(Unordered, layout.record_preparation(_, preparation, outcome))
 }
 
-/// Replace the expected snapshot with a bounded mutation.
-fn commit(prior: String, next: queue.State) -> Result(ProposalOutcome, Fault) {
-  let bytes = encode(next)
+/// Move each lane's finished run to `Landing` and return the intents.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.landings()
+/// ```
+pub fn landings() -> Result(List(queue.Intent), Fault) {
+  transact(Unordered, layout.landings)
+}
 
-  // Reject oversized metadata before it reaches the replicated log.
-  case string.byte_size(bytes) > max_bytes {
-    True -> Error(fault.Internal("queue snapshot exceeds 4 MiB"))
-    False -> ffi_khepri.swap(prior, bytes)
+/// Record the outcome of exactly the intent that was committed.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.record_landing(intent, Ok(Nil))
+/// ```
+pub fn record_landing(
+  intent: queue.Intent,
+  outcome: Result(Nil, queue.Block),
+) -> Result(Nil, Fault) {
+  transact(Unordered, layout.record_landing(_, intent, outcome))
+}
+
+/// Drop finished runs and proofs beyond the retention bounds, a bounded
+/// batch per commit so one pass never writes an unbounded transaction.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.retain(queue.Retention(200, 1000))
+/// ```
+pub fn retain(retention: queue.Retention) -> Result(Nil, Fault) {
+  retain_batches(retention, retention_passes)
+}
+
+/// Run retention batches until nothing is left to drop or the passes run out.
+/// An interrupted pass resumes at the next interval.
+fn retain_batches(
+  retention: queue.Retention,
+  passes: Int,
+) -> Result(Nil, Fault) {
+  use more <- result.try(
+    transact(Unordered, layout.retain(_, retention, retention_batch)),
+  )
+
+  // Stop when the queue is within its bounds or the pass budget is spent.
+  case more, passes {
+    True, passes if passes > 1 -> retain_batches(retention, passes - 1)
+    True, _ | False, _ -> Ok(Nil)
   }
 }
