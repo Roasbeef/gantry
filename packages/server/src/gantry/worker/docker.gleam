@@ -26,11 +26,14 @@ import simplifile
 const collector =
   "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
 
+/// Flags every container gets. Process and file limits are added per role.
 const restrictions = [
   "--pull=never", "--network=none", "--cap-drop=ALL", "--read-only",
-  "--user=65534:65534", "--security-opt=no-new-privileges", "--pids-limit=128",
-  "--log-driver=none", "--ulimit=nofile=1024:1024",
+  "--user=65534:65534", "--security-opt=no-new-privileges", "--log-driver=none",
 ]
+
+/// The collector only sleeps and reads one file, so its limits stay small.
+const collector_limits = ["--pids-limit=128", "--ulimit=nofile=1024:1024"]
 
 const read_output =
   "set -efu
@@ -49,7 +52,14 @@ exec cat \"$current\""
 
 /// Resource limits reserved for one physical worker slot.
 pub opaque type Limits {
-  Limits(cpus: String, memory: String, workspace: String)
+  Limits(
+    cpus: String,
+    memory: String,
+    workspace: String,
+    pids: String,
+    nofile: String,
+    tmp: String,
+  )
 }
 
 /// Only action rejections are terminal. Infrastructure faults keep custody.
@@ -61,26 +71,93 @@ pub type Fault {
 
 /// Read and bound the resource settings consumed by Docker.
 ///
+/// | Variable | Default | Bounds |
+/// | --- | --- | --- |
+/// | `GANTRY_WORKER_CPUS` | 2 | 1 to 1024 |
+/// | `GANTRY_WORKER_MEMORY_MIB` | 768 | 128 to 2097152 |
+/// | `GANTRY_WORKSPACE_MIB` | 256 | 64 to 1048576 |
+/// | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 |
+/// | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 |
+/// | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 |
+///
+/// The process default lets a BEAM build start its scheduler and dirty
+/// threads on a many-core host. The `/tmp` tmpfs counts against the
+/// container's memory limit, so a larger size only bounds the file it holds.
+///
 /// ## Examples
 ///
 /// ```gleam
 /// // docker.limits()
 /// ```
 pub fn limits() -> Result(Limits, String) {
-  use cpus <- result.try(resource("GANTRY_WORKER_CPUS", "2", 1, 1024))
+  limits_from(envoy.get)
+}
+
+/// Read the same settings through a lookup function.
+///
+/// ## Examples
+///
+/// ```gleam
+/// docker.limits_from(fn(_) { Error(Nil) })
+/// ```
+pub fn limits_from(
+  lookup: fn(String) -> Result(String, Nil),
+) -> Result(Limits, String) {
+  use cpus <- result.try(resource(lookup, "GANTRY_WORKER_CPUS", "2", 1, 1024))
   use memory <- result.try(resource(
+    lookup,
     "GANTRY_WORKER_MEMORY_MIB",
     "768",
     128,
     2_097_152,
   ))
   use workspace <- result.try(resource(
+    lookup,
     "GANTRY_WORKSPACE_MIB",
     "256",
     64,
     1_048_576,
   ))
-  Ok(Limits(cpus, memory, workspace))
+  use pids <- result.try(resource(
+    lookup,
+    "GANTRY_WORKER_PIDS",
+    "4096",
+    64,
+    1_048_576,
+  ))
+  use nofile <- result.try(resource(
+    lookup,
+    "GANTRY_WORKER_NOFILE",
+    "65536",
+    256,
+    1_048_576,
+  ))
+  use tmp <- result.try(resource(
+    lookup,
+    "GANTRY_WORKER_TMP_MIB",
+    "1024",
+    16,
+    65_536,
+  ))
+  Ok(Limits(cpus, memory, workspace, pids, nofile, tmp))
+}
+
+/// The sandbox flags an action container receives, apart from its mounts.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.action_flags(limits)
+/// ```
+pub fn action_flags(limits: Limits) -> List(String) {
+  list.append(restrictions, [
+    "--pids-limit=" <> limits.pids,
+    "--ulimit=nofile=" <> limits.nofile <> ":" <> limits.nofile,
+    "--memory=" <> limits.memory <> "m",
+    "--cpus=" <> limits.cpus,
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev,size=" <> limits.tmp <> "m,mode=1777",
+  ])
 }
 
 /// Remove all resources associated with a previously started attempt.
@@ -331,7 +408,7 @@ fn run(
   ))
   let mount = "type=volume,src=" <> name <> ",dst=/work,volume-nocopy"
   use _ <- result.try(control(
-    list.append(["run", "-d", ..restrictions], [
+    list.append(["run", "-d", ..list.append(restrictions, collector_limits)], [
       "--name",
       name <> "-collector",
       "--mount",
@@ -346,17 +423,13 @@ fn run(
     "",
   ))
   use identity <- result.try(control(
-    list.append(["create", ..restrictions], [
-      "--memory=" <> limits.memory <> "m",
-      "--cpus=" <> limits.cpus,
+    list.append(["create", ..action_flags(limits)], [
       "--name",
       name,
       "--mount",
       mount,
       "--workdir",
       "/work",
-      "--tmpfs",
-      "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
       "--mount",
       bind(directory, "source.tar"),
       "--mount",
@@ -557,12 +630,13 @@ fn control(args: List(String), missing: String) -> Result(String, Fault) {
 
 /// Bound an operator-supplied reservation before constructing Docker flags.
 fn resource(
+  lookup: fn(String) -> Result(String, Nil),
   key: String,
   fallback: String,
   low: Int,
   high: Int,
 ) -> Result(String, String) {
-  let value = envoy.get(key) |> result.unwrap(fallback)
+  let value = lookup(key) |> result.unwrap(fallback)
 
   // Docker only receives limits within the supported resource range.
   case int.parse(value) {
