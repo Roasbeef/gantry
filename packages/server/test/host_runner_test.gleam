@@ -1,6 +1,7 @@
 import envoy
 import gantry/internal/ffi_host
 import gleam/bit_array
+import gleam/erlang/process
 import gleam/string
 
 pub fn captures_output_and_status_test() {
@@ -87,6 +88,47 @@ pub fn deadline_kills_the_child_and_keeps_partial_output_test() {
   assert exit == ffi_host.TimedOut
   let assert Ok(text) = bit_array.to_string(bytes)
   assert string.starts_with(text, "started")
+}
+
+pub fn deadline_kills_the_childs_children_too_test() {
+  // The shell starts a grandchild, reports its pid, and waits on it.
+  let assert Ok(ffi_host.Command(exit, bytes, _)) =
+    ffi_host.capture(
+      "sh",
+      ["-c", "sleep 60 & printf %s $!; wait"],
+      ffi_host.Inherit([]),
+      ffi_host.Combined,
+      1024,
+      500,
+    )
+  assert exit == ffi_host.TimedOut
+  let assert Ok(pid) = bit_array.to_string(bytes)
+
+  // The group kill reaches the grandchild. Its reaping is asynchronous, so the
+  // check polls briefly before it fails.
+  assert gone(string.trim(pid), 20)
+}
+
+fn gone(pid: String, tries: Int) -> Bool {
+  let assert Ok(ffi_host.Command(exit, _, _)) =
+    ffi_host.capture(
+      "kill",
+      ["-0", pid],
+      ffi_host.Inherit([]),
+      ffi_host.Combined,
+      1024,
+      2000,
+    )
+
+  // A live process accepts signal 0. Any other answer means it is gone.
+  case exit, tries {
+    ffi_host.Exited(0), 0 -> False
+    ffi_host.Exited(0), _ -> {
+      process.sleep(100)
+      gone(pid, tries - 1)
+    }
+    _, _ -> True
+  }
 }
 
 pub fn missing_program_is_an_error_test() {

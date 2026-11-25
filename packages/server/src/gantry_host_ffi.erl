@@ -94,14 +94,17 @@ collect(Port, Deadline, Remaining, Parts, Truncated) ->
         {ok, {command, timed_out, bytes(Parts), completeness(Truncated)}}
     end.
 
-%% Kill the child by operating system pid, then release the port. Closing the
-%% port alone would only close its pipes and leave the child running.
+%% Kill the child's process group, then release the port. erl_child_setup
+%% starts every port child in a new session, so its pid is also its group ID,
+%% and the negative pid reaches the children it started, such as the helpers
+%% git runs for a fetch or push. Closing the port alone would only close its
+%% pipes and leave them running.
 kill(Port) ->
     case {erlang:port_info(Port, os_pid), os:find_executable("kill")} of
         {{os_pid, Pid}, Kill} when Kill =/= false ->
             try
                 Killer = open_port({spawn_executable, Kill},
-                                   [exit_status, {args, ["-KILL", integer_to_list(Pid)]}]),
+                                   [exit_status, {args, ["-KILL", "--", "-" ++ integer_to_list(Pid)]}]),
                 receive {Killer, {exit_status, _}} -> ok after 2000 -> ok end
             catch error:_ -> ok
             end;
