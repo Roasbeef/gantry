@@ -130,18 +130,33 @@ the third slice.
    so the exit is not yet met. What remains is mostly writes to `/var/tmp`
    under the read-only root and a jail that wants a delegated cgroup; the
    note lists each cause.
-4. **Stage Git metadata when an action needs it.** Gantry stages a `git
-   archive` tree, and "repository metadata query failed" was the most common
-   client error, 105 occurrences across two shards. Let a declared action receive the commit's
-   metadata (a shallow `.git` or the values it reads), counted in its key.
-   **Exit:** those client tests pass. **Guard:** cache keys change when the
-   metadata the action declares changes, and only then.
-5. **Move inputs larger than one blob.** Loom's source tree is 87.5 MiB
-   against the 64 MiB blob limit, and the `conformance` lane's package closure
-   is 65.7 MiB, so whole-tree lanes cannot be staged. Chunk or stream input
-   archives. **Exit:** the Loom `static` and `conformance` lanes stage and run.
-   **Guard:** digest and length checks on every chunk, and the existing blob
-   tests.
+4. **Stage Git metadata when an action needs it.** *Built, 2026-11-25
+   ([design](design-notes/git-metadata-and-chunked-inputs.md)); the stated exit
+   is not met, and the diagnosis was wrong.* An action may declare
+   `"git": "shallow"` and receives a shallow `.git` for its commit, counted in
+   its key only when declared. `make e2e` on Linux checks the staged repository
+   under the worker's flags, and Git inside the worker's container reports a
+   clean, shallow checkout. **Exit, as measured:** Loom's `client` shards 1 and
+   2 with the metadata staged still fail 130 and 129 tests, and "repository
+   metadata query failed" still appears 65 and 40 times (105 in all, the same
+   count as without a `.git`). Loom runs its Git inside its own `loom-exec`
+   jail, which needs user namespaces, and `bwrap` fails under `--cap-drop=ALL`
+   with "No permissions to create new namespace". Those errors belong to
+   slice 3, and the workspace `.git` does not reach them. **Guard:** met, with
+   the key tests in `git_test.gleam` and `chunks_test.gleam`.
+5. **Move inputs larger than one blob.** *Built, 2026-11-25.* Input archives over
+   64 MiB are stored as chunks of at most 32 MiB plus a manifest, up to
+   512 MiB, and the worker checks every chunk's length and digest and the
+   reassembled digest. **Exit, as measured:** a scratch controller and two
+   scratch slots on the worker host staged Loom's 87.5 MiB tree as chunks. The
+   `static` lane passed (`make fmt-check && make lint && make doc-check`). The
+   `conformance` lane staged and ran, then exited 1 (the nested `bwrap`
+   failure of slice 3, not staging). **Guard:** met, with an unmodified blob
+   suite plus `inputs_test.gleam` for each violation and a `queue_churn_dst`
+   fault for a refused input. Open: `lease_slack` still assumes one 64 MiB
+   transfer, so a 512 MiB input on a slow link can outlast it, and an older
+   controller or worker ignores the new task fields, so upgrade all of them
+   before a manifest declares `git` or a large input.
 6. **Write Loom's `gantry.json` and run it across hosts.** Loom's ten most
    recent green CI runs give 114 minutes of Linux lane work with a 20-minute
    critical path, and no lane is more than 14% of the work, so the action
