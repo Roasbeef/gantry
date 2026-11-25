@@ -178,3 +178,21 @@ pub fn a_managed_journal_is_held_exclusively_too_test() {
   let assert Ok(Nil) = sqlight.close(first)
   worker_fixture.remove(directory)
 }
+
+pub fn an_empty_managed_journal_is_refused_untouched_test() {
+  let directory = worker_fixture.temp_directory()
+  let journal = directory <> "/journal"
+  let assert Ok(Nil) = simplifile.create_directory_all(journal)
+  let assert Ok(first) = custody.open_managed(directory, journal, "w1")
+  let assert Ok(Nil) = sqlight.close(first)
+
+  // An established slot whose journal was emptied keeps no identity. The
+  // refusal must not write a fresh header into the file it rejects.
+  let path = journal <> "/custody.sqlite3"
+  let assert Ok(Nil) = simplifile.write(path, "")
+  let assert Error(reason) = custody.open_managed(directory, journal, "w1")
+  assert string.contains(reason, "no readable identity")
+  let assert Ok(info) = simplifile.file_info(path)
+  assert info.size == 0
+  worker_fixture.remove(directory)
+}
