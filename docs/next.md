@@ -6,11 +6,15 @@ is open on purpose. It is rewritten at the end of each body of work and is
 not appended to. [Tour of the code](guide/tour.md) ·
 [Status](architecture/runtime.md#status)
 
-**Baseline.** Branch `claude/project-review-refactor-0d0088` at `e13d4d9`
-(2026-11-24), 37 commits ahead of `main` at `f4cc695`. Every claim below was
-checked against that tree in this pass, or is marked as not checked. The
-previous edition of this file was carried forward from earlier slices, and
-several of its claims no longer held. They are named under
+**Baseline.** Branch `claude/project-review-refactor-0d0088` at `8c84edf`
+(2026-11-25), ahead of `main` at `f4cc695`. At that commit `make check` exits 0
+(37 core tests on BEAM and JavaScript, 129 server tests, Loom lint with 0
+errors and 3 warnings). The 1,000-seed `sweep` reports 0 safety and 0 liveness
+violations. On a Linux host (blue-knight, Ubuntu 24.04, 4 vCPU) the release,
+install, and `make e2e` exit 0 with 9 checks passing, and `make model-check`
+exits 0 with 109,896 distinct states. The previous edition of this file was
+carried forward from earlier slices, and several of its claims no longer held.
+They are named under
 [what the previous edition got wrong](#what-the-previous-edition-got-wrong).
 
 ## Where the tree is
@@ -62,56 +66,97 @@ about the GitHub pilot. They now link to
 Not re-checked in this pass, and carried as historical: the Loom pilot
 numbers (318 and 319 tests, the landed commit `676951e`), the CLI latency
 comparison (about 230 to 340 ms against 7 to 24 ms for the old Bash CLI), and
-the hand-checked interrupt behaviour of `gantry local start`. This host is
-macOS, so `make e2e` was not run here either. It needs Linux and Docker.
+the hand-checked interrupt behaviour of `gantry local start`. `make e2e` needs Linux and Docker; the
+baseline above records the run on blue-knight.
 
 ## What to do next
 
-1. **Clear the Loom lint error.** `make check` exits 2 at `e13d4d9`. Format,
-   build, and the unit tests pass (core on BEAM and JavaScript, 128 server
-   tests), and then `make lint` reports one error-level finding: R21
-   case-stanza at `packages/server/src/gantry/worker/custody.gleam:86`, in
-   `reopen`, a `case` with no comment above it and no blank line around it.
-   It also warns on R9 (`api.require` takes a `Bool`) and R18 (`claim_decoder`
-   and `reconcile.on_message` each have one caller). This pass changed no
-   code, so the error was already in the tree. **Exit:**
-   `make check` exits 0. **Cut:** the three warnings stay unless the fix is
-   free.
-2. **Measure the current build.** Rerun the offered-rate sweep on a four-vCPU
-   Linux host with retention in place ([controller benchmark](controller-load.md)).
-   The recorded results predate retention, and the 600-retained-run cell in
-   particular should be redone. **Exit:** a table in `controller-load.md`
-   with the same cells (10, 15, and 25 actions per second, one and three
-   voters, 8 and 32 slots, 100 repositories) from a named commit, and a
-   statement of what changed. **Cut:** no code change, and no new cells.
-3. **Run the live gates on Linux.** `make e2e` and `make model-check` were not
-   run in the documentation pass. **Exit:** both exit 0 from the branch head,
-   with the number of cases printed. **Cut:** nothing new is added to either.
-4. **Remove stray tracked files.** The repository tracks
-   `scratchpad_lint1.py` through `scratchpad_lint7.py` at its root, and two
-   `.orig` files (`packages/server/src/gantry/internal/ffi_host.gleam.orig`
-   and `packages/server/src/gantry_host_ffi.erl.orig`). They look like
-   leftovers from earlier edits. **Exit:** they are gone and `make check`
-   still exits 0. **Cut:** no other cleanup in the same commit.
-5. **Pilot protected-branch rules.** Use a disposable repository whose target
-   has the rules a real deployment would have, and the controller identity
-   that deployment will use ([integrating](integrating.md#check-a-live-deployment)).
-   **Exit:** a group lands or is refused with a typed reason, and the result
-   is recorded next to the earlier pilot.
-6. **Decide the per-repository sandbox policy.** The depth run found Loom
-   lanes that cannot run under `--cap-drop=ALL` (nested `bwrap` needs user
-   namespaces), and a 64 MiB blob cap against a Loom source tree of about
-   87.5 MiB. Those findings come from session notes and were not re-measured
-   here. **Exit:** a design note that says what a repository may ask for and
-   who approves it. **Cut:** no worker change before the note is accepted.
+The slices below are ordered by what the measurements in this series say
+binds first. Each names its measured payoff, its exit, and the property that
+must not regress. The numbers come from the depth run recorded in
+[controller load](controller-load.md) and the Loom lane probes described in
+the third slice.
 
-### Ordered slices (pending measurement)
+### Ordered slices
 
-*To be filled by the integrator.* This section will hold the ordered list of
-slices after items 1 and 2 above produce current numbers, including whether
-and when to build the indexed, batched Khepri layout that ADR 001 names as
-the next step. Until then, do not start that work from the older benchmark
-results.
+1. **Re-measure the controller with retention in place.** The offered-rate
+   sweep predates retention, and its 600-retained-run cell fell to 1.3 to 1.7
+   actions per second at a 563 KiB snapshot. **Exit:** the same cells (10, 15,
+   and 25 actions per second; one and three voters; 8 and 32 slots; 100
+   repositories) from a named commit, run with `gleam run -m gantry/bench`.
+   **Guard:** the benchmark's own proof and artifact re-read. **Cut:** no code
+   change.
+2. **Build the indexed, batched Khepri layout.** ADR 001's reconsideration
+   trigger is met: every cell at 25 actions per second either fell behind the
+   offered rate or exceeded 1 s p99 ready-to-dispatch, and CPU per operation
+   grew from 12 ms at a 31 KiB snapshot to 52 to 75 ms at 94 to 141 KiB because
+   each change rewrites and replicates the whole snapshot. Put each run under
+   its own key with a small ready and lane index, so a claim and its
+   reservation still commit in one transaction. **Exit:** at 100 actions per
+   second across 100 repositories, ready-to-dispatch p99 under 1 s on the same
+   host, and drain at 10 actions per second unchanged with 1,000 retained runs.
+   **Guard:** the TLA model and both simulations with 0 violations, the
+   planted-mutation checks in [queue verification](queue-verification.md),
+   and `make e2e`. **Cut:** no custom Ra state machine unless the indexed
+   Khepri layout misses the exit.
+3. **Let a trusted repository ask for a wider sandbox.** Real Loom lanes run
+   on gilgamesh under the worker's exact flags: `static` and `mid` pass; the
+   `fast`, `conformance`, and `client` lanes fail, mostly because Loom's own
+   `bwrap` jail cannot create user namespaces under `--cap-drop=ALL`, plus
+   tests that write outside `/work`. Loom's jail and self-test lanes cannot pass
+   at all.
+   Write the design note first: what a repository may request (user
+   namespaces, a seccomp profile, a delegated cgroup, or a microVM), who
+   approves it in `controller.toml`, and how an untrusted repository keeps the
+   current flags. **Exit:** the note is accepted, then the Loom `fast` and
+   `client` lanes pass under the approved profile. **Guard:** an action in a
+   repository without the profile still runs with `--cap-drop=ALL` and no
+   network. **Cut:** no change to untrusted defaults.
+4. **Stage Git metadata when an action needs it.** Gantry stages a `git
+   archive` tree, and "repository metadata query failed" was the most common
+   client error, 105 occurrences across two shards. Let a declared action receive the commit's
+   metadata (a shallow `.git` or the values it reads), counted in its key.
+   **Exit:** those client tests pass. **Guard:** cache keys change when the
+   metadata the action declares changes, and only then.
+5. **Move inputs larger than one blob.** Loom's source tree is 87.5 MiB
+   against the 64 MiB blob limit, and the `conformance` lane's package closure
+   is 65.7 MiB, so whole-tree lanes cannot be staged. Chunk or stream input
+   archives. **Exit:** the Loom `static` and `conformance` lanes stage and run.
+   **Guard:** digest and length checks on every chunk, and the existing blob
+   tests.
+6. **Write Loom's `gantry.json` and run it across hosts.** Loom's ten most
+   recent green CI runs give 114 minutes of Linux lane work with a 20-minute
+   critical path, and no lane is more than 14% of the work, so the action
+   graph is not what limits speed. Six to eight four-CPU slots reach the
+   floor. Cut the manifest along the CI lanes, then run it with the
+   controller on blue-knight and slots on gilgamesh. **Exit:** makespan
+   within 1.15 times max(critical path, total work divided by slots).
+   **Guard:** the same pass and fail per lane as Loom's CI at that commit.
+   Depends on slices 3 to 5.
+7. **Deploy the first fleet.** The gateway and one controller on
+   blue-knight.exe.xyz, worker slots on gilgamesh, and the laptop's Docker as
+   an optional worker running the Linux release in a container with the
+   Docker socket mounted (untested; the worker directory must have the same
+   path inside and outside the container, because input archives are bind
+   mounts). **Exit:** a Loom group lands through the gateway. Add a second
+   and third voter for failover only when there are three machines that stay
+   up.
+8. **Schedule beyond first-fit.** Today each slot polls and takes the oldest
+   ready action in its pool, one action per slot. Add fairness across
+   repositories, then one worker process with several slots and CPU and
+   memory accounting instead of one process per slot. **Exit:** with two
+   repositories admitted at once, both make progress within one dispatch
+   round. **Guard:** one lease per slot, in the model and the simulations.
+9. **Smaller follow-ups found in review.**
+   - Bind a worker credential to its pool as well as its ID.
+   - Let an attempt interrupted after `docker start` lapse and be reassigned
+     instead of recording a failure.
+   - Scale Git's 120 s deadline for a first mirror fetch.
+   - Give the churn simulation an oracle that tells a wrongly rejected result
+     from a poison action. Both now end as an expired run.
+   - Pilot protected-branch rules on a disposable repository
+     ([integrating](integrating.md#check-a-live-deployment)).
+   - Collect unreferenced blobs and bundles.
 
 ## Rulings already made
 
@@ -151,7 +196,7 @@ is gone, and `packages/server/dev/gantry/bench.gleam` is the benchmark.
 
 None of these is unfinished work somebody forgot.
 
-- **Indexed queue layout.** Designed in ADR 001, unbuilt. Waits on item 1.
+- **Indexed queue layout.** Designed in ADR 001, unbuilt. It is slice 2.
 - **Cancellation, workspace overlays, event cursors, resource reservations,
   quotas, and priority.** Described as targets in the
   [design pages](architecture/build-and-submit.md#what-is-built), unbuilt.
