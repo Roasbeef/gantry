@@ -1,4 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
-  <rect width="40" height="40" rx="9" fill="#ccf479"/>
-  <path d="M8 30 13 10h14l5 20M11 21h18M20 11v13m-3 0 3 3 3-3" fill="none" stroke="#182218" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <style>
+    .paper { fill: #f3efe4; }
+    .ink { stroke: #1b1d1a; }
+    .node { fill: #1b1d1a; }
+    .tip { fill: #1f6a43; }
+    @media (prefers-color-scheme: dark) {
+      .paper { fill: #0f1724; }
+      .ink { stroke: #dfe7f1; }
+      .node { fill: #dfe7f1; }
+      .tip { fill: #7fd3a0; }
+    }
+  </style>
+  <rect class="paper ink" x="1.5" y="1.5" width="37" height="37" rx="4" stroke-width="2"/>
+  <path class="ink" d="M14 11v19M27 27c0-9-13-7-13-15" fill="none" stroke-width="2.4" stroke-linecap="round"/>
+  <circle class="node" cx="14" cy="30" r="3.4"/>
+  <circle class="node" cx="27" cy="28" r="3.4"/>
+  <circle class="tip" cx="14" cy="10.5" r="4.4"/>
 </svg>
