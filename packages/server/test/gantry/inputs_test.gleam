@@ -5,6 +5,7 @@
 
 import gantry/blobs
 import gantry/worker/controllers
+import gantry/worker/docker
 import gantry/worker/inputs
 import gantry_core/chunks
 import gantry_core/queue
@@ -182,4 +183,24 @@ pub fn an_unlisted_blob_is_never_asked_for_test() {
     fetch_from(directory)(digest)
   }
   assert staged(fetch, queue.Chunked(id)).0 == Ok(Nil)
+}
+
+pub fn an_interrupted_attempt_leaves_no_partial_staging_test() {
+  let directory = root()
+  let name = "attempt-1"
+  let staging = directory <> "/" <> name <> ".staging"
+  let assert Ok(Nil) = simplifile.create_directory(staging)
+
+  // A worker stopped mid-transfer leaves part of a chunked source and a
+  // whole metadata archive in the attempt's staging directory.
+  let assert Ok(Nil) =
+    simplifile.write_bits(staging <> "/source.tar", pattern(chunks.chunk_limit))
+  let assert Ok(Nil) = simplifile.write_bits(staging <> "/git.tar", pattern(64))
+
+  // The cleanup an interrupted attempt runs before it is recorded removes
+  // both, and a second cleanup after a restart finds nothing to remove.
+  let assert Ok(Nil) = docker.unstage(directory, name)
+  assert simplifile.is_directory(staging) == Ok(False)
+  let assert Ok(Nil) = docker.unstage(directory, name)
+  let assert Ok(Nil) = simplifile.delete(directory)
 }
