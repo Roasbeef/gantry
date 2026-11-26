@@ -26,6 +26,8 @@ import gantry/blobs
 import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
 import gantry/worker/controllers
+import gantry/worker/inputs
+import gantry_core/chunks
 import gantry_core/graph
 import gantry_core/queue
 import gantry_core/sandbox
@@ -483,22 +485,24 @@ fn stage(
   assignment: queue.Assignment,
   network: controllers.Controllers,
 ) -> Result(Nil, Fault) {
-  use source <- result.try(
-    controllers.fetch(network, assignment.task.source)
+  let source_path = directory <> "/source.tar"
+  use Nil <- result.try(
+    inputs.stage(
+      controllers.fetch(network, _),
+      assignment.task.source,
+      source_path,
+    )
     |> result.map_error(transfer_fault),
   )
   use entries <- result.try(
-    ffi_worker.entries(source) |> result.map_error(Rejected),
+    ffi_worker.entries(source_path) |> result.map_error(Rejected),
   )
   use #(blocked, occupied) <- result.try(list.try_fold(
     entries,
     #(set.new(), set.new()),
     index_entry,
   ))
-  use Nil <- result.try(
-    simplifile.write_bits(source, to: directory <> "/source.tar")
-    |> result.replace_error(Unavailable("could not write source archive")),
-  )
+  use Nil <- result.try(stage_git(directory, assignment.task.git, network))
 
   let archive_path = directory <> "/dependencies.tar"
   use archive <- result.try(
@@ -519,8 +523,8 @@ fn stage(
         let total =
           size + 512 + { bit_array.byte_size(bytes) + 511 } / 512 * 512
 
-        // The archive has the same byte budget as the source blob.
-        use Nil <- result.try(case total <= blobs.limit {
+        // The archive has the same byte budget as a chunked source.
+        use Nil <- result.try(case total <= chunks.input_limit {
           True -> Ok(Nil)
           False ->
             Error(Rejected("dependency archive exceeds worker size limit"))
@@ -541,15 +545,74 @@ fn stage(
   )
 
   // Long names can add PAX headers beyond the regular file blocks.
-  use Nil <- result.try(case info.size <= blobs.limit {
+  use Nil <- result.try(case info.size <= chunks.input_limit {
     True -> Ok(Nil)
     False -> Error(Rejected("dependency archive exceeds worker size limit"))
   })
 
-  list.try_fold(["source.tar", "dependencies.tar"], Nil, fn(_, file) {
+  list.try_fold(archives(assignment.task), Nil, fn(_, file) {
     simplifile.set_permissions_octal(directory <> "/" <> file, 420)
     |> result.replace_error(Unavailable("could not set archive permissions"))
   })
+}
+
+/// The archives staged for a task, in extraction order.
+fn archives(task: queue.Task) -> List(String) {
+  case task.git {
+    option.Some(_) -> ["source.tar", "git.tar", "dependencies.tar"]
+    option.None -> ["source.tar", "dependencies.tar"]
+  }
+}
+
+/// Stage the Git metadata archive when the task has one. Every member must
+/// be a directory or regular file under `.git`, so this archive can write
+/// nowhere else in the workspace.
+fn stage_git(
+  directory: String,
+  git: option.Option(queue.Input),
+  network: controllers.Controllers,
+) -> Result(Nil, Fault) {
+  // A task that declared no metadata has nothing to stage.
+  case git {
+    option.None -> Ok(Nil)
+    option.Some(input) -> {
+      let path = directory <> "/git.tar"
+      use Nil <- result.try(
+        inputs.stage(controllers.fetch(network, _), input, path)
+        |> result.map_error(transfer_fault),
+      )
+      use entries <- result.try(
+        ffi_worker.entries(path) |> result.map_error(Rejected),
+      )
+      list.try_each(entries, fn(entry) {
+        let refusal = Rejected("unsafe path in Git metadata archive")
+
+        // A link could redirect a later member out of `.git`, so only
+        // directories and regular files pass.
+        use name <- result.try(case entry {
+          ffi_worker.Directory(name) -> Ok(name)
+          ffi_worker.Regular(name) -> Ok(name)
+          ffi_worker.Symlink(_) -> Error(refusal)
+        })
+
+        // A tar directory entry may end with a slash.
+        let name = case string.ends_with(name, "/") {
+          True -> string.drop_end(name, 1)
+          False -> name
+        }
+
+        // Every member sits under `.git` with clean path components.
+        case string.split(name, "/") {
+          [".git", ..rest] ->
+            case list.all(rest, fn(p) { p != "" && p != "." && p != ".." }) {
+              True -> Ok(Nil)
+              False -> Error(refusal)
+            }
+          _ -> Error(refusal)
+        }
+      })
+    }
+  }
 }
 
 /// Classify source paths that cannot be traversed or replaced by dependencies.
@@ -642,7 +705,10 @@ fn run(
       "--opt",
       "device=tmpfs",
       "--opt",
-      "o=size=" <> limits.workspace <> "m,nr_inodes=1048576,mode=1777",
+      // The action runs as 65534, and Git refuses a worktree another user owns.
+      "o=size="
+        <> limits.workspace
+        <> "m,nr_inodes=1048576,mode=1777,uid=65534,gid=65534",
       name,
     ],
     "",
@@ -671,17 +737,25 @@ fn run(
       mount,
       "--workdir",
       "/work",
-      "--mount",
-      bind(directory, "source.tar"),
-      "--mount",
-      bind(directory, "dependencies.tar"),
-      "--entrypoint",
-      "/bin/sh",
-      task.image,
-      "-c",
-      "set -eu; tar xf /source.tar; tar xf /dependencies.tar; exec \"$@\"",
-      "gantry",
-      ..task.action.argv
+      ..list.append(
+        list.flat_map(archives(task), fn(file) {
+          ["--mount", bind(directory, file)]
+        }),
+        [
+          "--entrypoint",
+          "/bin/sh",
+          task.image,
+          "-c",
+          // Unpack each staged archive in order: source, metadata, dependencies.
+          "set -eu; "
+            <> string.concat(
+            list.map(archives(task), fn(file) { "tar xf /" <> file <> "; " }),
+          )
+            <> "exec \"$@\"",
+          "gantry",
+          ..task.action.argv
+        ],
+      )
     ]),
     "",
   ))

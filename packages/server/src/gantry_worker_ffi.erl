@@ -1,9 +1,10 @@
 %% Tar metadata and archive writing through erl_tar for the Gleam worker.
 -module(gantry_worker_ffi).
--export([entries/1, archive_open/1, archive_add/3, archive_close/1]).
+-export([entries/1, archive_open/1, archive_add/3, archive_add_tree/3,
+         archive_close/1]).
 
-entries(Bytes) ->
-    try erl_tar:table({binary, Bytes}, [verbose]) of
+entries(Path) ->
+    try erl_tar:table(unicode:characters_to_list(Path), [verbose]) of
         {ok, Headers} -> members(Headers, []);
         {error, _} -> {error, <<"invalid Git source archive">>}
     catch
@@ -28,6 +29,11 @@ archive_open(Path) ->
 archive_add(Archive, Path, Bytes) ->
     Name = unicode:characters_to_list(Path),
     archive_result(erl_tar:add(Archive, Bytes, Name, [{mode, 8#644}, {mtime, 0}])).
+
+archive_add_tree(Archive, Directory, Name) ->
+    archive_result(erl_tar:add(Archive, unicode:characters_to_list(Directory),
+                               unicode:characters_to_list(Name),
+                               [{mtime, 0}, {atime, 0}, {ctime, 0}, {uid, 0}, {gid, 0}])).
 
 archive_close(Archive) -> archive_result(erl_tar:close(Archive)).
 

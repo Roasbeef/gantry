@@ -99,7 +99,10 @@ and restart from the persisted bytes, and both can reconcile one intent at
 once. Workers can vanish while holding a lease, restart under the same ID,
 and deliver late results. Mask bit 9 adds poison actions whose worker dies
 before it reports, so they expire until the last attempt fails the run.
-Reasons are oversized so the cap is exercised. Violations are counted so
+Mask bit 10 makes a worker refuse an input it cannot stage (a chunk of the
+wrong length or digest, a missing chunk, a bad manifest or a reassembled
+digest that does not match), which the queue sees as a rejected completion
+with the violation as its reason. Reasons are oversized so the cap is exercised. Violations are counted so
 a sweep reports numbers. The heal restores reliable delivery to live workers
 and controllers only. A lease held by a vanished worker must expire and be
 reassigned for the heal to finish. After the heal the harness counts stuck

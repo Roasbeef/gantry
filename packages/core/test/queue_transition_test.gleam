@@ -10,11 +10,11 @@ import gleam/option.{None, Some}
 import gleam/string
 
 fn action(name: String, dependencies: List(String)) -> graph.Action {
-  graph.Action(name, [name], [], [], dependencies, [], 10)
+  graph.action(name, [name], [], [], dependencies, [], 10)
 }
 
 fn task(id: String, name: String, dependencies: List(String)) -> queue.Task {
-  queue.Task(
+  queue.whole_task(
     action(name, dependencies),
     id,
     id <> name,
@@ -200,7 +200,7 @@ pub fn a_provider_denial_blocks_the_landing_with_a_typed_reason_test() {
 
 pub fn retention_keeps_reuse_working_after_the_run_is_dropped_test() {
   let first_task =
-    queue.Task(
+    queue.whole_task(
       action("build", []),
       "s",
       "shared",
@@ -293,4 +293,26 @@ pub fn the_durable_image_omits_the_derived_phase_test() {
     json.to_string(protocol.encode_run(run)),
     "\"phase\":\"waiting\"",
   )
+}
+
+pub fn a_replayed_build_may_rebuild_its_git_metadata_blob_test() {
+  let digest = fn(c) { string.repeat(c, 64) }
+  let with_git = fn(blob: String) {
+    queue.Task(..task("s", "check", []), git: Some(queue.Whole(blob)))
+  }
+  let assert Ok(#(state, _)) =
+    queue.admit(queue.empty(), "r", "repo", "s", "check", queue.Build, [
+      with_git(digest("a")),
+    ])
+
+  // Git may encode the same commit's pack differently, so a retry is accepted.
+  let assert Ok(_) =
+    queue.admit(state, "r", "repo", "s", "check", queue.Build, [
+      with_git(digest("b")),
+    ])
+
+  // Any other difference, such as the source, is still a different request.
+  let other = queue.Task(..with_git(digest("a")), source: queue.Whole("t"))
+  let assert Error(_) =
+    queue.admit(state, "r", "repo", "s", "check", queue.Build, [other])
 }

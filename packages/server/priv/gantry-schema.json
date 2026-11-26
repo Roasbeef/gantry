@@ -491,6 +491,13 @@
           "minimum": 1,
           "maximum": 3600,
           "default": 300
+        },
+        "git": {
+          "enum": [
+            "none",
+            "shallow"
+          ],
+          "default": "none"
         }
       },
       "required": [

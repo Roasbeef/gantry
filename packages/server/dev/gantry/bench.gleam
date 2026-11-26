@@ -709,6 +709,7 @@ fn action(settings: Settings) -> graph.Action {
     dependencies: [],
     after: [],
     timeout: 10,
+    git: graph.NoGit,
   )
 }
 
@@ -799,11 +800,11 @@ fn execute(
   use source <- result.try(get(
     bench,
     node,
-    "/v1/blobs/" <> offer.task.source,
+    "/v1/blobs/" <> queue.input_digest(offer.task.source),
     worker_credential(bench, lane),
   ))
   use Nil <- result.try(require(
-    blobs.digest(source) == offer.task.source,
+    blobs.digest(source) == queue.input_digest(offer.task.source),
     "source archive digest mismatch",
   ))
   use Nil <- result.try(

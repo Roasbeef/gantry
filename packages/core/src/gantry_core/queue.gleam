@@ -59,7 +59,9 @@
 //// `Landing`. A `Waiting` run has no actions. A worker holds at most one
 //// `Active` lease and every lease serial is issued once. `finish` and
 //// `record_landing` accept only the live generation and the exact intent.
-//// Failure text is capped at `max_detail_bytes` where it is recorded.
+//// Failure text is capped at `max_detail_bytes` where it is recorded. A retry
+//// of an admitted run is accepted when `same_tasks` finds the same staged
+//// tasks, ignoring the rebuilt Git metadata blob.
 
 import gantry_core/graph.{type Action}
 import gantry_core/sandbox
@@ -89,16 +91,58 @@ pub type Artifact {
   Artifact(path: String, digest: String)
 }
 
-/// An action with its immutable source archive and execution policy.
+/// How an immutable input archive is stored. A `Whole` digest names the
+/// archive's own blob. A `Chunked` digest names a chunk manifest, whose chunks
+/// concatenate to the archive (see `gantry_core/chunks`).
+pub type Input {
+  Whole(digest: String)
+  Chunked(manifest: String)
+}
+
+/// The digest a worker fetches first, whichever layout it names.
+///
+/// ## Examples
+///
+/// ```gleam
+/// queue.input_digest(queue.Whole("abc")) == "abc"
+/// ```
+pub fn input_digest(input: Input) -> String {
+  case input {
+    Whole(digest) -> digest
+    Chunked(manifest) -> manifest
+  }
+}
+
+/// An action with its immutable input archives and execution policy. `git`
+/// is present only for an action that declared Git metadata.
 pub type Task {
   Task(
     action: Action,
-    source: String,
+    source: Input,
+    git: Option(Input),
     recipe: String,
     pool: String,
     image: String,
     sandbox: sandbox.Profile,
   )
+}
+
+/// A task whose source is one blob and that stages no Git metadata.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.whole_task(action, digest, recipe, "linux", "image", sandbox.Strict)
+/// ```
+pub fn whole_task(
+  action action: Action,
+  source source: String,
+  recipe recipe: String,
+  pool pool: String,
+  image image: String,
+  sandbox profile: sandbox.Profile,
+) -> Task {
+  Task(action, Whole(source), None, recipe, pool, image, profile)
 }
 
 /// A key combines the action recipe and the resolved prerequisite files.
@@ -491,15 +535,26 @@ fn same_request(
     Build ->
       prior.submission == Build
       && prior.revision == revision
-      && list.map(prior.work, fn(work) { work.task }) == tasks
+      && same_tasks(list.map(prior.work, fn(work) { work.task }), tasks)
     Waiting(branch, members) ->
       pins(prior.submission) == Some(#(branch, members))
     Queued(candidate) ->
       prior.revision == revision
       && candidate_of(prior.submission) == Some(candidate)
-      && list.map(prior.work, fn(work) { work.task }) == tasks
+      && same_tasks(list.map(prior.work, fn(work) { work.task }), tasks)
     Landing(_) | Landed(_) | Blocked(_, _) | Unprepared(_, _, _) -> False
   }
+}
+
+/// Whether two preparations of one request staged the same tasks. A Git
+/// metadata archive is rebuilt on every preparation and Git may encode its
+/// pack differently each time, so its blob digest is not compared. The recipe
+/// already covers it, since a Shallow action's recipe names the commit.
+fn same_tasks(prior: List(Task), tasks: List(Task)) -> Bool {
+  let erase = fn(task: Task) {
+    Task(..task, git: option.map(task.git, fn(_) { Whole("") }))
+  }
+  list.map(prior, erase) == list.map(tasks, erase)
 }
 
 /// The branch and members a submission was admitted with.

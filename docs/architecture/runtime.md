@@ -240,7 +240,9 @@ Which infrastructure faults reach users as a failed action:
 
 The action key combines the prepared recipe digest with the resolved
 dependency file digests. The recipe includes the selected source archive
-and worker image. A producer can run again and return identical files.
+and worker image. An action that declares `"git": "shallow"` also hashes the
+commit it is built from, so it misses the cache on every commit, and no other
+action's key changes. A producer can run again and return identical files.
 Its dependent action then retains the same key and can reuse its proof.
 [Graph and queue](../../packages/core/src/gantry_core/queue.gleam) ·
 [Worker loop](../../packages/server/src/gantry/worker.gleam) ·
@@ -396,7 +398,10 @@ Operations that write the same counter (`admission`, `claiming`, `finishing`)
 hold a lock in the controller, so its own requests do not lose races to each
 other. The lock decides nothing, and the commit still refuses a competing
 controller. Retention commits in batches of 250.
-The controller allows up to 64 MiB per blob. It syncs object bytes
+The controller allows up to 64 MiB per blob. An input archive over one blob
+is stored as chunks of at most 32 MiB plus a manifest
+(`gantry_core/chunks`), up to 512 MiB in all, and the worker checks every
+chunk's length and digest and the digest of the reassembled archive. It syncs object bytes
 before atomic rename and syncs the containing directory before
 returning a digest. Cache reuse takes the proof from a recorded
 `Passed` action in the same repository. Preserve objects referenced by

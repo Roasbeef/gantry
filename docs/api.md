@@ -66,11 +66,19 @@ no body when nothing fits, or 200 with an assignment:
  "task": {"action": {"name": "verify", "argv": ["make", "check"],
                      "inputs": ["."], "outputs": [], "deps": [],
                      "after": [], "timeout": 900},
-          "source": "<sha256>", "recipe": "<sha256>",
+          "source": "<sha256>", "source_layout": "blob",
+          "git": null, "recipe": "<sha256>",
           "pool": "linux", "image": "alpine@sha256:..."},
  "lease": {"serial": 7, "worker": "linux-01", "until": 1764000000,
            "attempt": 1, "key": {"recipe": "<sha256>", "dependencies": []}}}
 ```
+
+`source_layout` is `"blob"` when `source` names the archive's own blob, and
+`"chunks"` when it names a chunk manifest whose chunks (each a blob of at most
+32 MiB) concatenate to the archive. `git` is `null`, or
+`{"digest", "layout"}` for the shallow `.git` archive of an action that
+declared `"git": "shallow"`. Both fields are additive: absent means a single
+blob and no metadata.
 
 `until` is Unix seconds: the claim time plus the action's `timeout` plus 150.
 Nothing renews it (see [recovering a lost worker](operations.md#a-worker-is-lost)).

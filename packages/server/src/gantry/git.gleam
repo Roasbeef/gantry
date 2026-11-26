@@ -29,6 +29,7 @@ import gantry/config
 import gantry/fault.{type Fault}
 import gantry/internal/ffi_host
 import gantry/internal/ffi_lock
+import gantry/internal/ffi_worker
 import gleam/bit_array
 import gleam/int
 import gleam/list
@@ -410,4 +411,101 @@ pub fn preserve(
 /// Flush a published path, treating a failure as a retryable storage fault.
 fn sync(path: String) -> Result(Nil, Fault) {
   ffi_host.sync_path(path) |> result.map_error(fault.Unavailable)
+}
+
+/// Build a tar of a shallow `.git` for one commit: the commit with its
+/// parents cut off, its trees and blobs, a detached `HEAD` and an index that
+/// matches the commit's tree. Extracted over a checkout of the same commit,
+/// it makes `git status` clean and `git rev-parse HEAD` answer.
+///
+/// The repository is assembled in a scratch directory beside the mirror. The
+/// pack comes from `git fetch --depth 1` out of the mirror, which names the
+/// commit in `shallow` itself. No remote is configured, so nothing in the
+/// archive could fetch.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // git.shallow_metadata(s, commit)
+/// ```
+pub fn shallow_metadata(s: Session, commit: String) -> Result(BitArray, Fault) {
+  // A full object ID is the only name that cannot be read as an option.
+  use Nil <- result.try(case string.byte_size(commit) == 40 {
+    True -> Ok(Nil)
+    False -> Error(fault.Internal("metadata needs a full commit ID"))
+  })
+
+  use here <- result.try(
+    simplifile.current_directory()
+    |> result.replace_error(fault.Unavailable("cannot resolve mirror path")),
+  )
+
+  // Git runs from the scratch repository, so the mirror path must not be
+  // relative to the mirror's own directory.
+  let mirror = case string.starts_with(s.dir, "/") {
+    True -> s.dir
+    False -> here <> "/" <> s.dir
+  }
+
+  let work = scratch(s, "metadata")
+  let repo = work <> "/repo"
+  let tar = work <> ".tar"
+
+  let built = {
+    use Nil <- result.try(
+      simplifile.create_directory_all(repo)
+      |> result.replace_error(fault.Unavailable("cannot create metadata dir")),
+    )
+    let env = s.env
+    let in_repo = fn(args) {
+      // Only a zero exit is a step done, and the message carries Git's text.
+      case ffi_host.run("git", ["-C", repo, ..args], env, 120_000) {
+        Ok(#(0, out)) -> Ok(out)
+        Ok(#(_, out)) ->
+          Error(fault.Unavailable(
+            "Git metadata step failed: " <> string.trim(out),
+          ))
+        Error(reason) -> Error(fault.Unavailable(reason))
+      }
+    }
+    use _ <- result.try(in_repo(["init", "--quiet", "--template="]))
+
+    // The commit is named by object ID, which a protocol v2 upload-pack
+    // serves whether or not a ref points at it. That is how an integration
+    // commit that no ref names yet can be read from the mirror.
+    use _ <- result.try(
+      in_repo([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--depth=1",
+        "--",
+        mirror,
+        commit,
+      ]),
+    )
+    use _ <- result.try(in_repo(["update-ref", "--no-deref", "HEAD", commit]))
+    use _ <- result.try(in_repo(["read-tree", commit]))
+
+    // Drop what only describes this fetch.
+    let _ = simplifile.delete(repo <> "/.git/FETCH_HEAD")
+    let _ = simplifile.delete(repo <> "/.git/logs")
+
+    use archive <- result.try(
+      ffi_worker.archive_open(tar)
+      |> result.map_error(fault.Unavailable),
+    )
+    let added =
+      ffi_worker.archive_add_tree(archive, repo <> "/.git", ".git")
+      |> result.map_error(fault.Unavailable)
+    let closed =
+      ffi_worker.archive_close(archive) |> result.map_error(fault.Unavailable)
+    use Nil <- result.try(added)
+    use Nil <- result.try(closed)
+    simplifile.read_bits(tar)
+    |> result.replace_error(fault.Unavailable("cannot read metadata archive"))
+  }
+  let _ = simplifile.delete(work)
+  let _ = simplifile.delete(tar)
+  built
 }

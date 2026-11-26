@@ -19,7 +19,7 @@ pub fn graph_manifest_and_action_json_mutations_test() {
       let name = "action-" <> int.to_string(number)
       let timeout = number % 3600 + 1
       let action =
-        graph.Action(name, [argument], ["src"], ["out/file"], [], [], timeout)
+        graph.action(name, [argument], ["src"], ["out/file"], [], [], timeout)
       let required = [
         #("name", json.string(name)),
         #("argv", strings([argument])),
@@ -33,7 +33,7 @@ pub fn graph_manifest_and_action_json_mutations_test() {
       ]
       let fields = list.append(required, optional)
       assert_json(fields, graph.action_decoder(), action, argument, edit)
-      let defaults = graph.Action(name, [argument], ["."], [], [], [], 300)
+      let defaults = graph.action(name, [argument], ["."], [], [], [], 300)
       let assert True =
         json.parse(object(required), graph.action_decoder()) == Ok(defaults)
 

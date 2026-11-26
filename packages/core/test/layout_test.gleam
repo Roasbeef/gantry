@@ -11,14 +11,22 @@ import gantry_core/sandbox
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import layout_audit as audit
 
 fn action(name: String, dependencies: List(String)) -> graph.Action {
-  graph.Action(name, [name], [], [name <> ".out"], dependencies, [], 10)
+  graph.action(name, [name], [], [name <> ".out"], dependencies, [], 10)
 }
 
 fn task(id: String, name: String, recipe: String, deps: List(String)) {
-  queue.Task(action(name, deps), id, recipe, "pool", "image", sandbox.Strict)
+  queue.whole_task(
+    action(name, deps),
+    id,
+    recipe,
+    "pool",
+    "image",
+    sandbox.Strict,
+  )
 }
 
 fn tasks(id: String, shared: Bool) -> List(queue.Task) {
@@ -211,6 +219,65 @@ pub fn importing_a_state_round_trips_test() {
     == image.keys(both.store)
 }
 
+pub fn chunked_inputs_and_git_metadata_survive_the_layout_test() {
+  let digest = fn(c) { string.repeat(c, 64) }
+  let chunked =
+    queue.Task(
+      ..task("chunked", "build", "recipe", []),
+      source: queue.Chunked(digest("e")),
+      git: Some(queue.Whole(digest("d"))),
+    )
+  let assert Ok(#(state, _)) =
+    queue.admit(queue.empty(), "r", "repo", "r", "check", queue.Build, [
+      chunked,
+    ])
+  let assert Ok(store) =
+    audit.admit(
+      image.empty(),
+      queue.empty(),
+      "r",
+      "repo",
+      "r",
+      "check",
+      queue.Build,
+      [
+        chunked,
+      ],
+    )
+
+  // Both the committed path and the import carry the input layout intact.
+  let assert Ok(found) = layout.materialize(image.reader(store))
+  assert found == state
+  let assert Ok(imported) =
+    layout.materialize(image.reader(audit.import_state(state)))
+  assert imported == state
+}
+
+pub fn a_run_stored_before_input_layouts_still_decodes_test() {
+  let both = admit(start(), "old", False)
+
+  // Records written before chunked inputs carry neither field.
+  let older =
+    image.keys(both.store)
+    |> list.filter_map(fn(key) {
+      let assert Ok(bytes) = image.get(both.store, key)
+      case string.contains(bytes, "\"source_layout\":\"blob\",") {
+        True ->
+          Ok(layout.Put(
+            key,
+            bytes
+              |> string.replace("\"source_layout\":\"blob\",", "")
+              |> string.replace(",\"git\":null", ""),
+          ))
+        False -> Error(Nil)
+      }
+    })
+  assert older != []
+  let assert Ok(found) =
+    layout.materialize(image.reader(image.apply(both.store, older)))
+  assert found == both.state
+}
+
 /// The integers from `first` to `last`.
 fn numbers(first: Int, last: Int) -> List(Int) {
   list.index_map(list.repeat(0, last - first + 1), fn(_, offset) {
@@ -306,7 +373,7 @@ fn task_in(
   recipe: String,
   pool: String,
 ) -> queue.Task {
-  queue.Task(action(name, []), id, recipe, pool, "image", sandbox.Strict)
+  queue.whole_task(action(name, []), id, recipe, pool, "image", sandbox.Strict)
 }
 
 fn claim_in(

@@ -62,9 +62,16 @@ pub fn history_records_one_grant_per_lease_and_its_result_test() {
       support.run_id("repo"),
       queue.Retention(200, 1000),
     )
-  let action = graph.Action("only", ["true"], [], [], [], [], 30)
+  let action = graph.action("only", ["true"], [], [], [], [], 30)
   let task =
-    queue.Task(action, "source", id <> "-recipe", pool, "image", sandbox.Strict)
+    queue.whole_task(
+      action,
+      "source",
+      id <> "-recipe",
+      pool,
+      "image",
+      sandbox.Strict,
+    )
   let assert Ok(_) =
     store.admit(id, "repo", "rev", "check", queue.Build, [task])
   let poll =
