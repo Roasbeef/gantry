@@ -492,8 +492,10 @@ provide it.
   `dockerd -H unix:///run/docker-loom.sock --exec-opt native.cgroupdriver=cgroupfs --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker --bridge=none --iptables=false --ip6tables=false --ip-masq=false`.
   Actions run with no network, so this daemon needs none. Without the last
   four flags it manages iptables and the `docker0` bridge beside the host's
-  own daemon, and on the worker host that cut the slots off from the
-  controller.
+  own daemon. On the worker host the slots lost the controller 34 seconds
+  after it first started that way. The rule that blocked them was the agent
+  namespace's egress filter in `DOCKER-USER`, which rejects the tailnet
+  range, and root added a narrow exception for the controller's address.
   The slot points `DOCKER_HOST` at it, and that daemon needs the collector
   and action images.
 - **The slot names an empty cgroup the worker user owns** in

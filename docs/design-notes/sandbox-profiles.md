@@ -491,8 +491,11 @@ session can run:
    --bridge=none --iptables=false --ip6tables=false --ip-masq=false`. The
    last four flags were missing from this note's first edition. Without
    them the second daemon manages iptables and the `docker0` bridge beside
-   the system daemon, and on the worker host the slots lost the controller
-   34 seconds after it started.
+   the system daemon. On the worker host the slots lost the controller 34
+   seconds after it started. The blocking rule was the agent namespace's
+   egress filter in `DOCKER-USER`, which rejects 100.64.0.0/10. Root added
+   an exception for the controller's address and port, and restarted the
+   daemon with the four flags.
    With that driver `--cgroup-parent` takes a path, so it can name a cgroup
    inside the worker's delegated subtree.
 3. Pull the action and collector images into that daemon.
