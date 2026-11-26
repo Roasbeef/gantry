@@ -98,7 +98,6 @@ one module, `gantry_core/fleet`:
            {"worker": "linux-02", "host": null,
             "presence": {"kind": "unseen"}}],
  "runs": [ ...each retained run, as GET /v1/runs/{id} answers it... ],
- "proofs": 312,
  "events": [{"kind": "granted", "serial": 7, "run": "check-1", "action": "verify",
              "worker": "linux-01", "pool": "linux", "at": 1763999950, "until": 1764001500},
             {"kind": "settled", "serial": 7, "outcome": "succeeded", "at": 1763999990}],
@@ -110,8 +109,8 @@ slot's `presence` is the latest poll that this controller served, kept in
 memory and lost on restart, because writing it to the replicated queue would
 replicate every idle poll. `unseen` means this controller has not served a
 poll from the slot since it started. Behind a gateway that spreads polls
-over voters, a live slot can read as `unseen` on one controller. `proofs`
-counts the remembered proofs available for cache reuse.
+over voters, a live slot can read as `unseen` on one controller. The runs
+are read through the indexed layout's run index, without the proof index.
 
 `events` and `samples` are the last fifteen minutes this controller saw, at
 most 3,000 entries, held in memory. A `granted` event is recorded once the

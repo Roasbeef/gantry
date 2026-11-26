@@ -5,6 +5,7 @@ import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/queue
 import gleam/json
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 
@@ -29,7 +30,6 @@ fn sample() -> fleet.Fleet {
       fleet.Slot("w2", None, fleet.Unseen),
     ],
     runs: state.runs,
-    proofs: 0,
     since: 40,
     events: [
       fleet.Granted(1, "r", "build", "w1", "linux", 100, 760),
@@ -107,5 +107,67 @@ pub fn ready_follows_the_claim_rule_test() {
       queue.Rejected("no", "log"),
     )
   // A failed run offers nothing.
+  assert fleet.ready_by_pool(state.runs) == []
+}
+
+/// The pools `fleet.ready` names for a run, as a sorted set.
+fn ready_pools(run: queue.Run) -> List(String) {
+  fleet.ready(run)
+  |> list.map(fn(work) { work.task.pool })
+  |> list.unique
+  |> list.sort(string.compare)
+}
+
+/// Check every run of a state against the core's own claim rule.
+fn agrees(state: queue.State) -> Bool {
+  list.all(state.runs, fn(run) {
+    ready_pools(run) == list.sort(queue.ready_pools(run), string.compare)
+  })
+}
+
+pub fn ready_agrees_with_the_core_claim_rule_test() {
+  let pooled = fn(name, needs, pool) {
+    let action = graph.Action(name, [name], [], [], needs, [], 30)
+    queue.Task(action, "source", "recipe-" <> name, pool, "image")
+  }
+  let assert Ok(#(state, _)) =
+    queue.admit(queue.empty(), "fan", "repo", "rev", "check", queue.Build, [
+      pooled("root", [], "linux"),
+      pooled("a", ["root"], "linux"),
+      pooled("b", ["root"], "gpu"),
+      pooled("c", ["a", "b"], "linux"),
+    ])
+  let assert Ok(#(state, _)) =
+    queue.admit(
+      state,
+      "group",
+      "repo",
+      "",
+      "check",
+      queue.Waiting("main", [queue.Member(1, "head")]),
+      [],
+    )
+  assert agrees(state)
+
+  // Walk the fan-out to its end, checking after every claim and result.
+  let step = fn(state: queue.State, worker, pool, outcome) {
+    let assert #(state, Some(job)) = queue.claim(state, worker, pool, 0)
+    assert agrees(state)
+    let assert Ok(state) =
+      queue.finish(
+        state,
+        job.run,
+        job.task.action.name,
+        worker,
+        queue.lease_serial(job.lease),
+        outcome,
+      )
+    assert agrees(state)
+    state
+  }
+  let state = step(state, "w1", "linux", queue.Succeeded([], "log"))
+  let state = step(state, "w1", "linux", queue.Succeeded([], "log"))
+  let state = step(state, "w2", "gpu", queue.Rejected("no", "log"))
+  assert agrees(state)
   assert fleet.ready_by_pool(state.runs) == []
 }

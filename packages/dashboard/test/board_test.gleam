@@ -50,7 +50,6 @@ fn snapshot(state: queue.State, slots: List(fleet.Slot), now: Int) {
       since: 0,
       slots:,
       runs: state.runs,
-      proofs: 0,
       events: [],
       samples: [],
     ),

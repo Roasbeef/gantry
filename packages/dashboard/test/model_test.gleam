@@ -34,7 +34,6 @@ fn body(state: queue.State, now: Int) -> String {
     since: 0,
     slots: [],
     runs: state.runs,
-    proofs: 0,
     events: [],
     samples: [],
   )
@@ -107,7 +106,7 @@ pub fn a_long_log_keeps_its_tail_test() {
 
 pub fn layout_places_layers_in_columns_and_links_each_need_test() {
   let state = leased(0)
-  let b = board.build(fleet.Fleet(1, 0, [], state.runs, 0, [], []))
+  let b = board.build(fleet.Fleet(1, 0, [], state.runs, [], []))
   let assert Ok(run) = board.find(b, "r")
   let placed = layout.place(run.actions)
   let assert [first, second] = placed.nodes
@@ -155,7 +154,7 @@ pub fn runs_split_into_live_broken_and_settled_bands_test() {
       queue.lease_serial(job.lease),
       queue.Rejected("no", "log"),
     )
-  let b = board.build(fleet.Fleet(12, 0, [], state.runs, 0, [], []))
+  let b = board.build(fleet.Fleet(12, 0, [], state.runs, [], []))
   let #(l, broken, settled) = board.bands(b.runs)
   assert list.map(l, fn(r) { r.id }) == ["r"]
   assert list.map(broken, fn(r) { r.id }) == ["bad"]

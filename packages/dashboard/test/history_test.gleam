@@ -16,15 +16,7 @@ fn task(name: String, needs: List(String)) -> queue.Task {
 
 fn read(state: queue.State, now: Int, events, samples, since) {
   let snapshot =
-    fleet.Fleet(
-      now:,
-      since:,
-      slots: [],
-      runs: state.runs,
-      proofs: 0,
-      events:,
-      samples:,
-    )
+    fleet.Fleet(now:, since:, slots: [], runs: state.runs, events:, samples:)
   history.read(snapshot, board.build(snapshot))
 }
 
@@ -163,7 +155,6 @@ pub fn the_critical_path_follows_the_longest_chain_test() {
       0,
       [],
       state.runs,
-      0,
       [
         fleet.Granted(1, "r", "c", "w1", "linux", 100, 900),
         fleet.Settled(1, fleet.Succeeded, 400),

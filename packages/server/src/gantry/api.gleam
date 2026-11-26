@@ -235,12 +235,12 @@ pub fn claim(
 /// // api.fleet(config)
 /// ```
 pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
-  use state <- result.try(store.read())
+  use runs <- result.try(store.runs())
   let now = unix_now()
 
   // Each read samples the ready work, so the samples cover the times a page
   // was watching and nothing else; the page draws the gaps as unknown.
-  ffi_history.sample(now, fleet.ready_by_pool(state.runs))
+  ffi_history.sample(now, fleet.ready_by_pool(runs))
   ffi_history.prune(now, history_window)
 
   // Every registered slot, with the latest poll this controller served.
@@ -284,8 +284,7 @@ pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
       now:,
       since: int.max(ffi_history.since(), now - history_window),
       slots:,
-      runs: state.runs,
-      proofs: list.length(state.cache),
+      runs:,
       events:,
       samples:,
     )),

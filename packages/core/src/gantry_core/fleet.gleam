@@ -6,7 +6,7 @@
 //// A slot's pool and last poll are not durable. A controller learns them from
 //// the claims it serves and forgets them on restart, so `Unseen` means "this
 //// controller has not served a poll from the slot", never "the slot is idle".
-//// The decoder refuses a negative clock, a negative proof count, a repeated
+//// The decoder refuses a negative clock, a repeated
 //// slot, and a repeated run, as the queue image's decoder does.
 ////
 //// ## History
@@ -84,7 +84,6 @@ pub type Fleet {
     since: Int,
     slots: List(Slot),
     runs: List(queue.Run),
-    proofs: Int,
     events: List(Event),
     samples: List(Sample),
   )
@@ -96,7 +95,7 @@ pub type Fleet {
 /// ## Examples
 ///
 /// ```gleam
-/// // fleet.encode(fleet.Fleet(0, 0, [], [], 0, [], []))
+/// // fleet.encode(fleet.Fleet(0, 0, [], [], [], []))
 /// ```
 pub fn encode(value: Fleet) -> json.Json {
   json.object([
@@ -104,7 +103,6 @@ pub fn encode(value: Fleet) -> json.Json {
     #("since", json.int(value.since)),
     #("slots", json.array(value.slots, encode_slot)),
     #("runs", json.array(value.runs, protocol.encode_run)),
-    #("proofs", json.int(value.proofs)),
     #("events", json.array(value.events, encode_event)),
     #("samples", json.array(value.samples, encode_sample)),
   ])
@@ -128,11 +126,10 @@ pub fn decoder() -> decode.Decoder(Fleet) {
     "runs",
     unique(decode.list(protocol.run_decoder()), fn(run: queue.Run) { run.id }),
   )
-  use proofs <- decode.field("proofs", natural())
   use since <- decode.field("since", natural())
   use events <- decode.field("events", decode.list(event_decoder()))
   use samples <- decode.field("samples", decode.list(sample_decoder()))
-  decode.success(Fleet(now, since, slots, runs, proofs, events, samples))
+  decode.success(Fleet(now, since, slots, runs, events, samples))
 }
 
 /// The pending actions of a run that a poll in their pool could lease now:

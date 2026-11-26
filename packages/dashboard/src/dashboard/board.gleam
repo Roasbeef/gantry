@@ -216,7 +216,6 @@ pub type Totals {
     slots: Int,
     passed: Int,
     reused: Int,
-    proofs: Int,
   )
 }
 
@@ -252,7 +251,7 @@ pub fn build(snapshot: Fleet) -> Board {
     })
   Board(
     now: snapshot.now,
-    totals: totals(rows, slots, snapshot.proofs),
+    totals: totals(rows, slots),
     pools:,
     slots:,
     runs: order_runs(rows),
@@ -790,7 +789,7 @@ pub fn verdict(
 }
 
 /// Count the live runs, ready and active actions, live slots, and finished actions for the header.
-fn totals(rows: List(RunRow), slots: List(Slot), proofs: Int) -> Totals {
+fn totals(rows: List(RunRow), slots: List(Slot)) -> Totals {
   let actions = list.flat_map(rows, fn(run) { run.actions })
   let count = fn(cell) { list.count(actions, fn(a) { a.cell == cell }) }
   Totals(
@@ -806,7 +805,6 @@ fn totals(rows: List(RunRow), slots: List(Slot), proofs: Int) -> Totals {
     slots: list.length(slots),
     passed: count(Passed),
     reused: count(Reused),
-    proofs:,
   )
 }
 
