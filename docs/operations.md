@@ -154,6 +154,10 @@ forwards the signal into the container, which ends the action before the
 drain can let it finish. A stop that SIGKILLs the worker skips the drain;
 the next start reports the attempt `interrupted`, as after any crash.
 
+Under launchd, set `ExitTimeOut` in each slot's plist the same way. Its
+default is 20 s, well under the 60 s drain deadline, so a stop without it
+SIGKILLs the worker before the drain can finish.
+
 ### Upgrade across a queue format change
 
 Releases up to `6a561d4` keep the queue as one snapshot with no format
