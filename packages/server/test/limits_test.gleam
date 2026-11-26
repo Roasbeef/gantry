@@ -19,6 +19,7 @@ pub fn defaults_let_a_beam_build_start_on_a_many_core_host_test() {
   assert list.contains(flags, "--pids-limit=4096")
   assert list.contains(flags, "--ulimit=nofile=65536:65536")
   assert list.contains(flags, "/tmp:rw,nosuid,nodev,size=1024m,mode=1777")
+  assert list.contains(flags, "/var/tmp:rw,nosuid,nodev,size=1024m,mode=1777")
   assert list.contains(flags, "--memory=768m")
   assert list.contains(flags, "--cpus=2")
 }
@@ -33,6 +34,7 @@ pub fn settings_override_the_defaults_test() {
   assert list.contains(flags, "--pids-limit=512")
   assert list.contains(flags, "--ulimit=nofile=2048:2048")
   assert list.contains(flags, "/tmp:rw,nosuid,nodev,size=64m,mode=1777")
+  assert list.contains(flags, "/var/tmp:rw,nosuid,nodev,size=64m,mode=1777")
 }
 
 pub fn the_sandbox_keeps_its_fixed_restrictions_test() {
