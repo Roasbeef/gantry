@@ -1,0 +1,17 @@
+name = "dashboard"
+version = "0.1.0"
+gleam = ">= 1.18.0"
+target = "javascript"
+
+[javascript]
+runtime = "node"
+
+[dependencies]
+gantry_core = { path = "../core" }
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.0.0 and < 4.0.0"
+lustre = "== 5.7.1"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
+lustre_dev_tools = "== 2.4.0"

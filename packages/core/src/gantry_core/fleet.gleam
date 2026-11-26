@@ -21,6 +21,7 @@ import gleam/set
 pub type Presence {
   /// No poll from the slot has reached this controller since it started.
   Unseen
+
   /// The slot's latest poll named `pool` at Unix second `at`.
   Polled(pool: String, at: Int)
 }
@@ -88,11 +89,16 @@ pub fn granted(lease: queue.Lease, timeout: Int) -> Int {
   queue.lease_until(lease) - timeout - queue.lease_slack
 }
 
+/// Encode a slot as the object `slot_decoder` reads back, with an absent
+/// host as `null` and the presence as a tagged object.
 fn encode_slot(value: Slot) -> json.Json {
+  // The host is `null` when the registry entry has no label.
   let host = case value.host {
     Some(host) -> json.string(host)
     None -> json.null()
   }
+
+  // Only a polled slot carries a pool and a time.
   let presence = case value.presence {
     Unseen -> json.object([#("kind", json.string("unseen"))])
     Polled(pool, at) ->
@@ -102,6 +108,7 @@ fn encode_slot(value: Slot) -> json.Json {
         #("at", json.int(at)),
       ])
   }
+
   json.object([
     #("worker", json.string(value.worker)),
     #("host", host),
@@ -116,6 +123,8 @@ fn slot_decoder() -> decode.Decoder(Slot) {
   decode.success(Slot(worker, host, presence))
 }
 
+/// Decode the tagged presence object `encode_slot` writes, failing on an
+/// unknown tag or a polled slot without its pool and time.
 fn presence_decoder() -> decode.Decoder(Presence) {
   use kind <- decode.field("kind", decode.string)
 
