@@ -517,3 +517,58 @@ cgroupfs support measured.
 `gantry.slice` and `gantry-probe.slice`, which systemd made for the
 `--cgroup-parent` probe. They hold no processes, removing them needs root, and
 they go away at reboot. The scratch scripts were deleted.
+
+### After root's setup · 2026-11-26
+
+Root ran steps 1 and 2 on the worker host:
+- **Delegation:** `delegate.conf` gives user managers `cpu cpuset io memory
+  pids`, and the worker user's running manager already showed all five.
+- **Daemon:** `docker-loom` runs on `unix:///run/docker-loom.sock` with the
+  `cgroupfs` driver.
+
+Step 3 was done through the `docker` group. The collector image came from
+Docker Hub by digest, and Loom's action image came from the local registry by
+the digest `controller.toml` names.
+
+The sketch then held, as measured through `systemd-run --user` beside the
+live slots:
+
+- **The daemon accepts the parent.** The probe made an attempt cgroup `C`
+  under `user@1002.service/gantry-probe` and passed
+  `--cgroup-parent=<C without the /sys/fs/cgroup prefix> --cgroupns=host`.
+  The container landed at `C/<container id>`, inside `C`.
+- **The action can enter what it makes.** With `C` mode 0777 and its
+  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` mode 0666,
+  uid 65534 made `C/exec-1`, wrote `pids.max`, and moved a process into it.
+  The move that failed with `Permission denied` before now succeeds, because
+  the common ancestor is `C`.
+- **Loom's own check accepts it.** `loom-exec --self-test`, built in the
+  container from Loom's source with `LOOM_CGROUP_BASE=C`, advertised
+  `features: rlimits, pgroup, bwrap, landlock, seccomp, cgroup-v2`. It
+  reported 11 enforced and 0 skipped, including "fork bomb capped by pids
+  limit". Without the variable it skips cgroup v2, because the container's
+  own cgroup holds processes.
+
+**Built.** A slot with `GANTRY_WORKER_USERNS_CGROUP` set, naming an empty
+cgroup its user owns, gives each `userns` attempt a child of it, and
+`gantry/worker/cgroup` owns those effects.
+- **Limits:** the attempt cgroup carries the slot's limits (`memory.max`,
+  `pids.max`, and `cpu.max` when delegated), so processes moved out of the
+  container's cgroup stay bounded. The limit files keep the worker's mode,
+  so the action cannot raise them.
+- **Flags:** the container gets `--cgroup-parent`, `--cgroupns=host`, a
+  read-write bind of the attempt cgroup at its own path, and
+  `GANTRY_CGROUP_BASE` and `LOOM_CGROUP_BASE` set to that path.
+- **Cleanup:** cleanup removes the attempt cgroup depth first, through
+  rmdir(2), after the containers.
+- **Startup checks:** at startup the worker checks that the daemon uses the
+  `cgroupfs` driver and that the base passes on `memory` and `pids` and holds
+  no processes. It also runs a trial action that must create a cgroup and
+  enter it, and refuses to start otherwise.
+- **Unchanged:** strict actions, and `userns` actions on a worker without
+  the setting, get the same flags as before. The recipe does not change,
+  because the cgroup is the slot's capacity, not an input.
+
+`--cgroupns=host` lets the action read the host's cgroup paths. That is a
+smaller exposure than what `userns` already gives up, and only `userns`
+attempts get it.
