@@ -21,6 +21,9 @@
 //// attempt fails the run with `LeaseExpired` rather than cycling a poison
 //// action. A failed action turns the run's other `Pending` actions into
 //// `Skipped`. `finish` accepts a result only for the live serial and worker.
+//// An `Interrupted` result lapses its lease at once, exactly as `expire`
+//// would at the deadline, so a worker restart reassigns the action instead
+//// of failing the run, and a poison action still ends at the bound.
 //// `landings` hands each lane's intent to the reconciler and
 //// `record_landing` resolves exactly that intent. `retain` drops the oldest
 //// terminal runs and bounds the proof index, which keeps `cached` working.
@@ -32,7 +35,7 @@
 //// | State | Event | Result |
 //// | --- | --- | --- |
 //// | `Pending` | `claim` with a ready action in the worker's pool | `Active` with a fresh serial, or `Reused` on a proof hit |
-//// | `Active` | `finish` for the live serial and worker, or `expire` after the deadline | `Passed` on a matching manifest or `Failed` on a rejection. A lapsed lease becomes `Pending` with one more attempt, `Failed` at the last attempt, or `Skipped` in a failed run |
+//// | `Active` | `finish` for the live serial and worker, or `expire` after the deadline | `Passed` on a matching manifest or `Failed` on a rejection. A lapsed or `Interrupted` lease becomes `Pending` with one more attempt, `Failed` at the last attempt, or `Skipped` in a failed run |
 //// | `Passed` | none | terminal, indexed as a proof |
 //// | `Reused` | none | terminal, a copy of an indexed proof |
 //// | `Failed` | none | terminal, its run's `Pending` actions become `Skipped` |
@@ -119,7 +122,8 @@ pub type Failure {
   /// The worker reported a rejection. The text comes from outside.
   Reported(detail: String)
 
-  /// The last permitted attempt lost its lease before a result arrived.
+  /// The last permitted attempt lost its lease before a result arrived, or
+  /// its worker reported it `Interrupted`.
   LeaseExpired(attempts: Int)
 }
 
@@ -228,6 +232,11 @@ pub type Assignment {
 pub type Completion {
   Succeeded(files: List(Artifact), log: String)
   Rejected(reason: String, log: String)
+
+  /// The worker gave up an attempt it could not finish, such as one cut
+  /// short by a restart after `docker start`. The lease lapses at once, as
+  /// if its deadline had passed, and the attempt counts toward the bound.
+  Interrupted
 }
 
 /// The outcome of a run, for status output and policy only.
@@ -749,16 +758,11 @@ fn expire_run(run: Run, now: Int) -> Run {
   case list.any(run.work, fn(work) { lapsed(work.step) }) {
     False -> run
     True -> {
-      let failed = run_failed(run)
       let work =
         list.map(run.work, fn(work) {
           case work.step {
             Active(lease) if now > lease.until ->
-              Work(..work, step: case failed, lease.attempt >= max_attempts {
-                True, _ -> Skipped
-                False, True -> Failed(LeaseExpired(lease.attempt), "")
-                False, False -> Pending(lease.attempt)
-              })
+              Work(..work, step: lapse(lease, run))
             Pending(_)
             | Active(_)
             | Passed(_)
@@ -769,6 +773,16 @@ fn expire_run(run: Run, now: Int) -> Run {
         })
       skip_pending(Run(..run, work:))
     }
+  }
+}
+
+/// The step a lapsed lease of `run` leaves behind: the next attempt, a failure
+/// at the last permitted attempt, or a skip when the run already failed.
+fn lapse(lease: Lease, run: Run) -> Step {
+  case run_failed(run), lease.attempt >= max_attempts {
+    True, _ -> Skipped
+    False, True -> Failed(LeaseExpired(lease.attempt), "")
+    False, False -> Pending(lease.attempt)
   }
 }
 
@@ -973,17 +987,23 @@ fn settled(
     }
     Rejected(reason, log) -> {
       let failed = Failed(Reported(cap_text(reason)), log)
-      Ok(replace_run(state, fail_run(run, action.name, failed)))
+      Ok(replace_run(state, record_step(run, action.name, failed)))
+    }
+
+    // An interrupted attempt lapses now instead of at its deadline.
+    Interrupted -> {
+      let step = lapse(lease, run)
+      Ok(replace_run(state, record_step(run, action.name, step)))
     }
   }
 }
 
-/// Record a terminal failure and skip the run's other pending actions.
-fn fail_run(run: Run, action: String, failed: Step) -> Run {
+/// Record one action's step, then skip pending actions if the run failed.
+fn record_step(run: Run, action: String, step: Step) -> Run {
   let work =
     list.map(run.work, fn(work) {
       case work.task.action.name == action {
-        True -> Work(..work, step: failed)
+        True -> Work(..work, step:)
         False -> work
       }
     })

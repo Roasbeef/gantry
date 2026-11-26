@@ -1071,9 +1071,10 @@ pub fn finish(
   use #(loaded, run_expects) <- result.try(load(reader, [id]))
 
   // Only a verified result publishes a proof, so only it touches a group.
+  // An interruption only returns the action to `Pending`.
   let published = case completion {
     queue.Succeeded(_, _) -> True
-    queue.Rejected(_, _) -> False
+    queue.Rejected(_, _) | queue.Interrupted -> False
   }
 
   let wanted =

@@ -22,9 +22,9 @@ pub fn generated_receipts_require_the_current_owner_and_exact_paths_test() {
     let #(active, assignment) = claim(pending, number)
     let worker = queue.lease_worker(assignment.lease)
     let serial = queue.lease_serial(assignment.lease)
-    let paths = case reverse {
-      True -> list.reverse(artifacts)
-      False -> artifacts
+    let paths = case reverse % 2 {
+      0 -> list.reverse(artifacts)
+      _ -> artifacts
     }
     let log = "log-" <> int.to_string(number)
     let completion = queue.Succeeded(paths, log)
@@ -66,13 +66,14 @@ pub fn generated_queue_snapshots_and_wire_values_round_trip_test() {
     |> qcheck.with_test_count(cases)
     |> qcheck.with_seed(qcheck.seed(7139))
   qcheck.run(config, receipt(), fn(input) {
-    let #(number, digests, rejected) = input
+    let #(number, digests, outcome) = input
     let #(pending, artifacts) = pending_run(number, digests)
     let #(active, assignment) = claim(pending, number)
     let suffix = int.to_string(number)
-    let completion = case rejected {
-      True -> queue.Rejected("failure-" <> suffix, "log-" <> suffix)
-      False -> queue.Succeeded(artifacts, "log-" <> suffix)
+    let completion = case outcome {
+      0 -> queue.Rejected("failure-" <> suffix, "log-" <> suffix)
+      1 -> queue.Interrupted
+      _ -> queue.Succeeded(artifacts, "log-" <> suffix)
     }
     let assert True =
       json.parse(
@@ -127,18 +128,38 @@ pub fn generated_queue_snapshots_and_wire_values_round_trip_test() {
         let assert True = unchanged == settled
         Nil
       }
+
+      // An interruption returns the action for a second attempt under a
+      // fresh serial, and the old serial is fenced from then on.
+      queue.Interrupted -> {
+        let worker = queue.lease_worker(assignment.lease)
+        let assert #(_, option.Some(again)) =
+          queue.claim(settled, worker, assignment.task.pool, number + 1)
+        let assert 2 = queue.lease_attempt(again.lease)
+        let assert True =
+          queue.lease_serial(again.lease) > queue.lease_serial(assignment.lease)
+        let assert Error(_) =
+          finish(
+            settled,
+            assignment,
+            worker,
+            queue.lease_serial(assignment.lease),
+            queue.Succeeded(artifacts, "late"),
+          )
+        Nil
+      }
     }
   })
 }
 
-fn receipt() -> qcheck.Generator(#(Int, List(Int), Bool)) {
+fn receipt() -> qcheck.Generator(#(Int, List(Int), Int)) {
   qcheck.tuple3(
     qcheck.bounded_int(from: 0, to: 50_000),
     qcheck.generic_list(
       elements_from: qcheck.bounded_int(from: 0, to: 65_535),
       length_from: qcheck.bounded_int(from: 1, to: 8),
     ),
-    qcheck.bool(),
+    qcheck.bounded_int(from: 0, to: 2),
   )
 }
 

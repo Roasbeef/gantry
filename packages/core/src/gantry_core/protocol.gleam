@@ -180,7 +180,8 @@ pub fn encode_assignment(value: queue.Assignment) -> json.Json {
 pub fn completion_decoder() -> decode.Decoder(queue.Completion) {
   use kind <- decode.field("kind", decode.string)
 
-  // A successful report includes output files. A rejection carries its diagnostic.
+  // A successful report includes output files. A rejection carries its
+  // diagnostic. An interruption carries nothing, since no outcome exists.
   case kind {
     "succeeded" -> {
       use files <- decode.field("files", decode.list(artifact_decoder()))
@@ -192,6 +193,7 @@ pub fn completion_decoder() -> decode.Decoder(queue.Completion) {
       use log <- decode.field("log", decode.string)
       decode.success(queue.Rejected(reason, log))
     }
+    "interrupted" -> decode.success(queue.Interrupted)
     _ ->
       decode.failure(
         queue.Rejected("invalid result", ""),
@@ -221,6 +223,7 @@ pub fn encode_completion(value: queue.Completion) -> json.Json {
         #("reason", json.string(reason)),
         #("log", json.string(log)),
       ])
+    queue.Interrupted -> json.object([#("kind", json.string("interrupted"))])
   }
 }
 
