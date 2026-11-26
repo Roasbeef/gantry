@@ -130,7 +130,7 @@ fn boot() -> Result(#(slot.Slot, controllers.Controllers, Int), String) {
           spool,
         )
       },
-      cleanup: fn(name) { docker.cleanup(directory, name) },
+      cleanup: fn(name) { docker.cleanup(directory, limits, name) },
     )
   Ok(#(slot.Slot(directory, worker, pool, db, engine), network, drain))
 }

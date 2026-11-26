@@ -34,8 +34,13 @@ const strict = [
 ]
 
 pub fn a_strict_action_keeps_todays_flags_exactly_test() {
-  // A userns-capable worker still runs a strict task with the strict flags.
-  list.each([[], seccomp], fn(settings) {
+  // A userns-capable worker, with or without a cgroup base, still runs a
+  // strict task with the strict flags. The cgroup only serves userns.
+  let with_cgroup =
+    list.append(seccomp, [
+      #("GANTRY_WORKER_USERNS_CGROUP", "/sys/fs/cgroup/user.slice/gantry-01"),
+    ])
+  list.each([[], seccomp, with_cgroup], fn(settings) {
     assert docker.action_flags(limits(settings), sandbox.Strict) == Ok(strict)
   })
 }

@@ -1,7 +1,7 @@
 %% Tar metadata and archive writing through erl_tar for the Gleam worker.
 -module(gantry_worker_ffi).
 -export([entries/1, archive_open/1, archive_add/3, archive_add_tree/3,
-         archive_close/1]).
+         archive_close/1, remove_directory/1]).
 
 entries(Path) ->
     try erl_tar:table(unicode:characters_to_list(Path), [verbose]) of
@@ -39,3 +39,15 @@ archive_close(Archive) -> archive_result(erl_tar:close(Archive)).
 
 archive_result(ok) -> {ok, nil};
 archive_result({error, _}) -> {error, <<"cannot write dependency archive">>}.
+
+%% Remove one empty directory with rmdir(2). A cgroup v2 directory can only
+%% be removed this way: its interface files cannot be unlinked, so a
+%% recursive delete fails on the first of them. A missing directory is
+%% already removed.
+remove_directory(Path) ->
+    case file:del_dir(unicode:characters_to_list(Path)) of
+        ok -> {ok, nil};
+        {error, enoent} -> {ok, nil};
+        {error, Reason} ->
+            {error, unicode:characters_to_binary(atom_to_list(Reason))}
+    end.
