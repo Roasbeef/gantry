@@ -1,6 +1,10 @@
 # Let a trusted repository ask for a wider sandbox
 
-**Status** · Proposed 2026-11-24 on `6a561d4`, not built. Slice 3 of the
+**Status** · Proposed 2026-11-24 on `6a561d4`, not built. Reopened
+2026-11-25: the host experiment shows that `userns` also needs
+`apparmor=unconfined`, which is the condition the council named for
+reopening. See [what the experiment found](#what-the-experiment-found)
+and [the choice it leaves](#the-choice-it-leaves). Slice 3 of the
 [handoff](../next.md).
 
 **Add one operator-approved sandbox profile, `userns`, beside the default
@@ -108,14 +112,12 @@ already a routing label.
 - The task decides the flags, not the slot. A slot configured for `userns`
   that receives a `Strict` task runs it with the strict flags.
 
-The flags `userns` adds are a hypothesis until the experiment below runs:
-`--security-opt seccomp=<profile>` and `--security-opt systempaths=unconfined`
-(a fresh `/proc` in a nested PID namespace needs the unmasked paths). Docker's
-`docker-default` AppArmor profile denies `mount`, and Ubuntu 24.04 restricts
-unprivileged user namespaces with `kernel.apparmor_restrict_unprivileged_userns`,
-so the set may also need `--security-opt apparmor=unconfined` or a custom
-AppArmor profile. Network stays none, the root stays read-only, the user stays
-65534, and `--cap-drop=ALL` stays.
+The experiment below measured the flags `userns` needs. All three are
+required, and dropping any one of them fails:
+`--security-opt seccomp=<profile>`, `--security-opt systempaths=unconfined`,
+and `--security-opt apparmor=unconfined`. The proposal had hoped the first two
+would be enough. Network stays none, the root stays read-only, the user stays
+65534, `no-new-privileges` stays, and `--cap-drop=ALL` stays.
 
 ## How an untrusted repository keeps today's flags
 
@@ -146,7 +148,7 @@ That opens kernel code that unprivileged processes cannot normally reach
 privilege escalations (CVE-2024-1086 and CVE-2022-0185 are in that class).
 The host kernel is shared, so a bug there is host root on a worker that holds
 its journal, its credential, and every other slot's workspace. The profile
-also loosens seccomp, unmasks `/proc` and `/sys` paths, and may relax AppArmor.
+also loosens seccomp, unmasks `/proc` and `/sys` paths, and, as measured, needs AppArmor relaxed.
 This is why the profile is for repositories whose code the operator already
 trusts, and why the placement rule above puts them on their own pool. It does
 not make an untrusted repository safe to run.
@@ -183,7 +185,7 @@ and `cgroup` cannot reach the exit.
 validation, and simulation surface for profiles nobody can run.
 
 **Dissent.** Risk made the strongest case against: nested user namespaces put
-the host kernel's attack surface in reach of action code, and if Ubuntu 24.04
+the host kernel's attack surface in reach of action code, and if the host
 needs `apparmor=unconfined` as well, the exposure grows enough that a microVM
 becomes the more honest choice. The mitigations above (operator-only
 approval, a dedicated pool, a strict collector, the cache key) fence the
@@ -194,21 +196,102 @@ damage. They do not remove it.
 `systempaths=unconfined`, or a `userns` repository ends up on a host that also
 runs strict repositories' slots. Then add a `MicroVm` constructor and weigh it.
 
-## Experiment before any code
+## What the experiment found
 
-On the worker host, with the current `restrictions` plus
-`--security-opt seccomp=<profile> --security-opt systempaths=unconfined`, run
-`bwrap --unshare-all --ro-bind / / true` inside a Loom-image container. If it
-fails, add `--security-opt apparmor=unconfined` and run it again. Record which
-set passes, and the value of `kernel.apparmor_restrict_unprivileged_userns`.
-This settles the one factual split in the ballots, and no Gleam is written
-until the answer is in the note.
+Run 2026-11-25 on the 32-core worker host, beside the live slots and without
+touching them. The host runs Ubuntu 22.04.1, kernel `5.15.0-58-generic`,
+Docker 23.0.1 with runc 1.1.4, cgroup v2, and AppArmor enabled. It is not
+Ubuntu 24.04 as the proposal assumed, and
+`kernel.apparmor_restrict_unprivileged_userns` does not exist on it.
+`kernel.unprivileged_userns_clone` is 1 and `user.max_user_namespaces` is
+126202. The image is Loom's action image (`gantry-loom-actions:9aa1383`,
+bubblewrap 0.9.0).
+
+The seccomp profile is Docker 23.0.1's `profiles/seccomp/default.json`
+with one rule appended. The rule allows `clone`, `mount`, `pivot_root`,
+`setns`, `umount2`, and `unshare` without the `CAP_SYS_ADMIN` condition that
+the default puts on them. Nothing else changes, so `bpf`, `fsopen`,
+`perf_event_open`, and the rest stay gated.
+
+Every case started from the worker's own action flags, through
+`systemd-run --user --wait --pipe`:
+
+```sh
+docker run --rm --pull=never --network=none --cap-drop=ALL --read-only \
+  --user=65534:65534 --security-opt=no-new-privileges --log-driver=none \
+  --pids-limit=4096 --memory=768m --cpus=2 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=64m,mode=1777 \
+  <extra flags> --entrypoint sh gantry-loom-actions:9aa1383 -c '...'
+```
+
+Inside, two commands ran. The first is the jail, shaped like Loom's
+(`packages/sandbox/internal/jail/bwrap.go`):
+
+```sh
+bwrap --die-with-parent --unshare-user --unshare-pid --unshare-ipc \
+  --unshare-uts --unshare-cgroup-try --unshare-net --ro-bind / / \
+  --proc /proc --dev /dev --tmpfs /tmp --remount-ro / sh -c 'id -u; ...'
+```
+
+The second is Loom's feature probe,
+`bwrap --unshare-user --disable-userns --cap-drop ALL --ro-bind / / true`.
+
+| Extra flags | Jail | Probe | What failed |
+| --- | --- | --- | --- |
+| none (strict) | 1 | 1 | `No permissions to create new namespace` |
+| seccomp | 1 | 1 | `Failed to make / slave: Permission denied` |
+| seccomp, systempaths | 1 | 1 | `Failed to make / slave: Permission denied` |
+| seccomp, apparmor | 1 | 1 | `Can't mount proc on /newroot/proc`, and the probe cannot write `/proc/sys/user/max_user_namespaces` |
+| apparmor | 1 | 1 | `No permissions to create new namespace` |
+| seccomp, systempaths, apparmor | **0** | **0** | none |
+
+In the passing case the jailed shell reported uid 65534, the map
+`65534 0 1`, and a read-only root. Each `docker run` exited 0, since the
+script reports bwrap's status rather than its own.
+
+Reading the failures:
+
+- Seccomp gates the namespace syscalls.
+- `docker-default` AppArmor denies the mount propagation change that bwrap
+  makes first.
+- Docker's masked `/proc` paths stop the fresh `/proc` mount and the
+  `--disable-userns` write.
+
+None of the three is enough without the other two.
+
+## The choice it leaves
+
+The council's ruling rested on `userns` needing no more than a seccomp
+profile and `systempaths=unconfined`. It said to reopen if `apparmor=unconfined`
+turned out to be needed, and it is. The design above still holds as a
+mechanism. What is open is which flags sit behind the `UserNamespaces` name,
+and whether that name is the right first profile. Three paths, none taken
+yet:
+
+1. **Accept `apparmor=unconfined`** for `userns` repositories, on a pool
+   whose slots run on a host with no strict repositories. This is the
+   measured set. It drops AppArmor's mount and file rules for the action,
+   which leaves the read-only root, uid 65534, the capability drop,
+   `no-new-privileges`, the narrowed seccomp profile, and no network.
+2. **Install a custom AppArmor profile** on each worker host: `docker-default`
+   plus the mount rules bwrap needs, loaded by root with `apparmor_parser`,
+   and named with `--security-opt apparmor=<name>`. This is narrower than
+   path 1. It adds a root-installed artifact on every worker and was not
+   tested, because loading a profile needs root on the host.
+3. **Add `MicroVm` first** (gVisor), as the dissent argued. The host kernel
+   would no longer be in reach, at the cost of a new runtime on every worker
+   and staging that has not been verified.
+
+Path 1 reaches the exit with no new host artifact. Path 2 keeps more of
+Docker's confinement and needs root on each worker. Path 3 is the strongest
+isolation and the most work. The operator decides which risk fits the host,
+so this note stops here until one is chosen.
 
 ## Plan
 
 | Step | Exit |
 | --- | --- |
-| Run the experiment and record the passing flag set here | The note states the exact flags |
+| Run the experiment and record the passing flag set here | Done 2026-11-25. A path from [the choice it leaves](#the-choice-it-leaves) is chosen |
 | `SandboxProfile` in `gantry_core`, the `Task` field, the optional wire field, the recipe rule | Core tests on BEAM and JavaScript. An old snapshot decodes as `Strict`. A strict task's recipe is unchanged, and a `userns` task's differs |
 | `sandbox` in `controller.toml`, with the one-profile-per-pool rule | Config tests for the default, an unknown name, and a shared pool |
 | Worker mapping, the profile file preflight, the refusal | The guard test above, and a refusal test for a worker without the file |
