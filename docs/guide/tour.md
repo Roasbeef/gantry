@@ -157,7 +157,7 @@ the action list.
 **The commit.** For a run, `api.admit` (`gantry/api.gleam:154`) calls
 `store.admit` (`gantry/store.gleam:400`), which plans `layout.admit`
 (`gantry_core/layout.gleam:704`) around `queue.admit`
-(`gantry_core/queue.gleam:391`). `queue.admit` appends the run in
+(`gantry_core/queue.gleam:438`). `queue.admit` appends the run in
 admission order with every action `Pending(0)`. If the ID already exists, it
 returns the stored run only when the inputs match, which is what makes a
 retry after a lost response safe. The layout gives the run the next
@@ -174,7 +174,7 @@ one as unavailable (`layout.max_runs`).
 The run is durable and nothing has executed. An action runs when a polling
 slot qualifies for it, and four things decide that.
 
-**Prerequisites.** `queue.next_work` (`gantry_core/queue.gleam:914`)
+**Prerequisites.** `queue.next_work` (`gantry_core/queue.gleam:918`)
 returns a `Pending` action only when every action named in `deps` and `after`
 has passed or been reused, and it builds the cache key from the recipe and the
 resolved dependency files. The `ready` index lists a run under each pool where
@@ -185,21 +185,21 @@ resolved dependency files. The `ready` index lists a run under each pool where
 Admission copied the repository's pool into the task, so editing
 `controller.toml` later does not move queued work.
 
-**Serving.** A run is served (`gantry_core/queue.gleam:902`) if it is a
+**Serving.** A run is served (`gantry_core/queue.gleam:906`) if it is a
 `Build`, or a `Queued` group that has not failed. A failed run's pending
 actions are `Skipped` at the moment of failure
-(`gantry_core/queue.gleam:1044`), which keeps an idle queue
+(`gantry_core/queue.gleam:1048`), which keeps an idle queue
 recognizably quiet.
 
 **Lanes and preparation.** A group submission is different. It is admitted as
 `Waiting`, holds no graph, and waits for its lane (repository and branch) to
-be free. `queue.preparations` (`gantry_core/queue.gleam:593`)
+be free. `queue.preparations` (`gantry_core/queue.gleam:597`)
 offers the first waiting run of each free lane, and a lane is held by a
 `Queued` run that has not failed or by a `Landing` run
-(`gantry_core/queue.gleam:715`). The reconciler acts on the offer
+(`gantry_core/queue.gleam:719`). The reconciler acts on the offer
 once a second (`gantry/reconcile.gleam:124`) and records the
 result with `queue.record_preparation`
-(`gantry_core/queue.gleam:644`), which accepts it only
+(`gantry_core/queue.gleam:648`), which accepts it only
 for the exact run it offered, so a stale controller's outcome is refused.
 Section 9 follows a group through that.
 
@@ -237,14 +237,14 @@ that the leader answers after a majority confirms its authority
 It takes no lock, so empty polls never wait behind real claims.
 
 **The decision.** The full path runs `queue.claim`
-(`gantry_core/queue.gleam:706`) on only the runs the layout loaded: those with
+(`gantry_core/queue.gleam:764`) on only the runs the layout loaded: those with
 a lapsed lease, the worker's own lease, and the oldest ready ones. It runs
 `queue.expire` first. Then it
 returns the lease this worker already holds, if any
-(`gantry_core/queue.gleam:836`), so a replayed poll costs
+(`gantry_core/queue.gleam:840`), so a replayed poll costs
 nothing. Otherwise `offer` walks the runs in admission order
-(`gantry_core/queue.gleam:853`) and `allocate`
-(`gantry_core/queue.gleam:870`) handles the first action `next_work`
+(`gantry_core/queue.gleam:857`) and `allocate`
+(`gantry_core/queue.gleam:874`) handles the first action `next_work`
 returns. A cached proof for the same repository and key turns the action into
 `Reused` and the scan continues, so cache hits are resolved at claim time.
 A miss writes `Active` with a lease: a new global serial, the worker, an attempt
@@ -254,7 +254,7 @@ before the answer leaves the controller, so a worker never runs an action the
 queue does not know about. [How slots share work](../scheduling.md).
 
 **Expiry.** Nothing renews a lease. `queue.expire`
-(`gantry_core/queue.gleam:785`) returns every action past its deadline
+(`gantry_core/queue.gleam:789`) returns every action past its deadline
 to `Pending` with one more attempt, and the third lapse fails the action as
 `LeaseExpired` (`gantry_core/queue.gleam:73`,
 `gantry_core/queue.gleam:790`). Because the next lease has a new
@@ -334,10 +334,10 @@ from the path (`gantry/http_api.gleam:268`) and stores it through
 `api.finish` (`gantry/api.gleam:214`) checks that the body's worker
 matches the credential, that every referenced blob exists
 (`gantry/api.gleam:240`), and proposes `queue.finish`
-(`gantry_core/queue.gleam:921`). The queue accepts a result only for the
+(`gantry_core/queue.gleam:979`). The queue accepts a result only for the
 live serial held by that worker. A success must list exactly the action's
 declared outputs, and it becomes a `Passed` proof that is also indexed for
-reuse (`gantry_core/queue.gleam:999`). A rejection becomes `Failed`
+reuse (`gantry_core/queue.gleam:1003`). A rejection becomes `Failed`
 and strands the run's pending actions as `Skipped`
 (`gantry_core/queue.gleam:978`). An interruption lapses the lease as an
 expiry would.
@@ -354,8 +354,8 @@ idempotent.
 `gantry watch` polls `GET /v1/runs/<id>` (`gantry/cli.gleam:1171`).
 The controller reads the run's record and encodes it
 (`gantry/api.gleam:173`), adding a phase computed from the steps
-(`gantry_core/queue.gleam:1133`,
-`gantry_core/protocol.gleam:112`). The phase is derived on
+(`gantry_core/queue.gleam:1191`,
+`gantry_core/protocol.gleam:114`). The phase is derived on
 output and never stored. The stream ends at a terminal phase, and the exit
 code says whether it passed. `gantry blob <sha256>` fetches a log or an output
 from `GET /v1/blobs/<sha256>` (`gantry/http_api.gleam:279`), where the
@@ -363,7 +363,7 @@ controller re-hashes the bytes before returning them. The status JSON is
 described in the [API reference](../api.md#run-status).
 
 Meanwhile the reconciler trims history. Once a minute it applies
-`queue.retain` (`gantry_core/queue.gleam:1106`) through `layout.retain`
+`queue.retain` (`gantry_core/queue.gleam:1164`) through `layout.retain`
 (`gantry_core/layout.gleam:1261`) and `gantry/reconcile.gleam:195`, dropping
 the oldest terminal runs and proofs beyond the `[retention]` bounds in batches
 of 250 commits. Blobs are not collected.
@@ -396,7 +396,7 @@ none has failed, the run holds its lane. If one fails, the run's phase is
 `failed` and the lane is free.
 
 **Intent.** Every tick the reconciler proposes `queue.landings`
-(`gantry_core/queue.gleam:1019` through `gantry/reconcile.gleam:220`).
+(`gantry_core/queue.gleam:1077` through `gantry/reconcile.gleam:220`).
 Each `Queued` run whose actions all passed becomes `Landing`, and the committed
 `Landing` state is the intent. A lane holds at most one such run, so a lane
 never has two intents. The reconciler then calls `submit.reconcile` for each
@@ -415,7 +415,7 @@ branch moved. A policy denial is looked at once more before it stands
 another controller may have landed in the meantime.
 
 **The result.** `reconcile_one` records the outcome through
-`queue.record_landing` (`gantry_core/queue.gleam:1053`,
+`queue.record_landing` (`gantry_core/queue.gleam:1111`,
 `gantry/reconcile.gleam:328`), which matches it to the exact
 outstanding intent. `landed` leaves the commit in
 `submission.candidate.commit`. `blocked` carries `target_advanced` or
@@ -431,8 +431,8 @@ end-to-end gate (`scripts/e2e.sh`) kills most of them.
 | What dies or is lost | What recovers it |
 | --- | --- |
 | A controller | The other voters hold quorum. Workers move to their next origin (`gantry/worker/controllers.gleam:156`). The controller restarts with its node name and Ra directory, and refuses to start if either is wrong (`gantry/store.gleam:93`). The e2e kills a voter during an active lease (`scripts/e2e.sh:189`). |
-| The reply to an admission | The client repeats the request with the same ID and gets the stored run (`gantry_core/queue.gleam:465`). |
-| The reply to a claim | The next poll gets the same lease, because the worker already holds it (`gantry_core/queue.gleam:782`). |
+| The reply to an admission | The client repeats the request with the same ID and gets the stored run (`gantry_core/queue.gleam:512`). |
+| The reply to a claim | The next poll gets the same lease, because the worker already holds it (`gantry_core/queue.gleam:840`). |
 | The reply to a result | The worker keeps the receipt and blobs until it hears 200 or 409. The e2e loses a committed reply on purpose (`scripts/e2e.sh:308`). |
 | A worker before `docker start` | The journal says `Ready`. The restart cleans by name and runs the attempt (`gantry/worker/slot.gleam:96`). |
 | A worker after `docker start` | The journal says `Interrupted`. The restart cleans up and reports the attempt interrupted, and the controller reassigns it (`scripts/e2e.sh:291`). |
