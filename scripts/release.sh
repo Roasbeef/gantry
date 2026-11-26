@@ -73,6 +73,7 @@ for launcher in gantryd gantry-worker gantry; do
   chmod +x "$dist/bin/$launcher"
 done
 install -D -m 0644 packages/server/priv/gantry-schema.json "$dist/share/gantry/cli-schema.json"
+install -D -m 0644 packages/server/priv/sandbox/userns-seccomp.json "$dist/share/gantry/userns-seccomp.json"
 install -D -m 0644 skills/gantry/SKILL.md "$dist/share/gantry/skill/SKILL.md"
 printf 'Gantry %s (%s)\n' "$version" "$commit" > "$dist/releases/gantry-version"
 chmod -R u+rwX,go+rX "$dist"

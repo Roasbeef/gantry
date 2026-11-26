@@ -463,7 +463,8 @@ and isolation policy across slots in the same named pool, and match
 A slot runs every action with the strict flags unless the action's
 repository has `sandbox = "userns"` in `controller.toml`. To serve such a
 pool, set `GANTRY_WORKER_USERNS_SECCOMP` to the release's
-`priv/sandbox/userns-seccomp.json` on every slot in that pool. The worker
+copy, `lib/gantry/current/share/gantry/userns-seccomp.json` under the install
+prefix (`~/.local` by default), on every slot in that pool. The worker
 checks the file at startup. A slot without it rejects a `userns` action
 before creating anything, and the run fails with that reason. The profile
 also turns off AppArmor and Docker's masked paths for the action, so give
