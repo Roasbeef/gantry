@@ -470,6 +470,9 @@ groups, retention, and a guarded landing against a local bare remote.
 **Verified live on GitHub:** exact landing, PR reconciliation, and idempotent
 workflow comments on a disposable, unprotected target branch
 ([pilot](../integrating.md#check-a-live-deployment)).
+**Built and verified locally:** a read-only fleet snapshot (`GET /v1/fleet`),
+an optional view token, and the dashboard that `gantryd` serves at `/ui`
+([design note](../design-notes/dashboard.md)).
 
 **Open:**
 
