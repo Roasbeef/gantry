@@ -54,6 +54,19 @@ pub fn a_damaged_entry_is_fetched_again_and_repaired_test() {
   worker_fixture.remove(directory)
 }
 
+pub fn an_unwritable_cache_still_returns_the_fetched_bytes_test() {
+  let bytes = <<"kept nowhere":utf8>>
+  let digest = blobs.digest(bytes)
+
+  // The directory does not exist, so every publish fails.
+  let root = worker_fixture.temp_directory()
+  let missing = root <> "/absent/chunks"
+  assert cache.wrap(missing, serving(bytes))(digest) == Ok(bytes)
+  assert cache.wrap(missing, offline)(digest)
+    == Error(controllers.Offline("controller unreachable"))
+  worker_fixture.remove(root)
+}
+
 pub fn a_malformed_digest_never_names_a_cache_file_test() {
   let directory = worker_fixture.temp_directory()
   let assert Ok(Nil) = simplifile.write_bits(directory <> "/x", <<"x":utf8>>)

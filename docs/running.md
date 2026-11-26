@@ -495,7 +495,9 @@ deployment-wide ID, token, and directory, for example `linux-02` and
 `/srv/gantry/worker-linux-02`. Register each slot's ID and token digest as a
 `[[worker]]` entry on every controller, and restart the controllers. Size the
 slots' combined limits to fit the host, because the controller does not know
-how large the machine is. Adding slots is how a large host does more at once
+how large the machine is. That includes disk: each slot keeps up to
+`GANTRY_WORKER_CACHE_MIB` of cached inputs beside its journal, so ten slots
+at the default can hold 20 GiB. Adding slots is how a large host does more at once
 ([how work is spread](scheduling.md), [add-a-machine checklist](operations.md#add-a-machine)).
 Retain each directory and reuse the same worker ID on restart. The journal records
 whether a container could have started and keeps unpublished outcomes

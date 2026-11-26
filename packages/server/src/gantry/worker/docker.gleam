@@ -512,17 +512,12 @@ fn fetcher(
 ) -> inputs.Fetch {
   let remote = controllers.fetch(network, _)
   let chunks = directory <> "/chunks"
+  cache.prune(chunks, limits.cache * 1024 * 1024)
 
-  // A zero bound empties any earlier cache and fetches straight through.
+  // A zero bound has just emptied any earlier cache, so fetch straight through.
   case limits.cache {
-    0 -> {
-      cache.prune(chunks, 0)
-      remote
-    }
-    mib -> {
-      cache.prune(chunks, mib * 1024 * 1024)
-      cache.wrap(chunks, remote)
-    }
+    0 -> remote
+    _ -> cache.wrap(chunks, remote)
   }
 }
 
