@@ -489,7 +489,11 @@ provide it.
   `Delegate=cpu cpuset io memory pids`, then run `systemctl daemon-reload`.
 - **The slot uses a second Docker daemon on the `cgroupfs` driver**, which
   accepts a cgroup path as a container's parent, for example
-  `dockerd -H unix:///run/docker-loom.sock --exec-opt native.cgroupdriver=cgroupfs --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker`.
+  `dockerd -H unix:///run/docker-loom.sock --exec-opt native.cgroupdriver=cgroupfs --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker --bridge=none --iptables=false --ip6tables=false --ip-masq=false`.
+  Actions run with no network, so this daemon needs none. Without the last
+  four flags it manages iptables and the `docker0` bridge beside the host's
+  own daemon, and on the worker host that cut the slots off from the
+  controller.
   The slot points `DOCKER_HOST` at it, and that daemon needs the collector
   and action images.
 - **The slot names an empty cgroup the worker user owns** in

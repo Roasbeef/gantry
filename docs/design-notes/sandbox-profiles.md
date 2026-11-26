@@ -487,7 +487,12 @@ session can run:
 2. Run a second daemon for the `loom` pool with the `cgroupfs` driver, for
    example `docker-loom.service` running `dockerd -H
    unix:///run/docker-loom.sock --exec-opt native.cgroupdriver=cgroupfs
-   --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker`.
+   --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker
+   --bridge=none --iptables=false --ip6tables=false --ip-masq=false`. The
+   last four flags were missing from this note's first edition. Without
+   them the second daemon manages iptables and the `docker0` bridge beside
+   the system daemon, and on the worker host the slots lost the controller
+   34 seconds after it started.
    With that driver `--cgroup-parent` takes a path, so it can name a cgroup
    inside the worker's delegated subtree.
 3. Pull the action and collector images into that daemon.
