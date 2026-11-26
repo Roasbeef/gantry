@@ -7,6 +7,7 @@ import gantry_core/graph
 import gantry_core/image
 import gantry_core/layout
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -17,7 +18,7 @@ fn action(name: String, dependencies: List(String)) -> graph.Action {
 }
 
 fn task(id: String, name: String, recipe: String, deps: List(String)) {
-  queue.Task(action(name, deps), id, recipe, "pool", "image")
+  queue.Task(action(name, deps), id, recipe, "pool", "image", sandbox.Strict)
 }
 
 fn tasks(id: String, shared: Bool) -> List(queue.Task) {
@@ -305,7 +306,7 @@ fn task_in(
   recipe: String,
   pool: String,
 ) -> queue.Task {
-  queue.Task(action(name, []), id, recipe, pool, "image")
+  queue.Task(action(name, []), id, recipe, pool, "image", sandbox.Strict)
 }
 
 fn claim_in(
