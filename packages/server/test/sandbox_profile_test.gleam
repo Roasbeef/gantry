@@ -24,12 +24,13 @@ fn limits(settings: List(#(String, String))) -> docker.Limits {
 
 const seccomp = [#("GANTRY_WORKER_USERNS_SECCOMP", "/etc/gantry/userns.json")]
 
-/// The flags an action ran with before sandbox profiles existed.
+/// The strict flags every action receives, whatever the worker's profiles.
 const strict = [
   "--pull=never", "--network=none", "--cap-drop=ALL", "--read-only",
   "--user=65534:65534", "--security-opt=no-new-privileges", "--log-driver=none",
   "--pids-limit=4096", "--ulimit=nofile=65536:65536", "--memory=768m",
-  "--cpus=2", "--tmpfs", "/tmp:rw,nosuid,nodev,size=1024m,mode=1777",
+  "--cpus=2", "--tmpfs", "/tmp:rw,nosuid,nodev,size=1024m,mode=1777", "--tmpfs",
+  "/var/tmp:rw,nosuid,nodev,size=1024m,mode=1777",
 ]
 
 pub fn a_strict_action_keeps_todays_flags_exactly_test() {

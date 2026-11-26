@@ -446,7 +446,7 @@ its bounds at startup, and a value outside them stops the worker.
 | `GANTRY_WORKSPACE_MIB` | 256 | 64 to 1048576 | The `/work` tmpfs volume |
 | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
 | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
-| `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The `/tmp` tmpfs size |
+| `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The size of each of the `/tmp` and `/var/tmp` tmpfs mounts |
 | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path to a readable file | Makes the slot able to run the `userns` sandbox |
 
 `GANTRY_WORKER_DRAIN` (default 60, in seconds, 0 or more) bounds how long
@@ -455,7 +455,7 @@ attempt up ([drain a worker](operations.md#drain-a-worker)).
 
 The process default matters for BEAM builds. A BEAM starts a scheduler
 thread per core, and on a 32-core host it could not start under 128
-processes. `/tmp` counts against the memory limit, so a larger size
+processes. `/tmp` and `/var/tmp` count against the memory limit, so a larger size
 bounds the file it can hold and does not reserve memory. Match capacity
 and isolation policy across slots in the same named pool, and match
 `GANTRY_POOL` to the controller's repository pool.

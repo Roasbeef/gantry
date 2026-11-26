@@ -276,7 +276,9 @@ pub fn try_sandboxes(limits: Limits) -> Result(Nil, String) {
 /// The sandbox flags an action container receives, apart from its mounts.
 /// The strict restrictions and the limits come first for every profile, and
 /// a wider profile only appends to them. A profile this worker is not
-/// configured for is a rejection, never a narrower or wider run.
+/// configured for is a rejection, never a narrower or wider run. The root is
+/// read-only, so `/tmp` and `/var/tmp` are each a private tmpfs of the
+/// configured size, writable as programs expect on any Linux host.
 ///
 /// | Profile  | Appended flags                                              |
 /// | -------- | ----------------------------------------------------------- |
@@ -303,6 +305,8 @@ pub fn action_flags(
       "--cpus=" <> limits.cpus,
       "--tmpfs",
       "/tmp:rw,nosuid,nodev,size=" <> limits.tmp <> "m,mode=1777",
+      "--tmpfs",
+      "/var/tmp:rw,nosuid,nodev,size=" <> limits.tmp <> "m,mode=1777",
     ])
 
   // Only the profile chooses what is appended. The strict prefix is shared.
