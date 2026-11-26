@@ -167,6 +167,17 @@ supervisor. Install a gateway's private CA in the system trust store on
 the worker when needed. Pre-pull the images required by the pool before
 admitting a build.
 
+A macOS host with Docker Desktop can run a worker too. Build the release on
+it (until `scripts/release.sh` runs on macOS, put GNU coreutils' `install`
+and a `flock` on the path), and keep the slot directory under the home
+directory, which Docker Desktop shares with its VM. Run each slot under
+launchd with the same environment as a Linux slot. An Apple Silicon host is
+arm64, so in a pool that also has amd64 hosts, pin each image to a single
+platform's manifest digest rather than a multi-platform index, and pull
+the collector image on the host. The recipe records the digest but not the
+platform
+([ADR 003](adr/003-gantry-docker-worker.md#addendum--2026-11-25--macos-hosts-can-run-a-worker)).
+
 Keep the profile at
 `${XDG_STATE_HOME:-$HOME/.local/state}/gantry/worker` with its journal.
 Rerunning setup reuses the slot's identity and saved token and requires

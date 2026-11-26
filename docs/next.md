@@ -135,11 +135,8 @@ the third slice.
    **Guard:** the same pass and fail per lane as Loom's CI at that commit.
    Depends on slices 3 to 5.
 7. **Deploy the first fleet.** The gateway and one controller on
-   a four-vCPU controller host, worker slots on the 32-core worker host, and the laptop's Docker as
-   an optional worker running the Linux release in a container with the
-   Docker socket mounted (untested; the worker directory must have the same
-   path inside and outside the container, because input archives are bind
-   mounts). **Exit:** a Loom group lands through the gateway. Add a second
+   a four-vCPU controller host, worker slots on the 32-core worker host, and
+   the laptop's Docker as an optional worker. **Exit:** a Loom group lands through the gateway. Add a second
    and third voter for failover only when there are three machines that stay
    up. **Status (2026-11-24):** the gateway, controller and four slots are up
    at 10fd0ef. The gateway is `tailscale serve` on
@@ -152,9 +149,19 @@ the third slice.
    floor is about 40 s, and each wave added about 7 s for collector start,
    cleanup and the poll gap. The worker host's `/etc/resolv.conf` bypasses
    MagicDNS, so the slots resolve the gateway through `ERL_INETRC`
-   (`~/gantry-fleet/inetrc`) until that host's DNS uses Tailscale. The Loom
-   group and the laptop worker are still open. The fleet's controller still
-   runs the single-snapshot release. Upgrading it follows
+   (`~/gantry-fleet/inetrc`) until that host's DNS uses Tailscale.
+   **Status (2026-11-25):** the laptop joined pool `linux` as `laptop-01`
+   and `-02`. They run the macOS release natively against Docker Desktop, as
+   launchd agents `dev.gantry.worker.NN` with files in `~/gantry-laptop`. The
+   laptop is arm64 and the rest of the pool is amd64, so `fleet/fanout` now
+   pins the amd64 manifest digest rather than the multi-platform index, and
+   Docker Desktop emulates it. Every worker then produces the same output
+   under one cache key. With six slots, a fresh `fleet/fanout` run passed in
+   46 s, and the laptop ran five of its nine actions. The first try failed:
+   Docker printed a platform warning ahead of the container ID, and the
+   worker retried each attempt about once a second until the ID was read
+   from the last line of the output. The Loom group is still open. The fleet's
+   controller still runs the single-snapshot release. Upgrading it follows
    [the upgrade steps](operations.md#upgrade-from-the-single-snapshot-release)
    and was not done here, because that service is live.
 8. **Schedule beyond first-fit.** Today each slot polls and takes the oldest
@@ -174,6 +181,16 @@ the third slice.
      one at a time. The format now has a name (`indexed-v1`) that a release
      checks at boot, and an unknown name refuses to start
      ([operations](operations.md#upgrade-across-a-queue-format-change)).
+   - Keep a multi-platform image out of a mixed-architecture pool. The
+     recipe holds the image digest but no platform, so an index digest run
+     on arm64 and amd64 slots stores two different outputs under one key.
+     Either refuse an index digest at admission when the pool spans
+     architectures, or put the worker's platform in the recipe. The fleet
+     avoids it today by pinning a platform manifest.
+   - Back off a slot that fails the same attempt before `docker start`. A
+     bad container ID retried about once a second with no limit.
+   - Let `scripts/release.sh` run on macOS. It needs GNU `install -D` and
+     `flock`; the laptop build used coreutils and a no-op `flock`.
    - Scale Git's 120 s deadline for a first mirror fetch.
    - Give the churn simulation an oracle that tells a wrongly rejected result
      from a poison action. Both now end as an expired run.

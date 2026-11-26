@@ -56,3 +56,19 @@ controller's lease protocol, and either its sandbox runs lanes that Docker
 cannot or its placement removes the per-slot sizing that operators do by hand
 today. Re-open it as well if a per-repository sandbox policy proves too
 costly to add to the Docker worker. Record the outcome as an addendum here.
+
+## Addendum · 2026-11-25 · macOS hosts can run a worker
+
+The cost above, that macOS hosts are out of scope, did not hold up. The worker
+does nothing Linux-specific: it drives the Docker CLI and bind-mounts input
+archives from its own directory, and Docker Desktop shares the home directory
+with its VM. A laptop now serves two slots in the fleet's `linux` pool, as
+the macOS release running natively under launchd.
+
+Two conditions came with it. An Apple Silicon host is arm64, so a pool that
+mixes it with amd64 hosts must pin each image to one platform's manifest
+digest. The recipe holds the digest but not the platform, so a
+multi-platform index would store different outputs under one key. Docker
+Desktop then emulates the amd64 image. The second condition was a bug:
+Docker prints a platform warning ahead of the container ID, so the worker now
+reads the ID from the last line of the output.
