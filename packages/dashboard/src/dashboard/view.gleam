@@ -11,6 +11,7 @@ import dashboard/board.{
 import dashboard/layout
 import dashboard/model.{type Model, type Msg}
 import dashboard/timing
+import gleam/bool
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -550,7 +551,15 @@ fn strip(run: RunRow) -> Element(Msg) {
     board.by_layer(run.actions)
       |> list.map(fn(layer) {
         html.div(
-          [class("layer")],
+          [
+            class("layer"),
+            attribute.style(
+              "grid-template-rows",
+              "repeat("
+                <> int.to_string(int.min(list.length(layer), 4))
+                <> ", 10px)",
+            ),
+          ],
           list.map(layer, fn(action) {
             let label = board.cell_label(action.cell)
             html.button(
@@ -651,6 +660,7 @@ fn members_text(members: List(Int)) -> String {
 
 /// Draw a run's action graph as nodes laid out by layer with a curve for each prerequisite.
 fn graph(run: RunRow, chosen: Option(String)) -> Element(Msg) {
+  use <- bool.guard(run.actions == [], element.none())
   let placed = layout.place(run.actions)
   let touches = fn(edge: layout.Edge) {
     chosen == Some(edge.from) || chosen == Some(edge.to)

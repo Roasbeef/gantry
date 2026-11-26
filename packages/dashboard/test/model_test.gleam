@@ -1,0 +1,151 @@
+//// The page's transitions on controller answers, and the timing and layout
+//// decisions the view draws from.
+
+import dashboard/board
+import dashboard/layout
+import dashboard/model
+import dashboard/timing
+import gantry_core/fleet
+import gantry_core/graph
+import gantry_core/queue
+import gleam/json
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/string
+
+fn task(name: String, needs: List(String)) -> queue.Task {
+  let action = graph.Action(name, [name], [], [], needs, [], 60)
+  queue.Task(action, "source", "recipe-" <> name, "linux", "image")
+}
+
+/// A two-action chain, its first action leased at `granted`.
+fn leased(granted: Int) -> queue.State {
+  let assert Ok(#(state, _)) =
+    queue.admit(queue.empty(), "r", "repo", "rev", "check", queue.Build, [
+      task("build", []),
+      task("test", ["build"]),
+    ])
+  let assert #(state, Some(_)) = queue.claim(state, "w1", "linux", granted)
+  state
+}
+
+fn body(state: queue.State, now: Int) -> String {
+  fleet.Fleet(now:, slots: [], runs: state.runs, proofs: 0)
+  |> fleet.encode
+  |> json.to_string
+}
+
+pub fn a_token_starts_connecting_and_none_signs_out_test() {
+  assert model.initial("").connection == model.SignedOut(None)
+  assert model.initial("t").connection == model.Connecting
+  assert model.signed_in(model.initial("t"))
+  assert !model.signed_in(model.initial(""))
+}
+
+pub fn a_snapshot_goes_live_and_chooses_a_run_test() {
+  let m = model.receive(model.initial("t"), 200, body(leased(10), 12))
+  assert m.connection == model.Live
+  assert m.chosen_run == Some("r")
+  assert !m.in_flight
+}
+
+pub fn a_refused_token_signs_out_with_a_notice_test() {
+  let m = model.receive(model.initial("t"), 401, "{\"error\":\"no\"}")
+  let assert model.SignedOut(Some(_)) = m.connection
+  assert m.token == ""
+}
+
+pub fn an_error_keeps_the_last_board_and_marks_it_stale_test() {
+  let live = model.receive(model.initial("t"), 200, body(leased(10), 12))
+  let m = model.receive(live, 503, "{\"error\":\"queue quorum unavailable\"}")
+  assert m.connection == model.Lost("HTTP 503: queue quorum unavailable")
+  assert m.board == live.board
+  let m = model.receive(live, 0, "Failed to fetch")
+  assert m.connection
+    == model.Lost("cannot reach the controller: Failed to fetch")
+}
+
+pub fn an_unreadable_snapshot_is_lost_not_fatal_test() {
+  let m = model.receive(model.initial("t"), 200, "{\"now\":-1}")
+  let assert model.Lost(_) = m.connection
+}
+
+pub fn choosing_an_action_with_a_log_asks_for_it_test() {
+  let state = leased(10)
+  let assert Ok(state) =
+    queue.finish(state, "r", "build", "w1", 1, queue.Rejected("boom", "abc"))
+  let m = model.receive(model.initial("t"), 200, body(state, 20))
+  let #(m, digest) = model.choose_action(m, "r", "build")
+  assert digest == Some("abc")
+  assert m.log == model.Loading("abc")
+  assert m.tab == model.DetailTab
+  // A stale answer for another digest is dropped; the wanted one lands.
+  assert model.receive_log(m, "other", 200, "x").log == model.Loading("abc")
+  assert model.receive_log(m, "abc", 200, "line").log
+    == model.Loaded("abc", "line")
+  assert model.receive_log(m, "abc", 404, "{\"error\":\"blob unavailable\"}").log
+    == model.LogFailed("abc", "HTTP 404: blob unavailable")
+  let #(m, none) = model.choose_action(m, "r", "test")
+  assert none == None
+  assert m.log == model.NoLog
+}
+
+pub fn a_long_log_keeps_its_tail_test() {
+  assert model.tail("a\nb\nc", 2) == "b\nc"
+  assert model.tail("a", 2) == "a"
+  let long = list.repeat("x", 500) |> string.join("\n")
+  assert list.length(string.split(model.tail(long, 400), "\n")) == 400
+}
+
+pub fn timing_measures_from_grant_to_the_first_finished_snapshot_test() {
+  let state = leased(100)
+  let seen =
+    timing.observe(
+      timing.new(),
+      board.build(fleet.Fleet(110, [], state.runs, 0)),
+    )
+  assert timing.of(seen, "r", "build", 110) == timing.Running(10)
+  let assert Ok(state) =
+    queue.finish(state, "r", "build", "w1", 1, queue.Succeeded([], "log"))
+  let seen =
+    timing.observe(seen, board.build(fleet.Fleet(130, [], state.runs, 0)))
+  assert timing.of(seen, "r", "build", 200) == timing.Took(30)
+  // A later snapshot does not move the recorded end.
+  let seen =
+    timing.observe(seen, board.build(fleet.Fleet(150, [], state.runs, 0)))
+  assert timing.of(seen, "r", "build", 200) == timing.Took(30)
+  assert timing.of(seen, "r", "test", 200) == timing.Unknown
+}
+
+pub fn a_lapsed_lease_is_timed_again_from_its_next_grant_test() {
+  let state = leased(0)
+  let seen =
+    timing.observe(timing.new(), board.build(fleet.Fleet(5, [], state.runs, 0)))
+  let assert [run] = state.runs
+  let assert [queue.Work(_, queue.Active(lease)), _] = run.work
+  let later = queue.lease_until(lease) + 1
+  let state = queue.expire(state, later)
+  let seen =
+    timing.observe(seen, board.build(fleet.Fleet(later, [], state.runs, 0)))
+  assert timing.of(seen, "r", "build", later) == timing.Unknown
+  let assert #(state, Some(_)) = queue.claim(state, "w1", "linux", later)
+  let seen =
+    timing.observe(seen, board.build(fleet.Fleet(later + 3, [], state.runs, 0)))
+  assert timing.of(seen, "r", "build", later + 3) == timing.Running(3)
+}
+
+pub fn layout_places_layers_in_columns_and_links_each_need_test() {
+  let state = leased(0)
+  let b = board.build(fleet.Fleet(1, [], state.runs, 0))
+  let assert Ok(run) = board.find(b, "r")
+  let placed = layout.place(run.actions)
+  let assert [first, second] = placed.nodes
+  assert first.x < second.x
+  assert first.y == second.y
+  let assert [edge] = placed.edges
+  assert edge.from == "build"
+  assert edge.to == "test"
+  assert string.starts_with(edge.path, "M")
+  assert placed.width >= second.x + layout.node_width
+  assert layout.place([]).nodes == []
+}
