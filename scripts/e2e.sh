@@ -321,7 +321,15 @@ jq -se 'last | .phase == "failed"' "$tmp/userns-strict.jsonl" >/dev/null
 # Whether this host lets the userns flags create the namespaces decides what
 # the wide slot must do: refuse to start with a named reason, or run the
 # action. The probe uses the slot's own sandbox flags, and the slot must agree.
+# An installed release must carry the profile itself, so check its copy.
 seccomp="$root/packages/server/priv/sandbox/userns-seccomp.json"
+if [[ -n ${GANTRY_RELEASE_BIN:-} ]]; then
+  seccomp="$GANTRY_RELEASE_BIN/../lib/gantry/current/share/gantry/userns-seccomp.json"
+fi
+if [[ ! -r $seccomp ]]; then
+  echo "The userns seccomp profile is missing at $seccomp" >&2
+  exit 1
+fi
 host_userns=no
 if docker run --rm --pull=never --network=none --cap-drop=ALL --read-only \
   --user=65534:65534 --security-opt=no-new-privileges --log-driver=none \
