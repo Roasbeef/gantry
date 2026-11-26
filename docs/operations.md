@@ -105,37 +105,54 @@ Use a fresh profile and slot ID in that case, and let the old lease expire.
 
 ### Upgrade across a queue format change
 
-The queue snapshot carries no format version, and each release decodes
-only the step kinds and fields it knows. A newer release reads an older
-snapshot, but an older release answers every request, `/health` included,
-with 400 `invalid durable queue snapshot` once a newer one has written.
-The release after f4cc695 is such a change: it adds `skipped` and
+Releases up to `6a561d4` keep the queue as one snapshot with no format
+version, and each decodes only the step kinds and fields it knows. A newer
+release reads an older snapshot, but an older one refuses a newer one: it
+answers requests that read the queue with 400 `invalid durable queue
+snapshot`. The release after `f4cc695` was such a change, with `skipped` and
 `expired` steps, attempt counts, and the proof cache.
 
-Across such a release, upgrade every voter together:
+The indexed layout names its format. The key `format` holds `indexed-v1`,
+written in the same transaction as the layout, and a voter checks it at boot
+(`store.upgrade`). A name it does not know stops the voter with `unknown queue
+format <name>`, so a rollback past a later format change fails by name and
+not by a decode error.
+
+Across a format change, upgrade every voter together:
 
 1. Stop admitting work and let the workers drain, since a worker stopped
-   mid-action fails its run.
+   mid-action fails its run. A controller can be replaced while a worker keeps
+   running, and the worker delivers its result to the new release.
 2. Stop all voters and back up each `data_dir/queue-ra`.
 3. Install the new release on every voter and start them all.
 
 Rolling back after the new release has written means restoring those
 backups, which loses whatever was admitted since. An upgrade drill on
-2026-11-24 from f4cc695 to 10fd0ef showed this. The controller upgrade
-read every earlier run; the rollback refused the snapshot; and the
-upgraded worker reopened the old journal but failed its in-flight action.
+2026-11-24 from `f4cc695` to `10fd0ef` showed this: the controller upgrade
+read every earlier run, the rollback refused the snapshot, and the upgraded
+worker reopened the old journal but failed its in-flight action.
 
 ### Upgrade from the single-snapshot release
 
-The indexed layout is a new set of keys, and voters of the two releases cannot
-share a cluster. Take a backup first
-([back up](#back-up-and-restore-the-voter-data)), stop every controller, and
-start them on the new release. The first voter to open its replica imports the
-old snapshot in one transaction and deletes it, and the others find the layout
-in place. The
-import was checked by opening the data directory of a controller built from
-the earlier release with the new one: all 40 runs it held read back with their
-phases.
+The indexed layout is the first release with a format name. Voters of the two
+releases cannot share a cluster, so follow the steps above. The first voter to
+open its replica finds no `format` key, imports the old snapshot into the
+layout in one transaction, and then replaces the snapshot with bytes the
+earlier release cannot decode, so an earlier release started on the migrated
+directory refuses it instead of creating an empty queue beside it. The other
+voters find `indexed-v1` and start. A boot that stopped between the import and
+the seal finds the layout and an unsealed snapshot, and seals it.
+
+A drill on 2026-11-26 checked this boundary on one controller, from `6a561d4`
+to the indexed layout, with one worker that kept running across the change:
+
+| Step | What happened |
+| --- | --- |
+| `6a561d4` admits run 1, which passes, then runs 2 and 3 | Run 2's first action is active on the worker, and run 3 is pending |
+| Stop the controller, start the indexed-layout release on the same `data_dir` | It imports the snapshot and is ready in 2 s. Run 1 reads back as passed, and run 2 still shows its action active |
+| The worker reports the in-flight action | Accepted. Runs 2 and 3 pass, and a new run 4 passes |
+| Start `6a561d4` again on the migrated `data_dir` | `/health` answers 200, and reading a run answers 400 `invalid durable queue snapshot`. It serves no queue |
+| Start the indexed-layout release again | Ready, and all four runs read back as passed |
 
 ### The queue is full
 

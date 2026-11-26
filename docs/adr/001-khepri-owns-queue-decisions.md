@@ -137,11 +137,15 @@ operations do not overlap.
 
 ### Upgrading
 
-The layout is a new key space. A voter that finds the old snapshot and no
-`format` key imports it in one transaction and deletes it. Voters of both
-layouts cannot share a cluster, so upgrade all voters together, and take a
-backup first ([operations](../operations.md#back-up-and-restore-the-voter-data)).
-This drops the mixed-version query that the snapshot hint kept for rollouts.
+The layout is a new key space with a name. The `format` key holds
+`indexed-v1`, and a voter that finds a name it does not know refuses to start,
+so a later format change can be refused by name. A voter that finds the old
+snapshot and no `format` key imports it in one transaction, then replaces the
+snapshot with bytes an earlier release cannot decode, so a rollback refuses the
+store instead of starting an empty queue. Voters of both layouts cannot share a
+cluster, so upgrade all voters together, and take a backup first
+([operations](../operations.md#upgrade-across-a-queue-format-change)). This
+drops the mixed-version query that the snapshot hint kept for rollouts.
 
 ### The exit, and what would reopen the state machine
 

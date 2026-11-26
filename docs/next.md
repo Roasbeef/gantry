@@ -169,10 +169,10 @@ the third slice.
      instead of recording a failure. The upgrade drill showed that every
      worker restart, including a routine `make update`, fails the runs it
      was serving, so this one is first.
-   - Version the queue snapshot so a release can refuse an unknown format
-     by name, and so a format change can be rolled out in two steps: read
-     both formats, then write the new one. The drill showed that an older
-     controller cannot read a newer snapshot
+   - Roll a future format change out in two steps, a release that reads both
+     formats and then one that writes the new one, so voters can be upgraded
+     one at a time. The format now has a name (`indexed-v1`) that a release
+     checks at boot, and an unknown name refuses to start
      ([operations](operations.md#upgrade-across-a-queue-format-change)).
    - Scale Git's 120 s deadline for a first mirror fetch.
    - Give the churn simulation an oracle that tells a wrongly rejected result
@@ -220,6 +220,13 @@ is gone, and `packages/server/dev/gantry/bench.gleam` is the benchmark.
 
 None of these is unfinished work somebody forgot.
 
+- **Three voters on one four-vCPU host hold 75 actions per second, not 100.**
+  A measured limit, not a design target
+  ([measurements](controller-load.md#the-indexed-layout-9f273c1)). The likely
+  bottleneck is CPU: three BEAM VMs, the load driver, and Git share four vCPUs
+  (the voters used about 240% of 400%), every transaction is applied on all
+  three, and the counters that two nodes write conflict about 190 times per
+  3,000 runs. Slice 2 measures the split.
 - **Ordering across overlapping operations.** A claim reads the ready index
   and then the runs, so a run that becomes ready in between can be passed over
   by one claim. Safety does not depend on it, and the oldest-first order is
