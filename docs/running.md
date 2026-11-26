@@ -447,6 +447,7 @@ its bounds at startup, and a value outside them stops the worker.
 | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
 | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
 | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The size of each of the `/tmp` and `/var/tmp` tmpfs mounts |
+| `GANTRY_WORKER_CACHE_MIB` | 2048 | 0 to 1048576 | The slot's cache of fetched input blobs under `GANTRY_WORKER_DIR/chunks`, pruned oldest first before each stage; 0 turns it off |
 | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path to a readable file | Makes the slot able to run the `userns` sandbox |
 
 `GANTRY_WORKER_DRAIN` (default 60, in seconds, 0 or more) bounds how long

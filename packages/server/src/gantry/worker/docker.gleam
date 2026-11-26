@@ -12,7 +12,7 @@
 ////
 //// ```text
 //// boot:    limits -> preflight -> check_sandboxes -> try_sandboxes
-//// attempt: execute -> action_flags -> cleanup -> stage -> run -> start
+//// attempt: execute -> action_flags -> cleanup -> fetcher -> stage -> run -> start
 //// after:   cleanup -> unstage
 //// ```
 ////
@@ -25,6 +25,7 @@ import envoy
 import gantry/blobs
 import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
+import gantry/worker/cache
 import gantry/worker/controllers
 import gantry/worker/inputs
 import gantry_core/chunks
@@ -82,6 +83,7 @@ pub opaque type Limits {
     pids: String,
     nofile: String,
     tmp: String,
+    cache: Int,
     userns_seccomp: Option(String),
   )
 }
@@ -103,11 +105,15 @@ pub type Fault {
 /// | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 |
 /// | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 |
 /// | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 |
+/// | `GANTRY_WORKER_CACHE_MIB` | 2048 | 0 to 1048576 |
 /// | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path |
 ///
 /// The process default lets a BEAM build start its scheduler and dirty
 /// threads on a many-core host. The `/tmp` tmpfs counts against the
 /// container's memory limit, so a larger size only bounds the file it holds.
+///
+/// `GANTRY_WORKER_CACHE_MIB` bounds the slot's cache of fetched input blobs,
+/// kept under `GANTRY_WORKER_DIR/chunks`. Zero turns the cache off.
 ///
 /// `GANTRY_WORKER_USERNS_SECCOMP` names the seccomp profile that the `userns`
 /// sandbox runs under. A worker without it is not capable of `userns` and
@@ -169,6 +175,15 @@ pub fn limits_from(
     65_536,
   ))
 
+  use cache <- result.try(resource(
+    lookup,
+    "GANTRY_WORKER_CACHE_MIB",
+    "2048",
+    0,
+    1_048_576,
+  ))
+  let cache = int.parse(cache) |> result.unwrap(0)
+
   // The userns profile is optional. When named, its path must be absolute.
   use userns_seccomp <- result.try(case lookup("GANTRY_WORKER_USERNS_SECCOMP") {
     Error(Nil) | Ok("") -> Ok(None)
@@ -179,7 +194,7 @@ pub fn limits_from(
       }
   })
 
-  Ok(Limits(cpus, memory, workspace, pids, nofile, tmp, userns_seccomp))
+  Ok(Limits(cpus, memory, workspace, pids, nofile, tmp, cache, userns_seccomp))
 }
 
 /// Check that the host files the configured sandbox profiles need exist
@@ -464,7 +479,11 @@ pub fn execute(
       "could not create attempt staging directory",
     )),
   )
-  use Nil <- result.try(stage(path, assignment, network))
+  use Nil <- result.try(stage(
+    path,
+    assignment,
+    fetcher(directory, limits, network),
+  ))
   run(path, name, assignment.task, limits, flags, start, spool)
 }
 
@@ -483,19 +502,39 @@ pub fn unstage(directory: String, name: String) -> Result(Nil, Fault) {
   }
 }
 
+/// Fetch from the controller, through the slot's blob cache unless it is off.
+/// The cache is pruned to its bound before each stage, so it never holds
+/// more than one stage's inputs beyond the limit.
+fn fetcher(
+  directory: String,
+  limits: Limits,
+  network: controllers.Controllers,
+) -> inputs.Fetch {
+  let remote = controllers.fetch(network, _)
+  let chunks = directory <> "/chunks"
+
+  // A zero bound empties any earlier cache and fetches straight through.
+  case limits.cache {
+    0 -> {
+      cache.prune(chunks, 0)
+      remote
+    }
+    mib -> {
+      cache.prune(chunks, mib * 1024 * 1024)
+      cache.wrap(chunks, remote)
+    }
+  }
+}
+
 /// Verify input bytes and build dependency archives without host extraction.
 fn stage(
   directory: String,
   assignment: queue.Assignment,
-  network: controllers.Controllers,
+  fetch: inputs.Fetch,
 ) -> Result(Nil, Fault) {
   let source_path = directory <> "/source.tar"
   use Nil <- result.try(
-    inputs.stage(
-      controllers.fetch(network, _),
-      assignment.task.source,
-      source_path,
-    )
+    inputs.stage(fetch, assignment.task.source, source_path)
     |> result.map_error(transfer_fault),
   )
   use entries <- result.try(
@@ -506,7 +545,7 @@ fn stage(
     #(set.new(), set.new()),
     index_entry,
   ))
-  use Nil <- result.try(stage_git(directory, assignment.task.git, network))
+  use Nil <- result.try(stage_git(directory, assignment.task.git, fetch))
 
   let archive_path = directory <> "/dependencies.tar"
   use archive <- result.try(
@@ -519,7 +558,7 @@ fn stage(
       fn(size, item) {
         use Nil <- result.try(check_destination(item.path, blocked, occupied))
         use bytes <- result.try(
-          controllers.fetch(network, item.digest)
+          fetch(item.digest)
           |> result.map_error(transfer_fault),
         )
 
@@ -574,7 +613,7 @@ fn archives(task: queue.Task) -> List(String) {
 fn stage_git(
   directory: String,
   git: option.Option(queue.Input),
-  network: controllers.Controllers,
+  fetch: inputs.Fetch,
 ) -> Result(Nil, Fault) {
   // A task that declared no metadata has nothing to stage.
   case git {
@@ -582,7 +621,7 @@ fn stage_git(
     option.Some(input) -> {
       let path = directory <> "/git.tar"
       use Nil <- result.try(
-        inputs.stage(controllers.fetch(network, _), input, path)
+        inputs.stage(fetch, input, path)
         |> result.map_error(transfer_fault),
       )
       use entries <- result.try(
