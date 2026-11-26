@@ -95,13 +95,41 @@ again while the old machine, if it is alive, may still be running it.
 Nothing to do. The journal keeps the assignment, a possible-start marker, and
 the recorded result until the controller answers 200 or 409. A restart
 cleans up Docker resources under the attempt's name and publishes the saved
-result, or reports `worker interrupted before recording outcome` for an
-action that may have started and never recorded one. Keep the worker ID and
+result, or reports the attempt `interrupted` when the action may have
+started and never recorded an outcome. The controller treats an interrupted
+attempt as a lease that lapsed: the action goes back to `pending` with one
+more attempt and runs again on the next eligible poll, and only the third
+lapse or interruption fails the run, with step `expired`. Keep the worker ID and
 directory together. A second worker on the same directory exits because the
 journal's SQLite lock is held. A directory bound to another ID is refused.
 A managed profile (from `gantry worker setup`) also refuses to start when its
 journal is missing or has no identity, since an action could have started.
 Use a fresh profile and slot ID in that case, and let the old lease expire.
+
+### Drain a worker
+
+Send the worker SIGTERM, as `systemctl stop` or a restart after
+`make update` does. The worker stops claiming and lets the action it holds
+finish, records and publishes the result, logs `gantry worker: drained`,
+and exits 0. An idle worker exits within one poll, about 2 s.
+
+The drain deadline is `GANTRY_WORKER_DRAIN` seconds, 60 by default. An
+action still running at the deadline is given up: the worker logs
+`drain deadline passed, releasing`, removes the container, reports the
+attempt `interrupted`, and exits. The controller reassigns the action at
+once, and the attempt counts toward the bound of three. If no controller
+answers, the report stays in the journal and the next start of the slot
+publishes it; if the slot never returns, the lease lapses at its deadline
+instead. A second SIGTERM during the drain is ignored.
+
+Under systemd, give the unit `KillMode=mixed`, so only the worker's VM
+receives SIGTERM, and a `TimeoutStopSec` longer than the drain deadline
+plus at least 15 s for cleanup and the report, more if Docker is slow to
+answer. With the default
+`KillMode=control-group`, the Docker client is signalled too, and it
+forwards the signal into the container, which ends the action before the
+drain can let it finish. A stop that SIGKILLs the worker skips the drain;
+the next start reports the attempt `interrupted`, as after any crash.
 
 ### Upgrade across a queue format change
 
@@ -120,9 +148,9 @@ not by a decode error.
 
 Across a format change, upgrade every voter together:
 
-1. Stop admitting work and let the workers drain, since a worker stopped
-   mid-action fails its run. A controller can be replaced while a worker keeps
-   running, and the worker delivers its result to the new release.
+1. Stop admitting work and let the queue go idle. A controller can be
+   replaced while a worker keeps running, and the worker delivers its
+   result to the new release.
 2. Stop all voters and back up each `data_dir/queue-ra`.
 3. Install the new release on every voter and start them all.
 
@@ -130,7 +158,10 @@ Rolling back after the new release has written means restoring those
 backups, which loses whatever was admitted since. An upgrade drill on
 2026-11-24 from `f4cc695` to `10fd0ef` showed this: the controller upgrade
 read every earlier run, the rollback refused the snapshot, and the upgraded
-worker reopened the old journal but failed its in-flight action.
+worker reopened the old journal but failed its in-flight action. A worker
+now drains on SIGTERM and reports an action it could not finish as
+`interrupted`, which is reassigned rather than failed
+([drain a worker](#drain-a-worker)).
 
 ### Upgrade from the single-snapshot release
 

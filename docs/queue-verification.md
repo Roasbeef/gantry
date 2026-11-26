@@ -156,7 +156,9 @@ produced lane overlaps in 297 of 300 seeds. Letting retention drop any
 oldest run produced 23 dropped live runs. Removing the skip of pending
 actions on failure produced runs with pending actions in a failed run.
 Removing the attempt bound left leases stuck after the heal. Dropping the
-proof index in `retain` lost proofs in 221 seeds. The TLA+ model fails on
+proof index in `retain` lost proofs in 221 seeds. Returning an `Interrupted`
+attempt to `Pending` one attempt short gave 408 `interrupt_miscounted`
+violations, and returning it to `Pending` past the bound gave 37. The TLA+ model fails on
 the corresponding mutations listed in its README.
 
 The indexed layout has its own mutations. Dropping the entry that lists a run

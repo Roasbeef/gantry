@@ -75,9 +75,14 @@ release after f4cc695 does. An older controller cannot read a newer
 snapshot, so in that case stop every voter, upgrade, and start them
 together ([upgrade across a format change](operations.md#upgrade-across-a-queue-format-change)).
 Restart workers with their existing IDs and directories so they
-reopen their SQLite journals and recover local custody. Let each worker
-finish its action first: a worker restarted mid-action reports it as
-interrupted, and that fails the run.
+reopen their SQLite journals and recover local custody. A worker sent
+SIGTERM drains: it stops claiming, lets its current action finish for up
+to `GANTRY_WORKER_DRAIN` seconds, publishes the result, and exits 0, so a
+restart need not wait for the worker to go idle
+([drain a worker](operations.md#drain-a-worker)). Upgrade the controllers
+before the workers when a release adds a result kind, as the one that
+added `interrupted` does: an older controller answers the new kind with
+400, and the worker keeps retrying it until a controller accepts it.
 
 When editing the [worker schema](../packages/server/priv/worker-schema.sql)
 or [Parrot queries](../packages/server/src/gantry/worker/sql/custody.sql),
@@ -431,6 +436,10 @@ its bounds at startup, and a value outside them stops the worker.
 | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
 | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
 | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The `/tmp` tmpfs size |
+
+`GANTRY_WORKER_DRAIN` (default 60, in seconds, 0 or more) bounds how long
+a worker sent SIGTERM waits for its current action before it gives the
+attempt up ([drain a worker](operations.md#drain-a-worker)).
 
 The process default matters for BEAM builds. A BEAM starts a scheduler
 thread per core, and on a 32-core host it could not start under 128

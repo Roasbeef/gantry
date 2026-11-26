@@ -150,7 +150,11 @@ old serial gets HTTP 409 and the worker discards it. The third lapse fails
 the action as `LeaseExpired`, and a failure turns the run's other `Pending`
 actions into `Skipped`. A result that arrives after the deadline but before
 any claim has expired the lease is still accepted. A worker restart resumes
-the same assignment or reports an interrupted action after cleanup.
+the same assignment or reports an interrupted action after cleanup. The core
+lapses an `Interrupted` lease at once, exactly as `expire` would, so the
+action is reassigned and the attempt counts toward the bound. On SIGTERM a
+worker drains: it stops claiming and lets its action finish, up to a drain
+deadline, before it gives the attempt up the same way.
 
 ```mermaid
 flowchart TB
@@ -227,7 +231,8 @@ Which infrastructure faults reach users as a failed action:
 | Collector image missing at boot | The worker exits with the `docker pull` command | The first action would fail otherwise |
 | Docker fault while staging or creating resources, before `docker start` | Retried, the same attempt runs again | No action code has run, and `execute` removes leftovers first |
 | Docker fault while removing resources after the action finished | Retried, the recorded result is kept | The result is journaled before cleanup |
-| Worker restart or Docker fault after `docker start` and before the result is recorded | `Rejected: worker interrupted before recording outcome` | The action may have run, so running it again could repeat its effects, and the wire protocol has no worker-reported requeue |
+| Worker restart or Docker fault after `docker start` and before the result is recorded | `Interrupted`: the lease lapses at once and the action is leased again, up to three attempts, then `expired` | The action did not fail. It may have run, so it can repeat, as after a lost worker |
+| SIGTERM while an action runs | The action finishes and its result is published, then the worker exits. Past `GANTRY_WORKER_DRAIN` it is reported `Interrupted` | A routine restart costs at most one attempt |
 | Action exit status, wall deadline, or a missing or oversized declared output | `Rejected` with the reason and the log | The action itself failed |
 | Unsafe path or invalid archive in the inputs | `Rejected` | The same input would fail again |
 | Worker lost, or slower than the lease deadline | The action is leased again, up to three attempts, then `expired` | No renewal exists, and a late result is refused with 409 |
@@ -429,7 +434,7 @@ propose changes concurrently.
 | Static supervisor | The Mist listener and the reconciler. It restarts whichever crashes, and past five restarts in a minute it exits so the VM stops |
 | Weft reconciler per controller | Its periodic `Reconcile` message, its per-intent backoff table, and sequential provider calls for the intents it received |
 | Git mirror lock | One repository's persistent bare mirror, held by one request or reconciler attempt at a time |
-| `gantry/worker` slot loop | One slot and its journal connection, run as a Weft actor under a supervisor. A crash restarts it with the same journal |
+| `gantry/worker` slot loop | One slot and its journal connection, run as a Weft actor under a supervisor. A crash restarts it with the same journal. On SIGTERM it stops claiming, and a Weft task bounds the drain by its deadline |
 | Journal lock | SQLite's exclusive lock on the slot's connection, held while the connection lives and released by the OS at exit |
 | `docker start -a` task | A Weft task with a deadline. Its cancel capability removes the containers on timeout or when the slot loop dies |
 | Erlang host and worker FFI | The shared port runner for Docker and host tools, which kills the child by pid at its deadline, and tar operations |

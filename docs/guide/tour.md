@@ -295,9 +295,13 @@ the two archives into `/work` and then `exec`s the action's `argv`.
 action code, the worker commits a started flag to the journal
 (`gantry/worker/custody.gleam:298`). If the process dies after
 that and before a result is recorded, the next step finds an `Interrupted`
-attempt, cleans up, and records a rejection (`worker interrupted before
-recording outcome`) instead of running it again
-(`gantry/worker/slot.gleam:103`).
+attempt, cleans up, and records the outcome `Interrupted` instead of running
+it again (`gantry/worker/slot.gleam:107`). The controller lapses that lease
+at once, so the action is leased again under a fresh serial, and the
+attempt counts toward the bound. On SIGTERM the worker first drains:
+`drain` in `gantry/worker.gleam` stops claiming, waits as a Weft task for
+the journal to empty, and past `GANTRY_WORKER_DRAIN` calls `slot.release`
+to report the attempt `Interrupted` itself.
 
 **Running.** `start_action` runs `docker start -a` as a Weft task with a
 deadline of the action's timeout plus a grace period, and removing the
@@ -329,7 +333,8 @@ live serial held by that worker. A success must list exactly the action's
 declared outputs, and it becomes a `Passed` proof that is also indexed for
 reuse (`gantry_core/queue.gleam:945`). A rejection becomes `Failed`
 and strands the run's pending actions as `Skipped`
-(`gantry_core/queue.gleam:978`).
+(`gantry_core/queue.gleam:978`). An interruption lapses the lease as an
+expiry would.
 
 The answer is 200 `{"accepted":true}`, or 409 when the lease is no longer
 active. The worker treats both as final: it deletes the attempt row and clears
@@ -424,7 +429,8 @@ end-to-end gate (`scripts/e2e.sh`) kills most of them.
 | The reply to a claim | The next poll gets the same lease, because the worker already holds it (`gantry_core/queue.gleam:782`). |
 | The reply to a result | The worker keeps the receipt and blobs until it hears 200 or 409. The e2e loses a committed reply on purpose (`scripts/e2e.sh:308`). |
 | A worker before `docker start` | The journal says `Ready`. The restart cleans by name and runs the attempt (`gantry/worker/slot.gleam:96`). |
-| A worker after `docker start` | The journal says `Interrupted`. The restart cleans up and records a rejection (`scripts/e2e.sh:280`). |
+| A worker after `docker start` | The journal says `Interrupted`. The restart cleans up and reports the attempt interrupted, and the controller reassigns it (`scripts/e2e.sh:291`). |
+| A worker sent SIGTERM | It drains: the action finishes and is published, then the worker exits. Past the drain deadline it reports the attempt interrupted (`scripts/e2e.sh:323`). |
 | A worker for good | The lease expires and the action runs again on another slot, up to three attempts (`gantry_core/queue.gleam:736`). |
 | The Docker daemon, mid-cleanup | The result was recorded first, so cleanup retries without losing it. |
 | The reconciler | The supervisor restarts it. Its backoff table is forgotten, and every intent is re-attempted, which is safe because each attempt re-observes the remote before acting. |
