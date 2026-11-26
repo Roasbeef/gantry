@@ -924,7 +924,10 @@ fn waiting(run: RunRow, rows: List(RunRow)) -> Diagnosis {
     |> list.filter(fn(other) {
       other.lane == run.lane
       && case other.signal {
-        SignalWaiting | SignalQueued | SignalLanding -> True
+        // A queued run whose actions failed no longer holds its lane, as
+        // in the core's `holder_branch`, so nothing waits behind it.
+        SignalQueued -> other.phase != queue.PhaseFailed
+        SignalWaiting | SignalLanding -> True
         NoLane | SignalLanded | SignalBlocked | SignalUnprepared -> False
       }
     })

@@ -77,8 +77,8 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         True -> #(model.Model(..m, in_flight: True), fetch_fleet(m.token))
         False -> #(m, effect.none())
       }
-    model.FleetAnswered(status, body) -> {
-      let next = model.receive(m, status, body)
+    model.FleetAnswered(token, status, body) -> {
+      let next = model.receive(m, token, status, body)
 
       // A rejected token is forgotten so the next load asks again.
       case next.connection {
@@ -122,7 +122,7 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 fn fetch_fleet(token: String) -> Effect(Msg) {
   effect.from(fn(dispatch) {
     ffi_browser.get("/v1/fleet", token, fn(status, body) {
-      dispatch(model.FleetAnswered(status, body))
+      dispatch(model.FleetAnswered(token, status, body))
     })
   })
 }

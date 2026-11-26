@@ -43,30 +43,31 @@ pub fn a_token_starts_connecting_and_none_signs_out_test() {
 }
 
 pub fn a_snapshot_goes_live_and_chooses_a_run_test() {
-  let m = model.receive(model.initial("t"), 200, body(leased(10), 12))
+  let m = model.receive(model.initial("t"), "t", 200, body(leased(10), 12))
   assert m.connection == model.Live
   assert m.chosen_run == Some("r")
   assert !m.in_flight
 }
 
 pub fn a_refused_token_signs_out_with_a_notice_test() {
-  let m = model.receive(model.initial("t"), 401, "{\"error\":\"no\"}")
+  let m = model.receive(model.initial("t"), "t", 401, "{\"error\":\"no\"}")
   let assert model.SignedOut(Some(_)) = m.connection
   assert m.token == ""
 }
 
 pub fn an_error_keeps_the_last_board_and_marks_it_stale_test() {
-  let live = model.receive(model.initial("t"), 200, body(leased(10), 12))
-  let m = model.receive(live, 503, "{\"error\":\"queue quorum unavailable\"}")
+  let live = model.receive(model.initial("t"), "t", 200, body(leased(10), 12))
+  let m =
+    model.receive(live, "t", 503, "{\"error\":\"queue quorum unavailable\"}")
   assert m.connection == model.Lost("HTTP 503: queue quorum unavailable")
   assert m.board == live.board
-  let m = model.receive(live, 0, "Failed to fetch")
+  let m = model.receive(live, "t", 0, "Failed to fetch")
   assert m.connection
     == model.Lost("cannot reach the controller: Failed to fetch")
 }
 
 pub fn an_unreadable_snapshot_is_lost_not_fatal_test() {
-  let m = model.receive(model.initial("t"), 200, "{\"now\":-1}")
+  let m = model.receive(model.initial("t"), "t", 200, "{\"now\":-1}")
   let assert model.Lost(_) = m.connection
 }
 
@@ -74,7 +75,7 @@ pub fn choosing_an_action_with_a_log_asks_for_it_test() {
   let state = leased(10)
   let assert Ok(state) =
     queue.finish(state, "r", "build", "w1", 1, queue.Rejected("boom", "abc"))
-  let m = model.receive(model.initial("t"), 200, body(state, 20))
+  let m = model.receive(model.initial("t"), "t", 200, body(state, 20))
   let #(m, digest) = model.choose_action(m, "r", "build")
   assert digest == Some("abc")
   assert m.log == model.Loading("abc")
@@ -154,7 +155,7 @@ pub fn a_broken_run_opens_on_its_failed_action_test() {
   let state = leased(10)
   let assert Ok(state) =
     queue.finish(state, "r", "build", "w1", 1, queue.Rejected("boom", "abc"))
-  let m = model.receive(model.initial("t"), 200, body(state, 20))
+  let m = model.receive(model.initial("t"), "t", 200, body(state, 20))
   let #(m, digest) = model.choose_run(m, "r")
   assert digest == Some("abc")
   assert m.chosen_action == Some("build")
@@ -162,7 +163,7 @@ pub fn a_broken_run_opens_on_its_failed_action_test() {
 }
 
 pub fn a_live_run_opens_with_no_action_test() {
-  let m = model.receive(model.initial("t"), 200, body(leased(10), 12))
+  let m = model.receive(model.initial("t"), "t", 200, body(leased(10), 12))
   let #(m, digest) = model.choose_run(m, "r")
   assert digest == None
   assert m.chosen_action == None
@@ -189,4 +190,15 @@ pub fn runs_split_into_live_broken_and_settled_bands_test() {
   assert list.map(l, fn(r) { r.id }) == ["r"]
   assert list.map(broken, fn(r) { r.id }) == ["bad"]
   assert settled == []
+}
+
+pub fn an_answer_for_an_earlier_token_is_dropped_test() {
+  let live = model.receive(model.initial("t"), "t", 200, body(leased(10), 12))
+  // After a sign-out, an answer still in flight restores nothing.
+  let out = model.initial("")
+  assert model.receive(out, "t", 200, body(leased(10), 12)) == out
+  // After a token change, the old token's refusal does not sign out.
+  let next = model.initial("u")
+  assert model.receive(next, "t", 401, "{}") == next
+  assert model.receive(live, "t", 503, "{}").connection != model.Live
 }

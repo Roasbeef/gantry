@@ -246,3 +246,48 @@ pub fn spans_read_at_a_glance_test() {
   assert board.span(185) == "3m 05s"
   assert board.span(3720) == "1h 02m"
 }
+
+pub fn a_failed_queued_group_frees_its_lane_test() {
+  let member = fn(pull) { queue.Member(pull, "head") }
+  let assert Ok(#(state, _)) =
+    queue.admit(
+      queue.empty(),
+      "g1",
+      "repo",
+      "",
+      "check",
+      queue.Waiting("main", [member(1)]),
+      [],
+    )
+  let assert Ok(#(state, _)) =
+    queue.admit(
+      state,
+      "g2",
+      "repo",
+      "",
+      "check",
+      queue.Waiting("main", [member(2)]),
+      [],
+    )
+  let assert [offer] = queue.preparations(state)
+  let candidate = queue.candidate("main", "base", "c1", [member(1)])
+  let assert Ok(state) =
+    queue.record_preparation(
+      state,
+      offer,
+      Ok(#(candidate, [task("root", [], "linux")])),
+    )
+  let assert #(state, Some(job)) = queue.claim(state, "w1", "linux", 0)
+  let assert Ok(state) =
+    queue.finish(
+      state,
+      "g1",
+      "root",
+      "w1",
+      queue.lease_serial(job.lease),
+      queue.Rejected("no", "log"),
+    )
+  let b = snapshot(state, [], 1)
+  let assert Ok(next) = board.find(b, "g2")
+  assert next.diagnosis.health == board.Moving
+}

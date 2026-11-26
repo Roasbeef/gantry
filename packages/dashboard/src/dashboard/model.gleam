@@ -11,6 +11,7 @@
 //// | `FleetAnswered` 200 | any | `Live`, with the board rebuilt |
 //// | `FleetAnswered` 401 | any | `SignedOut`, the token forgotten |
 //// | `FleetAnswered` other | any | `Lost`, the last board kept and marked stale |
+//// | `FleetAnswered` for an earlier token | any | unchanged: the answer is dropped |
 //// | `SignedOut` | any | `SignedOut`, the board dropped |
 ////
 //// The path through the module: `initial` builds the signed-out or
@@ -85,7 +86,7 @@ pub type Msg {
   TokenSubmitted
   SignOut
   Tick
-  FleetAnswered(status: Int, body: String)
+  FleetAnswered(token: String, status: Int, body: String)
   RunChosen(String)
   ActionChosen(run: String, action: String)
   LogAnswered(digest: String, status: Int, body: String)
@@ -143,7 +144,22 @@ pub fn signed_in(model: Model) -> Bool {
 /// ```gleam
 /// // model.receive(model, 200, body)
 /// ```
-pub fn receive(model: Model, status: Int, body: String) -> Model {
+pub fn receive(
+  model: Model,
+  token: String,
+  status: Int,
+  body: String,
+) -> Model {
+  // An answer fetched with another token belongs to a sign-in that has since
+  // ended or changed, so it must neither restore a board nor sign out.
+  case token == model.token && signed_in(model) {
+    True -> apply(model, status, body)
+    False -> model
+  }
+}
+
+/// Fold an answer that belongs to the current sign-in.
+fn apply(model: Model, status: Int, body: String) -> Model {
   let model = Model(..model, in_flight: False)
 
   // The status picks between a snapshot, a refused token, an unreachable
