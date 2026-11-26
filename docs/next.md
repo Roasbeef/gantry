@@ -111,9 +111,13 @@ the third slice.
 3. **Let a trusted repository ask for a wider sandbox.** Real Loom lanes run
    on the 32-core worker host under the worker's exact flags: `static` and `mid` pass; the
    `fast`, `conformance`, and `client` lanes fail, mostly because Loom's own
-   `bwrap` jail cannot create user namespaces under `--cap-drop=ALL`, plus
+   `bwrap` jail cannot create namespaces under Docker's defaults, plus
    tests that write outside `/work`. Loom's jail and self-test lanes cannot pass
-   at all.
+   at all. The 2026-11-25 measurements ([below](#where-the-loom-failures-come-from))
+   name what the jail needs: Docker's default seccomp and AppArmor profiles
+   and its masked `/proc` paths block it even in a plain `docker run` as
+   root, so no single flag of Gantry's causes it, and with those three
+   unconfined it still wants a delegated cgroup v2.
    Write the design note first: what a repository may request (user
    namespaces, a seccomp profile, a delegated cgroup, or a microVM), who
    approves it in `controller.toml`, and how an untrusted repository keeps the
@@ -139,19 +143,24 @@ the third slice.
    clean, shallow checkout. **Exit, as measured:** Loom's `client` shards 1 and
    2 with the metadata staged still fail 130 and 129 tests, and "repository
    metadata query failed" still appears 65 and 40 times (105 in all, the same
-   count as without a `.git`). Loom runs its Git inside its own `loom-exec`
-   jail, which needs user namespaces, and `bwrap` fails under `--cap-drop=ALL`
-   with "No permissions to create new namespace". Those errors belong to
-   slice 3, and the workspace `.git` does not reach them. **Guard:** met, with
-   the key tests in `git_test.gleam` and `chunks_test.gleam`.
+   count as without a `.git`). Those errors come from Git that Loom's client
+   runs inside its own `loom-exec` jail against repositories the tests
+   build, so the workspace `.git` never reaches them; they disappear once the
+   jail can start (slice 3). The metadata does matter elsewhere: one `eval`
+   test in the `conformance` lane needs the workspace to be a Git repository,
+   and it passes with `"git": "shallow"` and fails without it. **Guard:** met,
+   with the key tests in `git_test.gleam` and `chunks_test.gleam`.
 5. **Move inputs larger than one blob.** *Built, 2026-11-25.* Input archives over
    64 MiB are stored as chunks of at most 32 MiB plus a manifest, up to
    512 MiB, and the worker checks every chunk's length and digest and the
    reassembled digest. **Exit, as measured:** a scratch controller and two
    scratch slots on the worker host staged Loom's 87.5 MiB tree as chunks. The
    `static` lane passed (`make fmt-check && make lint && make doc-check`). The
-   `conformance` lane staged and ran, then exited 1 (the nested `bwrap`
-   failure of slice 3, not staging). **Guard:** met, with an unmodified blob
+   `conformance` lane staged and ran, then exited 1. The staging is complete:
+   the three chunks and the whole archive match the manifest's digests, and
+   the unpacked tree is identical to `git archive` of the commit. The
+   failures are the jail of slice 3 and two `eval` tests that need a
+   `build/codemode-seed` directory the lane never builds. **Guard:** met, with an unmodified blob
    suite plus `inputs_test.gleam` for each violation and a `queue_churn_dst`
    fault for a refused input. Open: `lease_slack` still assumes one 64 MiB
    transfer, so a 512 MiB input on a slow link can outlast it, and an older
@@ -242,6 +251,66 @@ the third slice.
     a stuck run's cause from the board alone. **Guard:** `/v1/fleet` stays
     read-only and the view token cannot admit work.
 
+
+### Where the Loom failures come from
+
+Measured 2026-11-25 on the 32-core worker host, outside Gantry: `docker run`
+of `gantry-loom-actions:9aa1383` with the archives Gantry stages (the
+reassembled 87.5 MiB source, plus the shallow `.git` where noted) and the
+lane's own command. The Gantry flags are those of a slot with 4 CPUs,
+8 GiB, a 6000 MiB workspace and 1024 MiB `/tmp`: `--network=none`,
+`--cap-drop=ALL`, `--read-only`, `--user=65534:65534`, `no-new-privileges`,
+`--pids-limit=4096`. Each variant changes one thing. Counts repeated exactly
+across runs, down to the failing test names, apart from the one flake noted.
+
+| `client` shard 1/3 | Runs | Failed | Metadata errors |
+|---|---|---|---|
+| Gantry flags, `.git` staged | 3 | 130, 130, 130 | 65 |
+| Gantry flags, no `.git` | 2 | 131, 130 | 65 |
+| Plain `docker run` (root, network, writable, only CPU and memory limits) | 3 | 129, 129, 129 | 65 |
+| No `--pids-limit` | 2 | 130, 130 | 65 |
+| Writable root filesystem | 2 | 130, 130 | 65 |
+| 16000 MiB workspace and 8192 MiB `/tmp` | 2 | 130, 130 | 65 |
+| Root user (root-owned workspace) | 2 | 129, 129 | 65 |
+| Network | 2 | 130, 130 | 65 |
+| seccomp and AppArmor unconfined | 2 | 129, 129 | 65 |
+| seccomp, AppArmor and `/proc` paths unconfined | 3 | 16, 16, 16 | 0 |
+
+| `conformance` lane (`conformance eval`) | Runs | Failed | Passed |
+|---|---|---|---|
+| Gantry flags | 2 | 3, 3 | 113 |
+| Plain `docker run` | 2 | 3, 3 | 113 |
+| seccomp and AppArmor unconfined | 1 | 3 | 113 |
+| seccomp, AppArmor and `/proc` unconfined | 2 | 3, 3 | 250 |
+| The same, with `.git` staged | 2 | 2, 2 | 251 |
+
+What each row names:
+
+- **The jail.** `bwrap` fails with "No permissions to create new namespace"
+  under the default seccomp profile, with "Failed to make / slave" once
+  seccomp is unconfined, and with "Can't mount proc" once AppArmor is too. It
+  starts only with `seccomp=unconfined`, `apparmor=unconfined` and
+  `systempaths=unconfined` together, and then it works under
+  `--cap-drop=ALL`, uid 65534 and no network. That one change removes 114
+  `client` failures and all 65 metadata errors, and lets `conformance` pass
+  and `eval` run. It is the sandbox profile of slice 3, not a Gantry defect.
+- **The cgroup.** Of the 16 `client` failures left, 14 are
+  `project_template_test`, where Loom refuses to run Git "without full
+  enforcement" because `/sys/fs/cgroup` is read-only and not delegated. That
+  is the delegated cgroup of slice 3.
+- **A missing build step.** One `client` test and two `eval` tests need
+  `build/codemode-seed`, which `make e2e-evolution` makes and the lane
+  command does not run. That belongs in Loom's lane command.
+- **The user.** `tui_e2e_test`'s real-terminal test fails ("the TUI never
+  attached") in every variant that runs as uid 65534 and passes as root;
+  this is the one-test difference between the Gantry and plain rows. Not yet
+  traced inside Loom's test.
+- **A flake.** `delegate_host_test`'s idle-sweep test failed once in five
+  runs with a shell syntax error over a list of PIDs, inside Loom's own test
+  script.
+
+No row changes with the pids limit, the read-only root, the tmpfs sizes or
+the network, and none points at staging or the `.git` metadata.
 ## Rulings already made
 
 Each of these is settled. Re-open one only with new evidence, and record the
