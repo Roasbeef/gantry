@@ -1152,6 +1152,99 @@ pub fn phase(run: Run) -> Phase {
 }
 
 // ---------------------------------------------------------------------------
+// Questions an index asks of one run
+// ---------------------------------------------------------------------------
+
+/// The pools in which `claim` could lease or reuse an action of this run
+/// now. An indexed store lists a run under each of these pools, so the list
+/// agrees with `claim` for every pool by construction.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.ready_pools(run) == ["linux"]
+/// ```
+pub fn ready_pools(run: Run) -> List(String) {
+  list.filter_map(run.work, fn(work) {
+    case work.step, next_work(run, work.task.pool) {
+      Pending(_), Ok(_) -> Ok(work.task.pool)
+      Pending(_), Error(Nil)
+      | Active(_), _
+      | Passed(_), _
+      | Reused(_), _
+      | Failed(_, _), _
+      | Skipped, _
+      -> Error(Nil)
+    }
+  })
+  |> list.unique
+}
+
+/// The recipes of the actions in a pool that a claim could still resolve:
+/// pending ones, and active ones whose lease may lapse into pending. A claim
+/// can look up a proof for any of them after earlier reuses unlock their
+/// successors.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.unsettled_recipes(run, "linux")
+/// ```
+pub fn unsettled_recipes(run: Run, pool: String) -> List(String) {
+  list.filter_map(run.work, fn(work) {
+    case work.step {
+      Pending(_) | Active(_) if work.task.pool == pool -> Ok(work.task.recipe)
+      Pending(_) | Active(_) | Passed(_) | Reused(_) | Failed(_, _) | Skipped ->
+        Error(Nil)
+    }
+  })
+  |> list.unique
+}
+
+/// The leases a run holds, in action order.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.leases(run)
+/// ```
+pub fn leases(run: Run) -> List(Lease) {
+  list.filter_map(run.work, fn(work) {
+    case work.step {
+      Active(lease) -> Ok(lease)
+      Pending(_) | Passed(_) | Reused(_) | Failed(_, _) | Skipped -> Error(Nil)
+    }
+  })
+}
+
+/// The branch a run holds while it is queued with live work or landing.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.held_branch(run) == Ok("main")
+/// ```
+pub fn held_branch(run: Run) -> Result(String, Nil) {
+  holder_branch(run)
+}
+
+/// Whether `landings` would hand this run's intent to the reconciler now.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // queue.landable(run)
+/// ```
+pub fn landable(run: Run) -> Bool {
+  case run.submission {
+    Landing(_) -> True
+    Queued(_) -> all_passed(run)
+    Build | Waiting(_, _) | Landed(_) | Blocked(_, _) | Unprepared(_, _, _) ->
+      False
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Shared predicates and updates
 // ---------------------------------------------------------------------------
 

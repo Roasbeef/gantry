@@ -530,11 +530,11 @@ the current target.
 
 [The status section](architecture/runtime.md#status) is the single record of
 what is built and what is open. Three limits matter when you size a
-deployment. The queue is one snapshot of at most 4 MiB, and the controller
+deployment. The queue holds at most 10,000 runs, and the controller
 trims finished runs and proofs to the `[retention]` bounds in
-`controller.toml` (200 runs and 1000 proofs by default). Throughput on the
-whole-snapshot swap saturates near 20 actions per second on four vCPUs
-([measurements](controller-load.md#measurements-on-the-gleam-benchmark)).
+`controller.toml` (200 runs and 1000 proofs by default). One controller holds
+100 actions per second across 100 repositories on four vCPUs, and three on the
+same host hold 75 ([measurements](controller-load.md#the-indexed-layout-9f273c1)).
 Blobs and candidate bundles are not collected.
 
 The API uses immutable commits and optional ad hoc actions. Workspace

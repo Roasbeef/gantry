@@ -1,19 +1,26 @@
 //// Khepri/Ra primitives behind an Erlang bridge, because Gleam has no
-//// replicated conditional store. Each function performs one call and
-//// reports its outcome. Policy lives in `gantry/store`: the bootstrap or
-//// join decision, the node-name marker, the snapshot size limit and the
-//// quiet hint's invalidation. Only trusted startup configuration reaches
+//// replicated conditional store. Each function performs one read, one atomic
+//// compare-and-write, or one lock, and reports its outcome. Policy lives in
+//// `gantry_core/layout` and `gantry/store`: the bootstrap or join decision,
+//// the node-name marker, which keys an operation reads, what its decision
+//// relied on, and what it writes. Only trusted startup configuration reaches
 //// cluster boot.
 ////
-//// Failures are `Fault`s. The Erlang side builds `Unavailable` and
-//// `Internal` as `{unavailable, Detail}` and `{internal, Detail}`.
+//// Failures of calls that return a `Fault` are `Unavailable` and `Internal`,
+//// built by the Erlang side as `{unavailable, Detail}` and
+//// `{internal, Detail}`. A read fails with text, which the caller maps.
 
 import gantry/fault.{type Fault}
+import gantry_core/layout
+import gleam/option.{type Option}
 
-/// Whether the expected snapshot authorized the proposal's receipt.
-pub type ProposalOutcome {
+/// Whether a plan's expectations held when it was committed.
+pub type Outcome {
+  /// Every expectation held, and every write applied.
   Accepted
-  SnapshotChanged
+
+  /// A key the plan relied on changed, and nothing was written.
+  Stale
 }
 
 /// Start the Khepri application and this node's Ra system in `directory`.
@@ -78,16 +85,6 @@ pub fn join(seed: String) -> Result(Nil, Fault)
 @external(erlang, "gantry_khepri_ffi", "sync_directory")
 pub fn sync_directory() -> Result(Nil, Fault)
 
-/// Initialize the snapshot unless it already exists.
-///
-/// ## Examples
-///
-/// ```gleam
-/// // ffi_khepri.create(empty)
-/// ```
-@external(erlang, "gantry_khepri_ffi", "create")
-pub fn create(empty: String) -> Result(Nil, Fault)
-
 /// Confirm that the controller can reach the queue's voting majority.
 ///
 /// ## Examples
@@ -98,77 +95,90 @@ pub fn create(empty: String) -> Result(Nil, Fault)
 @external(erlang, "gantry_khepri_ffi", "ready")
 pub fn ready() -> Result(Nil, Fault)
 
-/// Read bytes after Khepri's bounded fence. The caller checks their size.
+/// Wait until this replica has applied everything committed so far.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.read()
+/// // ffi_khepri.fence()
 /// ```
-@external(erlang, "gantry_khepri_ffi", "read")
-pub fn read() -> Result(String, Fault)
+@external(erlang, "gantry_khepri_ffi", "fence")
+pub fn fence() -> Result(Nil, Fault)
 
-/// Ask the Ra leader, after a quorum confirms its authority, whether the
-/// stored snapshot hashes to the SHA-256 `digest`. Only the answer returns.
+/// Read one key from the local replica.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.matches(digest)
+/// // ffi_khepri.get(["counter", "serial"])
 /// ```
-@external(erlang, "gantry_khepri_ffi", "matches")
-pub fn matches(digest: BitArray) -> Result(ProposalOutcome, Fault)
+@external(erlang, "gantry_khepri_ffi", "get")
+pub fn get(key: layout.Key) -> Result(Option(String), String)
 
-/// Replace the expected bytes with a mutation through Khepri, within the
-/// same deadline as every other call. A deadline leaves the outcome unknown.
+/// Read several keys from the local replica, in the order asked.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.swap(expected, proposed)
+/// // ffi_khepri.many([["counter", "serial"], ["counter", "seq"]])
 /// ```
-@external(erlang, "gantry_khepri_ffi", "swap")
-pub fn swap(
-  expected: String,
-  proposed: String,
-) -> Result(ProposalOutcome, Fault)
+@external(erlang, "gantry_khepri_ffi", "many")
+pub fn many(keys: List(layout.Key)) -> Result(List(Option(String)), String)
 
-/// Create the table that holds the local quiet hint, if it is absent.
+/// Every key below a prefix that holds a value, with that value.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.hint_open()
+/// // ffi_khepri.list(["ready"])
 /// ```
-@external(erlang, "gantry_khepri_ffi", "hint_open")
-pub fn hint_open() -> Nil
+@external(erlang, "gantry_khepri_ffi", "list")
+pub fn list(prefix: layout.Key) -> Result(List(#(layout.Key, String)), String)
 
-/// The digest of the last snapshot a worker poll found quiet.
+/// Apply the writes if every expectation still holds, atomically. With no
+/// writes the leader confirms the expectations through a quorum read. A
+/// deadline leaves the outcome unknown.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.hint_read()
+/// // ffi_khepri.commit([], [])
 /// ```
-@external(erlang, "gantry_khepri_ffi", "hint_read")
-pub fn hint_read() -> Result(BitArray, Nil)
+@external(erlang, "gantry_khepri_ffi", "commit")
+pub fn commit(
+  expects: List(layout.Expect),
+  writes: List(layout.Write),
+) -> Result(Outcome, Fault)
 
-/// Remember the digest of a snapshot whose worker state is terminal.
+/// The queue snapshot an earlier release stored, if there is one.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.hint_remember(digest)
+/// // ffi_khepri.legacy()
 /// ```
-@external(erlang, "gantry_khepri_ffi", "hint_remember")
-pub fn hint_remember(digest: BitArray) -> Nil
+@external(erlang, "gantry_khepri_ffi", "legacy")
+pub fn legacy() -> Result(Option(String), Fault)
 
-/// Drop the hint if it still holds `digest`.
+/// Replace the earlier release's snapshot with bytes it cannot decode, once
+/// the layout holds its contents.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.hint_forget(digest)
+/// // ffi_khepri.seal_legacy(store.sealed_snapshot)
 /// ```
-@external(erlang, "gantry_khepri_ffi", "hint_forget")
-pub fn hint_forget(digest: BitArray) -> Nil
+@external(erlang, "gantry_khepri_ffi", "seal_legacy")
+pub fn seal_legacy(bytes: String) -> Result(Nil, Fault)
+
+/// Run `work` while holding the named lock: `admission`, `claiming` or
+/// `finishing`. The lock orders one controller's own operations. It decides
+/// nothing, because the commit still compares what the plan relied on.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_khepri.gated("claiming", fn() { Ok(Nil) })
+/// ```
+@external(erlang, "gantry_khepri_ffi", "gated")
+pub fn gated(name: String, work: fn() -> Result(a, Fault)) -> Result(a, Fault)

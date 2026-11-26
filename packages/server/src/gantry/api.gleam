@@ -13,7 +13,7 @@ import gleam/dict
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import gleam/time/timestamp
@@ -85,16 +85,16 @@ pub fn group(cfg: Config, body: String) -> Result(json.Json, Error) {
     }),
   )
   use repo <- result.try(registered(cfg, request.submit_repo(group)))
-  use saved <- result.try(store.read())
   let id = request.submit_id(group)
   let pulls = request.pulls(group)
+  use found <- result.try(store.find(id))
 
   // Replaying an admitted group keeps its original pins. A new group pins
   // its members' heads and waits. It is built only when it heads a free
   // lane, so a group queued behind another never builds on a stale base.
-  case queue.find(saved, id) {
-    Ok(run) -> replay_group(run, repo.name, pulls)
-    Error(Nil) -> {
+  case found {
+    Some(run) -> replay_group(run, repo.name, pulls)
+    None -> {
       use members <- result.try(prepare.pin(cfg, repo, group))
       admit(
         id,
@@ -159,11 +159,8 @@ fn admit(
   intent: queue.Submission,
   tasks: List(queue.Task),
 ) -> Result(json.Json, Error) {
-  store.change(fn(state) {
-    queue.admit(state, id, repo, revision, target, intent, tasks)
-    |> result.map(fn(pair) { #(pair.0, protocol.encode_run(pair.1)) })
-    |> result.map_error(fault.Conflict)
-  })
+  store.admit(id, repo, revision, target, intent, tasks)
+  |> result.map(protocol.encode_run)
 }
 
 /// Return the recorded state of a run for a reconnecting agent.
@@ -174,9 +171,8 @@ fn admit(
 /// // api.get("build-1")
 /// ```
 pub fn get(id: String) -> Result(json.Json, Error) {
-  use state <- result.try(store.read())
-  queue.find(state, id)
-  |> result.replace_error(fault.NotFound("unknown run"))
+  use found <- result.try(store.find(id))
+  option.to_result(found, fault.NotFound("unknown run"))
   |> result.map(protocol.encode_run)
 }
 
@@ -227,13 +223,8 @@ pub fn finish(
   use Nil <- result.try(bound(identity, worker))
   use Nil <- result.try(verify_blobs(cfg.blobs, completion))
 
-  store.change(fn(state) {
-    queue.finish(state, run, action, worker, serial, completion)
-    |> result.map(fn(next) {
-      #(next, json.object([#("accepted", json.bool(True))]))
-    })
-    |> result.map_error(fault.Conflict)
-  })
+  store.finish(run, action, worker, serial, completion)
+  |> result.map(fn(_) { json.object([#("accepted", json.bool(True))]) })
 }
 
 /// Check that every referenced object exists before storing references. An

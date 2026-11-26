@@ -18,7 +18,7 @@ image = "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b347
 id = "linux-01"
 token_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
-# Optional bounds that keep the queue snapshot well under its 4 MiB ceiling.
+# Optional bounds on the finished runs and proofs the queue keeps.
 # Only finished runs are dropped, oldest first. These are the defaults.
 [retention]
 keep_runs = 200

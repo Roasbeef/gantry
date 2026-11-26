@@ -313,6 +313,7 @@ fn configuration(
     "blob_dir = \"" <> root <> "/blobs\"\n",
     "port = " <> int.to_string(settings.port + index) <> "\n",
     "seed = \"" <> seed <> "\"\n",
+    "\n[retention]\nkeep_runs = " <> int.to_string(settings.retained) <> "\n",
     ..list.append(repositories, workers)
   ])
 }

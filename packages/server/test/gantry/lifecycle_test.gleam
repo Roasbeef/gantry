@@ -5,7 +5,6 @@
 
 import gantry/api
 import gantry/config
-import gantry/fault
 import gantry/reconcile
 import gantry/store
 import gantry/support.{type Remote}
@@ -14,7 +13,6 @@ import gantry_core/queue
 import gleam/json
 import gleam/list
 import gleam/option.{Some}
-import gleam/result
 import gleam/string
 import simplifile
 
@@ -41,8 +39,7 @@ fn admit(
 }
 
 fn run(id: String) -> queue.Run {
-  let assert Ok(state) = store.read()
-  let assert Ok(found) = queue.find(state, id)
+  let assert Ok(Some(found)) = store.find(id)
   found
 }
 
@@ -68,18 +65,13 @@ fn work_all() -> Nil {
     Ok(Some(assignment)) -> {
       let queue.Assignment(run: id, task:, lease:) = assignment
       let assert Ok(Nil) =
-        store.change(fn(state) {
-          queue.finish(
-            state,
-            id,
-            task.action.name,
-            "test-worker",
-            queue.lease_serial(lease),
-            queue.Succeeded([], string.repeat("0", 64)),
-          )
-          |> result.map(fn(next) { #(next, Nil) })
-          |> result.map_error(fault.Conflict)
-        })
+        store.finish(
+          id,
+          task.action.name,
+          "test-worker",
+          queue.lease_serial(lease),
+          queue.Succeeded([], string.repeat("0", 64)),
+        )
       work_all()
     }
     _ -> Nil

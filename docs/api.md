@@ -93,8 +93,8 @@ maps the kind to a status without reading the message
 | 404 | `NotFound` | Unknown run, unregistered repository, missing blob, or no such route | Check the name |
 | 409 | `Conflict` | The queue refuses the transition: ID reused with other inputs, or the lease is no longer active | Reconcile by ID |
 | 411, 413 | none | Missing `Content-Length`, or a body over the route's limit | Fix the request |
-| 503 | `Unavailable` | Quorum, storage, Git, or GitHub failed, or `queue contention exceeded retry budget` | Retry later |
-| 500 | `Internal` | Stored state is corrupt or an invariant broke, such as a queue snapshot over 4 MiB | Operator action |
+| 503 | `Unavailable` | Quorum, storage, Git, or GitHub failed, `queue contention exceeded retry budget`, or `the queue holds the most runs it accepts` | Retry later |
+| 500 | `Internal` | Stored state is corrupt or an invariant broke, such as a queue record that does not decode | Operator action |
 
 The body is always `{"error": "message"}`. The CLI wraps it into its own
 stderr envelope (`{"error":{"code","message","http_status"}}`).

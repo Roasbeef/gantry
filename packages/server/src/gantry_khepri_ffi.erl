@@ -1,26 +1,36 @@
-%% Primitive Khepri, Ra and ETS calls for one controller VM. Every policy
-%% decision lives in Gleam (gantry/store.gleam): whether to bootstrap or
-%% join, the node-name marker, the snapshot size limit and when a quiet
-%% hint is trusted or dropped. This module only performs a call and reports
-%% its outcome. Elastic executors never join Erlang distribution or vote on
-%% this state.
+%% Primitive Khepri and Ra calls for one controller VM. Every policy decision
+%% lives in Gleam: whether to bootstrap or join, the node-name marker, which
+%% keys an operation reads, what a decision relied on and what it writes
+%% (gantry_core/layout, gantry/store). This module performs one read, one
+%% atomic compare-and-write, or one lock, and reports the outcome. Elastic
+%% executors never join Erlang distribution or vote on this state.
 %%
-%% Errors are `{error, Fault}` where Fault is the Gleam representation of
+%% A key is a list of binaries below the `queue` root. Reads return
+%% `{ok, none | {some, Bytes}}` and `{error, Detail}` where the detail is
+%% text, which the caller maps to a fault. Other calls return
+%% `{error, Fault}` where Fault is the Gleam representation of
 %% gantry/fault.Unavailable (`{unavailable, Detail}`) or Internal
 %% (`{internal, Detail}`).
+%%
+%% Mixed layouts cannot share a cluster. The leader runs `check_query/2` for
+%% every follower's empty poll, so every voter must run this release.
 -module(gantry_khepri_ffi).
 -export([start_system/1, local_node/0, directory_known/0, start_store/0,
-         join/1, sync_directory/0, create/1, ready/0, read/0, matches/1,
-         swap/2, hint_open/0, hint_read/0, hint_remember/1, hint_forget/1]).
+         join/1, sync_directory/0, ready/0, fence/0, get/1, many/1, list/1,
+         commit/2, legacy/0, seal_legacy/1, gated/2, check_query/2]).
 
 -define(SYSTEM, gantry_queue_ra).
 -define(STORE, gantry_queue).
--define(PATH, [queue_snapshot_v1]).
+-define(LEGACY, [queue_snapshot_v1]).
+-define(ROOT, <<"queue">>).
+%% Khepri's `#if_path_matches{regex = any}` condition, which matches a node
+%% and every node below it. The header's record has these two fields.
+-define(BELOW, {if_path_matches, any, undefined}).
+-define(GATE_WAIT, 15000).
 -define(TIMEOUT, 5000).
 %% The caller's wall bound. It exceeds ?TIMEOUT so that Khepri and Ra report
 %% their own timeouts before this wrapper abandons the call.
 -define(DEADLINE, 6000).
--define(QUIET, gantry_last_quiet_snapshot).
 
 %% Start the Khepri application and this node's Ra system under Dir.
 start_system(Directory) ->
@@ -31,9 +41,11 @@ start_system(Directory) ->
             name => ?SYSTEM, data_dir => Dir, wal_data_dir => Dir,
             names => ra_system:derive_names(?SYSTEM)},
         case ra_system:start(Config) of
-            {ok, _} -> {ok, nil};
-            {error, {already_started, _}} -> {ok, nil}
-        end
+            {ok, _} -> ok;
+            {error, {already_started, _}} -> ok
+        end,
+        [start_gate(Name) || Name <- gates()],
+        {ok, nil}
     end).
 
 local_node() -> atom_to_binary(node(), utf8).
@@ -71,16 +83,6 @@ sync_directory() ->
         {ok, nil}
     end).
 
-%% Initialize the snapshot unless some voter already did.
-create(Empty) ->
-    attempt(fun() ->
-        case khepri:create(?STORE, ?PATH, Empty, #{timeout => ?TIMEOUT}) of
-            ok -> {ok, nil};
-            {error, {khepri, mismatching_node, _}} -> {ok, nil};
-            Other -> failure(Other)
-        end
-    end).
-
 %% A gateway can probe a majority without transferring the queue snapshot.
 %% This OTP function is also available on voters running an older release.
 ready() ->
@@ -93,87 +95,239 @@ ready() ->
         end
     end).
 
-%% Read the snapshot bytes after Khepri's fence.
-read() ->
+%% Read one key from the local replica. A replica that lags returns an older
+%% value, which the commit's expectation refuses, so the read needs no fence.
+get(Key) ->
+    read_call(fun() -> one(path(Key)) end).
+
+%% Read several keys from the local replica, in the order asked.
+many(Keys) ->
+    read_call(fun() -> many_values(Keys, []) end).
+
+%% Read each key in turn, stopping at the first read that fails.
+many_values([], Values) -> {ok, lists:reverse(Values)};
+many_values([Key | Rest], Values) ->
+    case one(path(Key)) of
+        {ok, Value} -> many_values(Rest, [Value | Values]);
+        {error, _} = Error -> Error
+    end.
+
+%% Wait until this replica has applied everything committed so far, so a read
+%% that follows sees the effects of operations that finished on any voter.
+fence() ->
     with_deadline(fun() ->
-        case khepri:fence(?STORE, ?TIMEOUT) of
-            ok ->
-                case khepri:get(?STORE, ?PATH, #{favor => low_latency, timeout => ?TIMEOUT}) of
-                    {ok, Bytes} when is_binary(Bytes) -> {ok, Bytes};
-                    {ok, _} -> corrupt(<<"invalid durable queue snapshot">>);
-                    Other -> failure(Other)
-                end;
+        try khepri:fence(?STORE, ?TIMEOUT) of
+            ok -> {ok, nil};
             Other -> failure(Other)
+        catch Class:Why -> failure({Class, Why})
         end
     end).
 
-%% Ask the Ra leader, after it confirms its authority with a quorum, for the
-%% tree, then compare the snapshot's hash here. The query names only
-%% khepri_machine:get_tree/1, which every voter's Khepri exports, so a leader
-%% still running an older Gantry build answers it. A Gantry function run on the
-%% leader would crash an older leader's Ra server, because Ra applies the query
-%% without a catch.
-matches(Digest) ->
+%% Every key below Prefix that holds a value, with that value.
+list(Prefix) ->
+    read_call(fun() ->
+        case khepri:get_many(?STORE, path(Prefix) ++ [?BELOW], #{favor => low_latency, timeout => ?TIMEOUT}) of
+            {ok, Found} ->
+                {ok, [{unroot(Path), Value} || {Path, Value} <- maps:to_list(Found), is_binary(Value)]};
+            Other -> {error, detail(Other)}
+        end
+    end).
+
+one(Path) ->
+    case khepri:get(?STORE, Path, #{favor => low_latency, timeout => ?TIMEOUT}) of
+        {ok, Value} when is_binary(Value) -> {ok, {some, Value}};
+        {ok, _} -> {ok, none};
+        {error, {khepri, node_not_found, _}} -> {ok, none};
+        Other -> {error, detail(Other)}
+    end.
+
+%% Apply Writes if every expectation still holds, as one atomic step. A write
+%% is `{put, Key, Bytes}` or `{delete, Key}`. An expectation is
+%% `{is, Key, none | {some, Bytes}}` or `{keys, Prefix, Keys}`. With no writes
+%% the leader confirms the expectations through a quorum read instead, so an
+%% empty poll appends nothing to the log. A deadline leaves the outcome
+%% unknown, because the command may commit after the wrapper stops waiting.
+commit(Expects, Writes) ->
+    Es = [rooted_expect(E) || E <- Expects],
+    case Writes of
+        [] -> confirm(Es);
+        _ -> write(Es, [rooted_write(W) || W <- Writes])
+    end.
+
+confirm([]) -> {ok, accepted};
+confirm(Es) ->
     with_deadline(fun() ->
-        try ra:consistent_query(
-              {?STORE, node()}, {khepri_machine, get_tree, []}, ?TIMEOUT) of
-            {ok, Tree, _Leader} ->
-                case khepri_tree:find_matching_nodes(Tree, ?PATH, #{props_to_return => [payload]}) of
-                    {ok, #{?PATH := #{data := Bytes}}} when is_binary(Bytes) ->
-                        case crypto:hash(sha256, Bytes) =:= Digest of
-                            true -> {ok, accepted};
-                            false -> {ok, snapshot_changed}
-                        end;
-                    _ -> corrupt(<<"invalid durable queue snapshot">>)
-                end;
+        try ra:consistent_query({?STORE, node()}, {?MODULE, check_query, [Es]}, ?TIMEOUT) of
+            {ok, {ok, true}, _Leader} -> {ok, accepted};
+            {ok, {ok, false}, _Leader} -> {ok, stale};
+            {ok, {error, Why}, _Leader} -> failure(Why);
             {timeout, _} -> unavailable(<<"queue quorum read timed out">>);
             Other -> failure(Other)
         catch Class:Why -> failure({Class, Why})
         end
     end).
 
-%% Replace Expected with Proposed if the stored bytes are still Expected.
-%% A deadline leaves the outcome unknown, because the command may commit
-%% after the wrapper stops waiting.
-swap(Expected, Proposed) ->
+write(Es, Ws) ->
     with_deadline(fun() ->
-        try khepri:compare_and_swap(?STORE, ?PATH, Expected, Proposed, #{timeout => ?TIMEOUT}) of
-            ok -> {ok, accepted};
-            {error, {khepri, mismatching_node, _}} -> {ok, snapshot_changed};
+        try khepri:transaction(?STORE, fun() ->
+                case holds(Es) of
+                    true -> apply_all(Ws), accepted;
+                    false -> stale
+                end
+            end, rw, #{timeout => ?TIMEOUT}) of
+            {ok, Outcome} -> {ok, Outcome};
             Other -> failure(Other)
         catch Class:Why -> failure({Class, Why})
         end
     end).
 
-%% The controller owns one local hint, and the quorum remains the authority.
-hint_open() ->
-    case ets:whereis(?QUIET) of
-        undefined -> ets:new(?QUIET, [named_table, public, {read_concurrency, true}]);
+%% The transaction body. It runs on every member and from the log, so it
+%% calls only Khepri's transaction API and pure list functions.
+holds([]) -> true;
+holds([{is, Key, Want} | Rest]) ->
+    Have = case khepri_tx:get(Key) of
+               {ok, Value} when is_binary(Value) -> {some, Value};
+               _ -> none
+           end,
+    Have =:= Want andalso holds(Rest);
+holds([{keys, Prefix, Want} | Rest]) ->
+    Have = case khepri_tx:get_many(Prefix ++ [?BELOW]) of
+               {ok, Found} -> lists:sort([Path || {Path, Value} <- maps:to_list(Found), is_binary(Value)]);
+               _ -> []
+           end,
+    Have =:= lists:sort(Want) andalso holds(Rest).
+
+apply_all([]) -> ok;
+apply_all([{put, Key, Bytes} | Rest]) -> ok = khepri_tx:put(Key, Bytes), apply_all(Rest);
+apply_all([{delete, Key} | Rest]) -> ok = khepri_tx:delete(Key), apply_all(Rest).
+
+%% Run on the Ra leader through `ra:consistent_query/3`, with the machine
+%% state appended as the last argument. Ra applies a query without a catch, so
+%% a crash here would stop the leader's server. Every failure is returned.
+check_query(Es, MachineState) ->
+    try
+        Tree = khepri_machine:get_tree(MachineState),
+        {ok, lists:all(fun(E) -> holds_in(Tree, E) end, Es)}
+    catch Class:Why -> {error, {Class, Why}}
+    end.
+
+holds_in(Tree, {is, Key, Want}) ->
+    Have = case khepri_tree:find_matching_nodes(Tree, khepri_path:compile(Key), #{props_to_return => [payload]}) of
+               {ok, #{Key := #{data := Value}}} when is_binary(Value) -> {some, Value};
+               _ -> none
+           end,
+    Have =:= Want;
+holds_in(Tree, {keys, Prefix, Want}) ->
+    Pattern = khepri_path:compile(Prefix ++ [?BELOW]),
+    Have = case khepri_tree:find_matching_nodes(Tree, Pattern, #{props_to_return => [payload]}) of
+               {ok, Found} -> lists:sort([Path || {Path, #{data := Value}} <- maps:to_list(Found), is_binary(Value)]);
+               _ -> []
+           end,
+    Have =:= lists:sort(Want).
+
+path(Key) -> [?ROOT | Key].
+
+unroot([?ROOT | Key]) -> Key.
+
+rooted_expect({is, Key, Want}) -> {is, path(Key), Want};
+rooted_expect({keys, Prefix, Keys}) -> {keys, path(Prefix), [path(K) || K <- Keys]}.
+
+rooted_write({put, Key, Bytes}) -> {put, path(Key), Bytes};
+rooted_write({delete, Key}) -> {delete, path(Key)}.
+
+%% The queue snapshot an earlier release stored, if any. Booting imports it.
+legacy() ->
+    attempt(fun() ->
+        case khepri:get(?STORE, ?LEGACY, #{favor => consistency, timeout => ?TIMEOUT}) of
+            {ok, Bytes} when is_binary(Bytes) -> {ok, {some, Bytes}};
+            {ok, _} -> {ok, none};
+            {error, {khepri, node_not_found, _}} -> {ok, none};
+            Other -> failure(Other)
+        end
+    end).
+
+%% Replace the old snapshot with bytes an earlier release cannot decode, so
+%% that release refuses the store instead of creating an empty queue beside it.
+seal_legacy(Bytes) ->
+    attempt(fun() ->
+        case khepri:put(?STORE, ?LEGACY, Bytes, #{timeout => ?TIMEOUT}) of
+            ok -> {ok, nil};
+            Other -> failure(Other)
+        end
+    end).
+
+%% Run Fun while holding the named lock, so one controller's own operations
+%% that write the same counter do not lose to each other. A lock is only an
+%% ordering, never a decision: the commit's expectations still refuse a
+%% competing controller. The lock is released if Fun crashes or this process
+%% dies.
+gated(Name, Fun) ->
+    Gate = gate_name(Name),
+    Ref = make_ref(),
+    Gate ! {acquire, self(), Ref},
+    receive
+        {granted, Ref} ->
+            try Fun()
+            after Gate ! {release, Ref}
+            end
+    after ?GATE_WAIT ->
+        Gate ! {release, Ref},
+        receive {granted, Ref} -> Gate ! {release, Ref} after 0 -> ok end,
+        unavailable(<<"queue is busy">>)
+    end.
+
+gates() -> [gantry_gate_admission, gantry_gate_claiming, gantry_gate_finishing].
+
+gate_name(<<"admission">>) -> gantry_gate_admission;
+gate_name(<<"claiming">>) -> gantry_gate_claiming;
+gate_name(<<"finishing">>) -> gantry_gate_finishing.
+
+start_gate(Name) ->
+    case whereis(Name) of
+        undefined ->
+            Pid = spawn(fun() -> gate_loop(none, queue:new()) end),
+            true = register(Name, Pid);
         _ -> ok
-    end,
-    nil.
-
-%% The remembered digest, or an error when none is held or the table is gone.
-hint_read() ->
-    try ets:lookup(?QUIET, quiet) of
-        [{quiet, Digest}] -> {ok, Digest};
-        [] -> {error, nil}
-    catch error:badarg -> {error, nil}
     end.
 
-hint_remember(Digest) ->
-    try ets:insert(?QUIET, {quiet, Digest}) of
-        true -> nil
-    catch error:badarg -> nil
+%% A mutex with a first-come queue. It monitors the holder, so a crash
+%% releases it.
+gate_loop(Holder, Waiting) ->
+    receive
+        {acquire, Pid, Ref} ->
+            case Holder of
+                none -> gate_loop(grant(Pid, Ref), Waiting);
+                _ -> gate_loop(Holder, queue:in({Pid, Ref}, Waiting))
+            end;
+        {release, Ref} ->
+            case Holder of
+                {Ref, Mon} -> erlang:demonitor(Mon, [flush]), gate_next(Waiting);
+                _ -> gate_loop(Holder, queue:filter(fun({_, R}) -> R =/= Ref end, Waiting))
+            end;
+        {'DOWN', Mon, process, _, _} ->
+            case Holder of
+                {_, Mon} -> gate_next(Waiting);
+                _ -> gate_loop(Holder, Waiting)
+            end
     end.
 
-%% Drop the hint only if it still holds Digest, so a concurrent remember of
-%% a newer snapshot survives.
-hint_forget(Digest) ->
-    try ets:delete_object(?QUIET, {quiet, Digest}) of
-        true -> nil
-    catch error:badarg -> nil
+gate_next(Waiting) ->
+    case queue:out(Waiting) of
+        {{value, {Pid, Ref}}, Rest} -> gate_loop(grant(Pid, Ref), Rest);
+        {empty, Rest} -> gate_loop(none, Rest)
     end.
+
+grant(Pid, Ref) ->
+    Pid ! {granted, Ref},
+    {Ref, erlang:monitor(process, Pid)}.
+
+read_call(Fun) ->
+    case with_deadline(Fun) of
+        {error, {unavailable, Detail}} -> {error, Detail};
+        Other -> Other
+    end.
+
+detail(Reason) -> iolist_to_binary(io_lib:format("queue read failure ~P", [Reason, 5])).
 
 %% Khepri's preliminary query and Ra leader redirects can exceed their own
 %% timeouts. Bound the total request wait.
@@ -198,4 +352,3 @@ failure(Reason) ->
 
 unavailable(Detail) -> {error, {unavailable, Detail}}.
 
-corrupt(Detail) -> {error, {internal, Detail}}.

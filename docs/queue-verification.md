@@ -15,6 +15,7 @@ that can advance a branch to the tested candidate when its base matches.
 | Generated properties | Graph closure and ordering, invalid graphs, lease ownership, output paths, and serialization of reachable queue states. |
 | JSON fuzzing | Generated and mutated manifests, action defaults and input types, and completion tags and artifacts. QCheck shrinks a failure and prints the counterexample. |
 | Deterministic simulation | Production queue transitions and state codec against a virtual controller, worker receipts, and a Git ref. A single-lane harness asserts each event. A two-controller churn harness counts violations. |
+| Layout equivalence | The indexed layout against the whole-state transitions. The churn simulation replays every committed operation through `gantry_core/layout` on a reference store and compares the runs, proofs, serial, index entries, and receipt. It also plans a rival claim on the same image and requires that two claims issuing a lease cannot both commit. |
 | Live E2E | Real Khepri voters, worker journal, Docker, blob transport, and a bare Git remote. |
 | Load benchmark | Real controller HTTP, Ra/Khepri, Git and artifact paths, with latency, throughput, CPU and resident memory. |
 
@@ -105,16 +106,30 @@ reassigned for the heal to finish. After the heal the harness counts stuck
 leases, stuck landings, and runs that are neither finished nor waiting on an
 unfinished run ahead of them in their lane. All must be zero.
 
+The churn harness also runs the indexed layout beside the whole state. Each
+committed operation (`claim`, `expire`, `finish`, `record_preparation`,
+`landings`, `record_landing`, `retain`) is replayed through `gantry_core/layout`
+on `gantry_core/image`, the reference store. After each one the image must
+decode to exactly the whole state, with every `ready`, `active`, `waiting`,
+`holds`, `landing`, and `done` entry equal to what the runs derive, and the
+layout's receipt must equal the whole-state one. A difference counts as
+`layout_mismatches` and resynchronizes the image, so one bug counts once.
+Each claim also plans a rival claim on the same image, once for the same pool
+and once for another pool, and the rival must not commit over the first when
+both issue a lease. The reference store keeps the commit rule the Erlang bridge
+keeps, and `packages/server/test/gantry/commit_test.gleam` runs that rule
+against a real Khepri store.
+
 `scripts/queue-dst.sh growth N` drives N builds through the core with
 retention after each transition. Every fifth run is rejected with a 256 KiB
 reason. The largest encoded state stays at 5,188 bytes for 200 and for 2,000
-runs, so the 4 MiB store limit cannot be reached by history. The core caps a
+runs, so history does not grow the retained state. The core caps a
 reason at 1,024 bytes where it records it.
 
 Coverage-guided fuzzing mutates mask and operation bytes. It retains
 inputs that reach new instrumented lines in the production queue or
 protocol modules. This tests the controller's decision boundary.
-Khepri's actual CAS retries, filesystem behavior, worker custody, and
+Khepri's actual commit conflicts, filesystem behavior, worker custody, and
 Git commands are exercised in the live harness. The virtual Git
 fixture represents one branch as a linear history in the single-lane
 harness.
@@ -143,6 +158,20 @@ actions on failure produced runs with pending actions in a failed run.
 Removing the attempt bound left leases stuck after the heal. Dropping the
 proof index in `retain` lost proofs in 221 seeds. The TLA+ model fails on
 the corresponding mutations listed in its README.
+
+The indexed layout has its own mutations. Dropping the entry that lists a run
+under its ready pool gave 2,427 `layout_mismatches` in 200 seeds. Dropping the
+expectations on the runs a claim loaded gave 449 in 300 seeds. Dropping the
+serial expectation gave 752 in 300 seeds, all from the rival claim in another
+pool, because two claims that touch different runs conflict only on the serial.
+Re-running the queue mutations above against the layout gave the same result:
+a stale acceptance gave 17 `stale_acceptances` and 6 failing unit tests in 300
+seeds, a held lane offered again gave 7,885 `lane_overlaps`, a retention that
+drops any oldest run gave 29 `retention_dropped_live` and 29
+`layout_mismatches`, a failure that no longer skips pending actions gave 1,780
+`pending_in_failed`, a lease attempt bound that never trips gave 281
+`stuck_runs`, and a retention that drops the proof index gave 353
+`retention_lost_proofs` and 353 `layout_mismatches`.
 
 Earlier measurements from OTP `cover` and `tprof` are not repeated here,
 because the instrumented code and fixture changed. Rerun the guided

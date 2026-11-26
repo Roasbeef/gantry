@@ -21,7 +21,7 @@ flowchart TB
     subgraph controller["Controller"]
         API["http_api.handle<br/>api.build / claim / finish"]
         REC["reconcile.tick"]
-        TX["store.change"]
+        TX["store.claim / admit / finish"]
     end
     subgraph core["gantry_core"]
         GRAPH["graph.compile"]
@@ -35,7 +35,7 @@ flowchart TB
     end
     subgraph adapters["Controller adapters"]
         PREP["prepare.build / pin / candidate"]
-        RA["gantry_khepri_ffi<br/>swap"]
+        RA["gantry_khepri_ffi<br/>commit"]
         BLOB["blobs.put / get"]
         GIT["submit.reconcile"]
     end
@@ -44,7 +44,7 @@ flowchart TB
     PREP -->|"archive"| BLOB
     API -->|"claim or result"| TX
     TX -->|"transition"| QUEUE
-    TX -->|"CAS"| RA
+    TX -->|"plan, commit"| RA
     REC -->|"proposal"| TX
     REC -->|"intent"| GIT
     SLOT -->|"journal"| CUSTODY
@@ -68,9 +68,9 @@ domain types, and construct the Docker environment from its allowlist.
 
 | Component | Responsibilities | Effect or state owner it calls |
 | --- | --- | --- |
-| `http_api.handle`, `api` | Role checks, request decoding, admission and receipt responses | `prepare`, `store.change`, and `blobs` |
+| `http_api.handle`, `api` | Role checks, request decoding, admission and receipt responses | `prepare`, `store`, and `blobs` |
 | `graph`, `queue` | Pure graph closure, cache keys, lease decisions, and submission transitions | Controllers supply data and persist the resulting `State` |
-| `store`, `gantry_khepri_ffi` | Quorum reads and atomic queue replacement | Khepri and its Ra system |
+| `layout`, `store`, `gantry_khepri_ffi` | The keys each operation reads, the plan it decides, and one atomic compare-and-write | Khepri and its Ra system |
 | `gantry/worker`, `worker/custody` | Slot lifecycle, journaled assignment and receipt, and publication replay | SQLite journal in the worker directory |
 | `worker/docker` | Input staging, Docker execution, output collection, and cleanup | Docker CLI through an Erlang port |
 | `worker/controllers` | Bounded HTTP requests, controller failover, and input digest checks | Gun through the HTTP FFI |
@@ -104,7 +104,7 @@ sequenceDiagram
         Replica->>Replica: Sync and publish marker
     end
     Replica-->>Store: Replica opened
-    Store->>Store: Ensure queue_snapshot_v1
+    Store->>Store: Ensure the indexed layout, importing queue_snapshot_v1
     Store-->>Main: Ready
     Main->>Reconciler: Start periodic Reconcile
     Main->>HTTP: Bind 127.0.0.1
@@ -122,7 +122,7 @@ singleton queue after losing its Ra record.
 `api.build` prepares a graph and its source archives from the requested
 commit. `Plan` returns the action closure. `Run` admits an ordered set
 of `Work` records. The pure core decides an action's phase using its
-prerequisites and the current queue snapshot.
+prerequisites and the runs the operation reads.
 
 ```mermaid
 stateDiagram-v2
@@ -184,7 +184,7 @@ flowchart TB
    for ready work in enrollment order ([how work is spread](../scheduling.md)). A compatible action requires passing results
    for both edge types. Only `deps` supplies files to the cache key.
    A cache hit reuses the stored proof. A miss creates a lease in the
-   same `store.change` that advances the queue serial.
+   same transaction that advances the queue serial.
 3. **Execute.** `slot.claim` records the assignment in SQLite.
    `docker.execute` removes any resources left under the attempt's name,
    stages input blobs after `controllers.fetch` verifies their digests,
@@ -335,13 +335,14 @@ the exact heads that passed if a PR changes during that interval.
 
 ## Storage
 
-Khepri stores one `State`. The shared filesystem holds the large
-objects referenced by that state. Each worker keeps a private SQLite
+Khepri stores each run under its own key, with small indexes beside it
+([layout](../adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-indexed-layout)).
+The shared filesystem holds the large objects the runs reference. Each worker keeps a private SQLite
 journal for its active assignment and unpublished result.
 
 | Store | Owner and key | Data |
 | --- | --- | --- |
-| Khepri | `gantry_khepri_ffi`, path `queue_snapshot_v1` | Encoded `State` with runs, action phases, proofs, and submission intents |
+| Khepri | `gantry_core/layout`, keys below `queue/` | One record per run with its action phases and submission intent, the proofs by recipe, the counters, and the `ready`, `active`, `waiting`, `holds`, `landing`, and `done` indexes |
 | Shared filesystem | `blobs.put`, `objects/<digest>` | Source archives, output bytes, and logs addressed by SHA-256 |
 | Shared filesystem | `git.preserve`, `git/<repo>/<commit>.bundle` | Candidate objects required beyond the pinned base |
 | Worker SQLite | `worker/custody`, `custody.sqlite3` in the worker directory | Slot identity, assignments, receipts, and upload spool |
@@ -374,18 +375,22 @@ attempt row and clears the upload spool in one transaction. Both the queue
 and the journaled receipt refer to uploaded bytes by digest.
 [Worker journal schema](../../packages/server/priv/worker-schema.sql)
 
-`store.change` computes a pure proposal from a fenced local snapshot.
-A mutation compares and swaps the exact snapshot bytes through Khepri.
-An unchanged proposal reads the tree through a Ra consistent query, which
-the leader answers only after it confirms its authority with a majority, and
-the controller compares the snapshot's SHA-256 with the expected bytes. The
-query names only Khepri's own `get_tree`, so a leader running an older
-Gantry build can answer it during a rolling upgrade. A conflict causes
-the store to rebuild the proposal, with up to eight total attempts.
-When every action in a snapshot is terminal, a controller can remember
-its digest locally. A worker poll first checks that digest through the
-same consistent query. A match proves there is no lease to issue or
-replay. A miss runs the normal claim decision.
+An operation in `store` reads the few keys it needs from the local replica.
+The core selects the runs it can affect (the expired ones, the worker's own
+lease, the oldest ready ones, one lane), applies the unchanged transition to
+exactly those, and returns a plan: the keys the decision relied on with the
+bytes it saw, the keys to write, and the receipt. A plan commits in one Khepri
+transaction that compares every expected key and, only if all match, applies
+every write, so a claim still commits its lease, the serial, and the run's
+index entries together. A plan that writes nothing, such as an empty poll, is
+confirmed by a Ra consistent query that the leader answers after a majority
+confirms its authority, and it appends nothing to the log. A stale plan makes
+the store read again, with up to eight attempts and a short growing pause
+(`queue contention exceeded retry budget` after the last).
+Operations that write the same counter (`admission`, `claiming`, `finishing`)
+hold a lock in the controller, so its own requests do not lose races to each
+other. The lock decides nothing, and the commit still refuses a competing
+controller. Retention commits in batches of 250.
 The controller allows up to 64 MiB per blob. It syncs object bytes
 before atomic rename and syncs the containing directory before
 returning a digest. Cache reuse takes the proof from a recorded
@@ -396,18 +401,18 @@ live runs and cached proofs.
 
 ### Bounds on retained state
 
-The queue snapshot has a 4 MiB ceiling, and a mutation that would pass it is
-refused with HTTP 500. Two bounds keep it far below that. Text from outside
-(a worker's rejection reason, a provider's denial) is capped at 1024 bytes
-where the queue records it. The reconciler on every controller then trims the
-snapshot once a minute (`queue.retain`): it drops the oldest terminal runs
+Three bounds keep the replicated state small. Text from outside (a worker's
+rejection reason, a provider's denial) is capped at 1024 bytes where the queue
+records it. The reconciler on every controller trims history once a minute
+(`queue.retain`, through `layout.retain`): it drops the oldest terminal runs
 beyond `[retention] keep_runs` and the oldest remembered proofs beyond
 `keep_proofs` in `controller.toml`. The defaults are 200 and 1000, and the
-accepted ranges are 1 to 1000 and 1 to 5000, which keep a full
-snapshot of typical runs under the 4 MiB ceiling. A run that is not terminal, that
+accepted ranges are 1 to 1000 and 1 to 5000. A run that is not terminal, that
 holds a lane, or that waits for one is never dropped. A dropped run loses its
-status, and reuse continues from the proof index until its proofs are
-dropped too.
+status, and reuse continues from the proof index until its proofs are dropped
+too. Last, the queue holds at most `layout.max_runs` runs (10,000) at once,
+finished or not: admission past that is refused as unavailable until retention
+or the workers free one. The earlier 4 MiB snapshot ceiling is gone.
 
 Blobs and candidate bundles on the shared filesystem are not collected. They
 grow with every run until an operator prunes them.
@@ -419,8 +424,8 @@ propose changes concurrently.
 
 | Process or service | Owns |
 | --- | --- |
-| Mist request handler | The request, its validation, and a proposal submitted to `store.change` |
-| Khepri and Ra | The committed queue snapshot and ordering of accepted replacements |
+| Mist request handler | The request, its validation, and a plan submitted through `store` |
+| Khepri and Ra | The committed keys and the order in which plans with matching expectations apply |
 | Static supervisor | The Mist listener and the reconciler. It restarts whichever crashes, and past five restarts in a minute it exits so the VM stops |
 | Weft reconciler per controller | Its periodic `Reconcile` message, its per-intent backoff table, and sequential provider calls for the intents it received |
 | Git mirror lock | One repository's persistent bare mirror, held by one request or reconciler attempt at a time |
@@ -465,10 +470,14 @@ workflow comments on a disposable, unprotected target branch
 
 - A deployment with protected-branch rules needs its own pilot, using the
   controller identity it will run with. This is the only GitHub item left.
-- The queue is one snapshot with a whole-document swap. The benchmark has met
-  the reconsideration trigger of [ADR 001](../adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-benchmark-meets-the-reconsideration-trigger)
-  (on the four-vCPU benchmark host, throughput saturates near 20 actions per second with 100 repositories),
-  and the indexed layout is not built.
+- The queue is stored as one key per run with small indexes
+  ([ADR 001](../adr/001-khepri-owns-queue-decisions.md#addendum--2026-11-24--the-indexed-layout)).
+  On the four-vCPU benchmark host one voter holds 100 actions per second across
+  100 repositories with a ready-to-dispatch p99 of 145 ms. Three voters on the
+  same host hold 75 and saturate before 100
+  ([measurements](../controller-load.md#the-indexed-layout-9f273c1)).
+  A claim reads its pool's `ready` listing, and retention reads the `done`
+  listing, so each grows with the backlog it lists.
 - Loom's executor is not used. [ADR 003](../adr/003-gantry-docker-worker.md)
   records why, and what an interop proof would need to show.
 - No cancel route, workspace overlay, event cursor, resource reservation,

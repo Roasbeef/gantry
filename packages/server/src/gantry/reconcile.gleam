@@ -123,13 +123,12 @@ fn maintain_queue(state: State, now: Int) -> State {
 /// or its refusal, and back off a group whose outcome is unknown.
 fn prepare_waiting(state: State, now: Int) -> State {
   // A read is enough, because recording re-checks the lane under the swap.
-  case store.read() {
+  case store.preparations() {
     Error(reason) -> {
       log_failure("cannot read waiting groups", reason)
       state
     }
-    Ok(snapshot) -> {
-      let waiting = queue.preparations(snapshot)
+    Ok(waiting) -> {
       let names = list.map(waiting, queue.preparation_run)
       let kept =
         dict.filter(state.preparing, fn(name, _) { list.contains(names, name) })
@@ -189,11 +188,7 @@ fn prepare_one(
     prepare.Refusal(failure) -> Error(failure)
   }
 
-  store.change(fn(state) {
-    queue.record_preparation(state, preparation, recorded)
-    |> result.map(fn(next) { #(next, Nil) })
-    |> result.map_error(fault.Conflict)
-  })
+  store.record_preparation(preparation, recorded)
 }
 
 /// Drop finished runs and proofs beyond the configured bounds once per
@@ -210,10 +205,7 @@ fn retain_finished(state: State, now: Int) -> State {
   case due {
     False -> state
     True -> {
-      let outcome =
-        store.change(fn(snapshot) {
-          Ok(#(queue.retain(snapshot, state.cfg.retention), Nil))
-        })
+      let outcome = store.retain(state.cfg.retention)
 
       // A failed pass is logged and tried again at the next interval.
       case outcome {
@@ -230,7 +222,7 @@ fn retain_finished(state: State, now: Int) -> State {
 fn tick(state: State, now: Int) -> State {
   // An unreadable queue changes nothing. Otherwise each due intent gets an
   // attempt, and intents that left the queue lose their retry entries.
-  case store.change(fn(snapshot) { Ok(queue.landings(snapshot)) }) {
+  case store.landings() {
     Error(reason) -> {
       log_failure("cannot read landing intents", reason)
       state
@@ -350,11 +342,7 @@ fn reconcile_one(cfg: Config, intent: queue.Intent) -> Result(Nil, Fault) {
     submit.Refused(block) -> Error(block)
   }
 
-  store.change(fn(state) {
-    queue.record_landing(state, intent, recorded)
-    |> result.map(fn(next) { #(next, Nil) })
-    |> result.map_error(fault.Conflict)
-  })
+  store.record_landing(intent, recorded)
 }
 
 /// Log one reconcile failure at the level its kind deserves. A dependency
