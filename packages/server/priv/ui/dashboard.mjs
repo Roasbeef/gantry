@@ -10,14 +10,14 @@
    input 074a11524209d0262bb884c059983262010377122d90ee3157f8bf7350777c6f  packages/core/src/gantry_core/queue.gleam
    input c06169cb0ae9fd68ee3c54fba9e89abb8ae750b9beef4954588b60e58d5b5a8f  packages/core/src/gantry_core/request.gleam
    input 15be5ddc8d274159b8053badb1a4ac3b27a0aa53381aaa94ea4ced3f3384e678  packages/dashboard/src/dashboard.gleam
-   input ba70bb8ff4e3ffbf9d9931ebc6e4ba1b2e6c48bd5a4306867cfe221c13ae5996  packages/dashboard/src/dashboard/board.gleam
+   input e3975cd4256362e692fe732259f54b40ab70aa45231956246d367164653fb0fc  packages/dashboard/src/dashboard/board.gleam
    input 48573165a8f3cab96eb6d2b3ada5ac605400d99f21d3eb827b09ec69517c44e7  packages/dashboard/src/dashboard/fleet_view.gleam
    input ba527ffe1b9ae0e19cd9ac0b12e931c5a241d1195d8e9771f8396f766dfb9229  packages/dashboard/src/dashboard/history.gleam
    input 35dbc8aefb296758e1fa6ec57c09091e7af9c4ea2719ed08c57ed10c51c6dd41  packages/dashboard/src/dashboard/internal/browser_ffi.mjs
    input a67d8269d45e96c8dd0f901043039d0cb30cebec1ae50e297ffd8c610411e184  packages/dashboard/src/dashboard/internal/ffi_browser.gleam
    input cf30ed7b363de4727435a86dec32428d936338de504dde0d0e64921e62c3b0e6  packages/dashboard/src/dashboard/layout.gleam
    input 99567f39669f71d188ee792cef7dfbfc1619efb036acd5fb68c140f9c2c50ae0  packages/dashboard/src/dashboard/model.gleam
-   input 35901edcf38ac6bdd304234f656468fc12145c6c4d81ca688d0407a7b978b7ab  packages/dashboard/src/dashboard/view.gleam
+   input cc79d0d8a45d91d5943e5b65ca9ba4d3e778646f80fbf15bda53c1b64580cec8  packages/dashboard/src/dashboard/view.gleam
    body 4a24b6ee9eea883337c6aad0c273a17764eb816137a7bd6f5b0509deb7f518d3
 */
 /* --- generated body: the digests above cover everything below this line --- */

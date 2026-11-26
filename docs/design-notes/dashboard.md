@@ -1,7 +1,8 @@
 # Dashboard: the pressure board
 
-**Status:** built on branch `dashboard`, not merged. Two design councils
+**Status:** built on branch `dashboard`, not merged. Three design councils
 ruled on it, and the rulings, the dissent, and the screenshots are below.
+The current version is [v3](#v3-the-fleet-over-time).
 
 ## The question
 
@@ -34,9 +35,10 @@ What the snapshot still cannot say, and what the page shows instead:
 
 - **Step times.** Steps carry no timestamps. A lease's grant time follows
   from its deadline, which the core sets once to the grant time plus the
-  timeout plus `queue.lease_slack` and never renews (`fleet.granted`). The page
-  times a finished action only if it saw the action leased (`timing.observe`),
-  to within one poll. An action that finished before the page opened says so.
+  timeout plus `queue.lease_slack` and never renews (`fleet.granted`). v1 and
+  v2 timed an action only if the page saw it leased. v3 reads the
+  controller's lease history instead (see v3 below), and an action that
+  finished before that history begins says so.
 - **Leased versus running.** No message marks the start of an action after
   its lease, so both appear as `active`.
 - **Presence in a quorum.** Presence is per controller and in memory, because
@@ -155,13 +157,109 @@ ones.
 ![A failed run opens on its log](dashboard/v2-desktop-failed-run.jpg)
 ![Ribbon at 390 px](dashboard/v2-mobile-390-runs.jpg)
 
+## v3: the fleet over time
+
+A review of the v2 screenshots raised five points. First, nothing answered
+"saturated since when". Second, a run's cells read as an arbitrary grid,
+and a run that had started still said "pending". Third, three things were
+noise: the empty lane glyph on plain builds, pool verdicts drawn twice (in
+the header chips and in the rail's cards), and slots that were not grouped
+by host. Fourth, the empty detail pane should show fleet facts. Fifth, the
+mobile header truncated. The first point depends on action start and
+finish times that the queue does not record, so that question went to a
+council. The other points are page changes that need no new data, and they
+were made directly.
+
+### Third council: where the times come from
+
+The options were controller memory (a bounded event log for each
+controller, served in `/v1/fleet`), durable step times in the queue image,
+and history kept only in the client.
+
+**Ruling: controller memory, unanimous.** Client history fails the first
+criterion by construction: it starts empty on every page load, so it cannot
+say since when. Durable times would put a clock into `queue.finish` and
+change the step codec, the snapshot format, the churn oracle, and the model.
+Those are the files the indexed-layout and worker-drain work is changing
+now, and the times would only be displayed. Controller memory follows the
+pattern presence already uses and leaves the queue untouched. Because the
+live deployment has one controller, its history is complete there.
+
+**Requirements the judge attached**, all built:
+
+- `since` is served, and the page draws the time before it as unknown,
+  never as idle. The axis marks where the history starts.
+- A grant is recorded only after the store commits the claim, and is keyed
+  by its lease serial, so a replayed poll adds nothing
+  (`api.claim`, `gantry_history_ffi.erl`).
+- A lapse is inferred from a grant that has no result and whose lease is no
+  longer active (`history.bar`). Nothing was added to `queue.gleam`.
+- A lease the history no longer holds, after a restart, is drawn from the
+  grant time its deadline implies (`history.recovered`).
+- Ready work is sampled for each pool when the snapshot is read
+  (`api.fleet`), so samples exist only while a page watches. A sample gap
+  ends a "since".
+- The wire types in `gantry_core/fleet` do not name their source, so durable
+  step times can fill them later without a change to the page.
+
+**Dissent.** None on the pick. The truth seat ranked durable times second,
+as the most truthful source in principle. All three seats would move to
+durable times in any of three cases: claims spread over several voters,
+controllers that restart inside the window, or the indexed-layout and
+worker-drain work merging, which would leave those files quiet.
+
+**Not settled by the council: chips versus rail.** The fit seat called it a
+page-only choice that does not separate the options. The header chips stay,
+because they are what keeps a pool's verdict visible on every tab and at
+390 px. Each chip now says how long work has waited (`for 3m 10s`). The
+rail's pool cards were dropped, and the rail now lists hosts and their
+slots.
+
+### What v3 shows
+
+- **Occupancy**, across the top: a lane per slot under its host (with the
+  host's busy count), each lease a bar from grant to result in its
+  outcome's colour (running, passed, failed, lapsed). Each bar links to its
+  action. Beside the lanes are sparklines for the ready backlog and for
+  results per minute.
+- **The run strip by wave**: one column of cells per layer of the graph, up
+  to six high, joined left to right. The critical path is underlined. It is
+  the longest chain by recorded duration, or by step count when nothing has
+  finished. The graph in the detail pane traces the same path in amber.
+- **Progress**: a started run's pill reads `running 5/14`, finished over
+  total.
+- **Fleet summary** when no run is chosen: the rate over five minutes,
+  lease outcomes in the window, cache reuse, how long each backed-up pool
+  has waited, and the slowest leases and recent failures, each linked to its
+  action. A run is no longer chosen for the reader, and `← Fleet` returns to
+  the summary.
+- **Mobile**: the link reads `live`, the first tab is Fleet (occupancy and
+  hosts), and plain builds leave no gutter.
+
+From a local controller with six slots on two hosts (`alpha` with 4 and
+`beta` with 2; `gpu` has no slot). The runs were a 12-shard fan-out, a
+failing lint target, a starved `gpu` run, a rerun that came entirely from
+cache, two groups in one lane, and three more fan-outs on new revisions:
+
+![v3 at 1440 px: occupancy, chips with durations, fleet summary](dashboard/v3-desktop-fleet.jpg)
+![v3: a finished fan-out with its critical path in amber](dashboard/v3-desktop-critical-path.jpg)
+![v3 at 390 px: runs](dashboard/v3-mobile-390-runs.jpg)
+![v3 at 390 px: fleet](dashboard/v3-mobile-390-fleet.jpg)
+
+The long `prep` bars and the two-minute entries under Slowest come from a
+startup burst on this Mac. Docker Desktop's file sharing could not yet see
+freshly staged files when six workers started containers at once, so the
+first leases retried for about two minutes. Linux workers are not affected.
+The bars show the lease time exactly as the controller recorded it.
+
 ## How it is built
 
 - `packages/dashboard` is a Lustre 5.7.1 application on the JavaScript
   target, pinned to the versions Loom's `web_client` uses. Every decision is
   in modules that import no Lustre: `board` for cells, layers, pool verdicts,
-  slot occupation and diagnoses, `model` for the page's transitions, `timing`
-  for durations the page observed, and `layout` for the graph's positions.
+  slot occupation and diagnoses, `model` for the page's transitions, `history`
+  for the timeline, durations, and critical path, and `layout` for the
+  graph's positions.
   Their tests run under Node without a page, which is Loom's split.
 - `scripts/dashboard_assets.sh` bundles the package with `lustre_dev_tools`
   into `packages/server/priv/ui` and stamps each input's digest and the
@@ -179,13 +277,17 @@ ones.
 
 ## Open
 
-- **Step timestamps.** Recording when an action was leased and finished in
-  the queue image would give real durations, and would make a slot timeline
-  worth adding as a second view. That is a change to the durable format and
-  to the model, so it needs its own proposal.
-- **Presence across voters.** Replicating presence would cost a Ra write per
+- **Durable step times.** v3's history is one controller's memory: it is
+  lost on restart and partial in a quorum. Recording grant and result times
+  in the queue image would fix both and fill the same `fleet.Event` types.
+  It changes the durable format and the model, so it should follow snapshot
+  versioning and the indexed layout.
+- **Cache reuse over time.** A reuse happens inside a claim and records no
+  event, so the summary gives the cache rate over retained runs, not per
+  minute.
+- **Presence and history across voters.** Replicating presence would cost a Ra write per
   idle poll. A cheaper route is for each voter to answer `GET /v1/fleet` with
-  presence it collects from its peers on request.
+  presence and history it collects from its peers on request.
 - **A push stream.** Polling every 2 s suits the scale here. A stream would
   need cookie or ticket authentication, because `EventSource` cannot set a
   header.

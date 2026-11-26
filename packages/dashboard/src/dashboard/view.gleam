@@ -826,7 +826,7 @@ fn action_pane(
 ) -> Element(Msg) {
   let label = board.cell_label(action.cell)
 
-  // The timing record decides how the action's time reads.
+  // The lease history decides how the action's time reads.
   let known = case m.history {
     Some(h) -> history.duration(h, run.id, action.name)
     None -> None

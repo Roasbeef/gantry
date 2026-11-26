@@ -211,9 +211,10 @@ the third slice.
 10. **Finish the dashboard.** Set `GANTRY_VIEW_TOKEN` and `host` labels on
     the live fleet and watch a Loom group through `/ui`, with the user's
     go-ahead. Then the open items in the
-    [design note](design-notes/dashboard.md#open): step timestamps in the
-    queue image (a format change, so after snapshot versioning), presence
-    gathered across voters, and a push stream. **Exit:** an operator names
+    [design note](design-notes/dashboard.md#open): durable step times in the
+    queue image to replace the per-controller lease history (a format
+    change, so after snapshot versioning and the indexed layout), presence
+    and history gathered across voters, and a push stream. **Exit:** an operator names
     a stuck run's cause from the board alone. **Guard:** `/v1/fleet` stays
     read-only and the view token cannot admit work.
 

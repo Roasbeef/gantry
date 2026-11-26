@@ -15,8 +15,8 @@
 ////
 //// ## What the snapshot cannot say
 ////
-//// Steps carry no timestamps, so a finished action's duration is known only
-//// when `timing` saw it leased (see `observe`). A lease records no start
+//// Steps carry no timestamps, so durations come from the controller's lease
+//// history, which `history` reads. A lease records no start
 //// beyond its grant, so a leased action and a running one look the same and
 //// the board calls both `Active`. A slot's pool is known only once this
 //// controller served one of its polls, so a slot it never heard from is
