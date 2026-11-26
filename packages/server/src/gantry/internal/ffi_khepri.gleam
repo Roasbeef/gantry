@@ -160,15 +160,16 @@ pub fn commit(
 @external(erlang, "gantry_khepri_ffi", "legacy")
 pub fn legacy() -> Result(Option(String), Fault)
 
-/// Remove the earlier release's snapshot after the layout holds it.
+/// Replace the earlier release's snapshot with bytes it cannot decode, once
+/// the layout holds its contents.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // ffi_khepri.forget_legacy()
+/// // ffi_khepri.seal_legacy(store.sealed_snapshot)
 /// ```
-@external(erlang, "gantry_khepri_ffi", "forget_legacy")
-pub fn forget_legacy() -> Result(Nil, Fault)
+@external(erlang, "gantry_khepri_ffi", "seal_legacy")
+pub fn seal_legacy(bytes: String) -> Result(Nil, Fault)
 
 /// Run `work` while holding the named lock: `admission`, `claiming` or
 /// `finishing`. The lock orders one controller's own operations. It decides

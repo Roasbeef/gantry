@@ -161,36 +161,90 @@ fn open_replica(directory: String, seed: String) -> Result(Nil, Fault) {
   initialize()
 }
 
-/// Create the layout, importing an earlier release's snapshot, unless a
-/// voter already did. The marker is the last key written, in the same
-/// transaction as everything it describes, and the transaction expects it to
-/// be absent, so the first voter to boot wins and the others find it.
+/// What a booting voter does about the queue's durable format.
+pub type Upgrade {
+  /// The layout is in place and the old snapshot is sealed or absent.
+  Current
+
+  /// The layout is in place, and the old snapshot still holds the queue it
+  /// was imported from, because a boot stopped between the two steps.
+  Seal
+
+  /// There is no layout yet. Import the old snapshot, or start empty.
+  Import
+}
+
+/// The bytes that replace the old snapshot once it is imported. An earlier
+/// release cannot decode them, so it refuses to serve the queue instead of
+/// starting an empty one beside it.
+pub const sealed_snapshot = "{\"format\":\"indexed-v1\",\"moved\":\"queue/\"}"
+
+/// Decide what a booting voter does from the layout's format marker and the
+/// old snapshot. A marker naming a format this release does not know refuses
+/// to start, so a rollback past a format change fails by name.
+///
+/// | Marker | Old snapshot | Decision |
+/// | --- | --- | --- |
+/// | `indexed-v1` | absent or sealed | `Current` |
+/// | `indexed-v1` | a queue | `Seal` |
+/// | another name | any | refuse |
+/// | absent | sealed | refuse, the layout was lost |
+/// | absent | absent or a queue | `Import` |
+///
+/// ## Examples
+///
+/// ```gleam
+/// assert store.upgrade(None, None) == Ok(store.Import)
+/// ```
+pub fn upgrade(
+  marker: Option(String),
+  legacy: Option(String),
+) -> Result(Upgrade, String) {
+  let sealed = legacy == Some(sealed_snapshot)
+
+  // The marker names the format. Without one, only an unsealed store imports.
+  case marker {
+    Some(name) if name == layout.format_value ->
+      Ok(case legacy == None || sealed {
+        True -> Current
+        False -> Seal
+      })
+    Some(name) -> Error("unknown queue format " <> name)
+    None if sealed -> Error("queue format marker missing after import")
+    None -> Ok(Import)
+  }
+}
+
+/// Bring the store to the layout this release reads, importing an earlier
+/// release's snapshot, unless a voter already did. The marker is written in the
+/// same transaction as everything it describes, and the transaction expects it
+/// to be absent, so the first voter to boot wins and the others find it.
 fn initialize() -> Result(Nil, Fault) {
   use legacy <- result.try(ffi_khepri.legacy())
   use marker <- result.try(
     ffi_khepri.get(layout.format_key())
     |> result.map_error(fault.Unavailable),
   )
+  use decision <- result.try(
+    upgrade(marker, legacy) |> result.map_error(fault.Internal),
+  )
 
-  // The marker says the layout exists, and the old snapshot says there is
-  // something to import or to clean up.
-  case marker, legacy {
-    Some(_), None -> Ok(Nil)
-
-    // An earlier import finished and the delete after it did not.
-    Some(_), Some(_) -> ffi_khepri.forget_legacy()
-    None, _ -> import_snapshot(legacy)
+  // Each decision ends with the layout in place and the old snapshot sealed.
+  case decision {
+    Current -> Ok(Nil)
+    Seal -> ffi_khepri.seal_legacy(sealed_snapshot)
+    Import -> import_snapshot(legacy)
   }
 }
 
 /// Create the layout from an earlier release's snapshot, or from an empty
-/// queue when there is none, and then delete the snapshot. Losing the race to
+/// queue when there is none, and then seal the snapshot. Losing the race to
 /// another voter is success, because that voter's layout is the same.
 fn import_snapshot(legacy: Option(String)) -> Result(Nil, Fault) {
   use state <- result.try(decode_snapshot(legacy))
   use _ <- result.try(commit(layout.bootstrap(state)))
   use <- bool.guard(legacy == None, Ok(Nil))
-  ffi_khepri.forget_legacy()
+  ffi_khepri.seal_legacy(sealed_snapshot)
 }
 
 /// The queue an earlier release stored, or an empty one when it stored none.

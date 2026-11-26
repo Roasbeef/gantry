@@ -410,3 +410,27 @@ pub fn replaying_a_lease_does_not_read_the_ready_index_test() {
   assert layout.receipt(plan) == Some(job)
   assert list.length(layout.expects(plan)) < 20
 }
+
+pub fn an_in_flight_lease_survives_the_import_and_finishes_test() {
+  // An earlier release leased one run and finished another.
+  let both =
+    ["done", "running", "waiting"]
+    |> list.fold(start(), fn(both, id) { admit(both, id, False) })
+  let #(both, first) = claim(both, "w1", 0)
+  let assert Some(job) = first
+  let both = finish(both, job)
+  let #(both, second) = claim(both, "w2", 1)
+  let assert Some(in_flight) = second
+
+  // The new release imports that state, and the worker's result arrives.
+  let imported = Both(both.state, audit.import_state(both.state))
+  let finished = finish(imported, in_flight)
+  assert list.map(finished.state.runs, queue.phase)
+    == [queue.PhasePassed, queue.PhasePassed, queue.PhasePending]
+
+  // The run that never started is claimed under the next serial.
+  let #(_, third) = claim(finished, "w3", 2)
+  let assert Some(next) = third
+  assert next.run == "waiting"
+  assert queue.lease_serial(next.lease) > queue.lease_serial(in_flight.lease)
+}

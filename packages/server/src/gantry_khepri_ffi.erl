@@ -17,7 +17,7 @@
 -module(gantry_khepri_ffi).
 -export([start_system/1, local_node/0, directory_known/0, start_store/0,
          join/1, sync_directory/0, ready/0, fence/0, get/1, many/1, list/1,
-         commit/2, legacy/0, forget_legacy/0, gated/2, check_query/2]).
+         commit/2, legacy/0, seal_legacy/1, gated/2, check_query/2]).
 
 -define(SYSTEM, gantry_queue_ra).
 -define(STORE, gantry_queue).
@@ -246,10 +246,11 @@ legacy() ->
         end
     end).
 
-%% Remove the old snapshot once the layout holds its contents.
-forget_legacy() ->
+%% Replace the old snapshot with bytes an earlier release cannot decode, so
+%% that release refuses the store instead of creating an empty queue beside it.
+seal_legacy(Bytes) ->
     attempt(fun() ->
-        case khepri:delete(?STORE, ?LEGACY, #{timeout => ?TIMEOUT}) of
+        case khepri:put(?STORE, ?LEGACY, Bytes, #{timeout => ?TIMEOUT}) of
             ok -> {ok, nil};
             Other -> failure(Other)
         end
