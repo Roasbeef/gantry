@@ -329,15 +329,15 @@ pub fn finish(
 
   use Nil <- result.try(store.finish(run, action, worker, serial, completion))
 
-  // The result is durable now, so the dashboard's history may show it.
-  ffi_history.settled(
-    serial,
-    case completion {
-      queue.Succeeded(_, _) -> True
-      queue.Rejected(_, _) -> False
-    },
-    unix_now(),
-  )
+  // The result is durable now, so the dashboard's history may show it. An
+  // interrupted attempt lapses and is reassigned, so it stays unsettled and
+  // the history shows it as a lapse, the same as an expired lease.
+  case completion {
+    queue.Succeeded(_, _) -> ffi_history.settled(serial, True, unix_now())
+    queue.Rejected(_, _) -> ffi_history.settled(serial, False, unix_now())
+    queue.Interrupted -> Nil
+  }
+
   Ok(json.object([#("accepted", json.bool(True))]))
 }
 
