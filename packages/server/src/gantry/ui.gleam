@@ -19,8 +19,10 @@ const assets = [
 ]
 
 /// The page may load only its own files and talk only to its own origin.
+/// Style attributes are allowed because the board sizes lease bars and graph
+/// columns per element; stylesheets still come only from this origin.
 const policy =
-  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 /// Answer one dashboard file, or 404 for any name outside the list.
 ///
