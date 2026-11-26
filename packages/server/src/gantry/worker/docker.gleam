@@ -299,9 +299,10 @@ pub fn try_sandboxes(limits: Limits) -> Result(Nil, String) {
 
 /// The command a trial container runs to show that the action's uid can
 /// create a cgroup below its attempt cgroup and move itself into it, which
-/// is what Loom's jail does for each execution.
+/// is what Loom's jail does for each execution, and that it cannot nest a
+/// second level the worker could not remove.
 const cgroup_trial =
-  "mkdir \"$GANTRY_CGROUP_BASE/trial\" && echo $$ > \"$GANTRY_CGROUP_BASE/trial/cgroup.procs\""
+  "mkdir \"$GANTRY_CGROUP_BASE/trial\" && echo $$ > \"$GANTRY_CGROUP_BASE/trial/cgroup.procs\" && ! mkdir \"$GANTRY_CGROUP_BASE/trial/deeper\" 2>/dev/null"
 
 /// The attempt name the startup trial uses for its cgroup.
 const trial_name = "gantry-trial"
@@ -335,6 +336,21 @@ fn try_cgroup(
   })
 
   use Nil <- result.try(cgroup.prepare(base))
+
+  // The trial container is named for its base, because slots share a
+  // daemon, and one left by an earlier boot is removed before its cgroup.
+  let container =
+    "gantry-trial-"
+    <> string.slice(blobs.digest(<<cgroup.path(base):utf8>>), 0, 16)
+  let clear = fn() {
+    remove_container(container)
+    |> result.map_error(fn(fault) {
+      case fault {
+        Rejected(reason) | Unavailable(reason) | JournalFault(reason) -> reason
+      }
+    })
+  }
+  use _ <- result.try(clear())
   use Nil <- result.try(cgroup.remove(base, trial_name))
   use attempt <- result.try(cgroup.create(
     base,
@@ -343,12 +359,15 @@ fn try_cgroup(
   ))
   let entered =
     trial(
-      list.append(flags, cgroup.flags(attempt)),
+      list.flatten([flags, cgroup.flags(attempt), ["--name", container]]),
       cgroup_trial,
       "a userns action cannot enter a cgroup below " <> attempt,
       "check that the base is owned by the worker's user and delegated",
     )
-  let removed = cgroup.remove(base, trial_name)
+  let removed = {
+    use _ <- result.try(clear())
+    cgroup.remove(base, trial_name)
+  }
   use Nil <- result.try(entered)
   removed
 }
@@ -622,8 +641,15 @@ pub fn execute(
 }
 
 /// Give a userns attempt its own cgroup when the worker has a base for one,
-/// and return the flags that place the container inside it.
-fn attempt_cgroup(
+/// and return the flags that place the container inside it. Any other
+/// attempt gets no cgroup and no flags, without touching the host.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.attempt_cgroup(limits, sandbox.Strict, "gantry-ab12")
+/// ```
+pub fn attempt_cgroup(
   limits: Limits,
   profile: sandbox.Profile,
   name: String,
