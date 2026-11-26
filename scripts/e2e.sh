@@ -323,7 +323,14 @@ start worker-wide env 'ERL_FLAGS=+S 2:2' "GANTRY_ENDPOINT=$worker_urls" GANTRY_P
   "GANTRY_WORKER_USERNS_SECCOMP=$root/packages/server/priv/sandbox/userns-seccomp.json" "${worker[@]}"
 wide_pid=${pids[-1]}
 "$cli" run userns-wide fixture/wide "$candidate" check "$tmp/userns.json" >/dev/null
-GANTRY_WATCH_SECONDS=120 "$cli" watch userns-wide > "$tmp/userns-wide.jsonl"
+if ! GANTRY_WATCH_SECONDS=120 "$cli" watch userns-wide > "$tmp/userns-wide.jsonl"; then
+  # Diagnostic: which host refused the namespace, and why.
+  uname -a >&2
+  cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns >&2 || true
+  jq -sc 'last | .work[0].step' "$tmp/userns-wide.jsonl" >&2 || true
+  wide_log=$(jq -ser 'last | .work[0].step.log' "$tmp/userns-wide.jsonl") && "$cli" blob "$wide_log" >&2 || true
+  exit 1
+fi
 jq -se 'last | .phase == "passed"' "$tmp/userns-wide.jsonl" >/dev/null
 kill -TERM -- "-$wide_pid"
 wait "$wide_pid" 2>/dev/null || true
