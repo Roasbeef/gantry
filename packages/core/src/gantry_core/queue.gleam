@@ -81,7 +81,7 @@ pub const max_detail_bytes = 1024
 /// journaling, cleanup, and uploading up to the blob limit at the worker's
 /// slowest accepted transfer rate. Too little slack expires a lease whose
 /// valid result is still on its way.
-const lease_slack = 600
+pub const lease_slack = 600
 
 /// A regular file staged by content digest.
 pub type Artifact {
