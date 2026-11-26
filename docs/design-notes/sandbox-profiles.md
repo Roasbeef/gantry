@@ -272,6 +272,18 @@ Reading the failures:
 
 None of the three is enough without the other two.
 
+### A host that refuses the namespace anyway
+
+The flags are necessary but not sufficient. GitHub's `ubuntu-latest` runner
+(Ubuntu 24.04, kernel `7.0.0-1014-aws`) sets
+`kernel.apparmor_restrict_unprivileged_userns=1`. There the same `userns`
+action failed with `unshare: can't open '/proc/self/setgroups': Permission
+denied`, while it passed on Ubuntu 22.04 (kernel 5.15) and on Ubuntu 24.04
+with kernel 6.12, neither of which has that sysctl. So a slot configured for
+the profile proves the host at startup, as
+[the worker section](#how-the-worker-enforces-it) describes, and the live gate
+expects a refusal at boot on such a host and a passing action elsewhere.
+
 ## The choice it leaves
 
 The council's ruling rested on `userns` needing no more than a seccomp
