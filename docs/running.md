@@ -447,6 +447,7 @@ its bounds at startup, and a value outside them stops the worker.
 | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
 | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
 | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The size of each of the `/tmp` and `/var/tmp` tmpfs mounts |
+| `GANTRY_WORKER_CACHE_MIB` | 2048 | 0 to 1048576 | The slot's cache of fetched input blobs under `GANTRY_WORKER_DIR/chunks`, pruned oldest first before each stage; 0 turns it off |
 | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path to a readable file | Makes the slot able to run the `userns` sandbox |
 
 `GANTRY_WORKER_DRAIN` (default 60, in seconds, 0 or more) bounds how long
@@ -494,7 +495,9 @@ deployment-wide ID, token, and directory, for example `linux-02` and
 `/srv/gantry/worker-linux-02`. Register each slot's ID and token digest as a
 `[[worker]]` entry on every controller, and restart the controllers. Size the
 slots' combined limits to fit the host, because the controller does not know
-how large the machine is. Adding slots is how a large host does more at once
+how large the machine is. That includes disk: each slot keeps up to
+`GANTRY_WORKER_CACHE_MIB` of cached inputs beside its journal, so ten slots
+at the default can hold 20 GiB. Adding slots is how a large host does more at once
 ([how work is spread](scheduling.md), [add-a-machine checklist](operations.md#add-a-machine)).
 Retain each directory and reuse the same worker ID on restart. The journal records
 whether a container could have started and keeps unpublished outcomes
