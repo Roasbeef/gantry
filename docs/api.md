@@ -92,13 +92,17 @@ differs from the path.
 one module, `gantry_core/fleet`:
 
 ```json
-{"now": 1764000000,
+{"now": 1764000000, "since": 1763999100,
  "slots": [{"worker": "linux-01", "host": "builder",
             "presence": {"kind": "polled", "pool": "linux", "at": 1763999998}},
            {"worker": "linux-02", "host": null,
             "presence": {"kind": "unseen"}}],
  "runs": [ ...each retained run, as GET /v1/runs/{id} answers it... ],
- "proofs": 312}
+ "proofs": 312,
+ "events": [{"kind": "granted", "serial": 7, "run": "check-1", "action": "verify",
+             "worker": "linux-01", "pool": "linux", "at": 1763999950, "until": 1764001500},
+            {"kind": "settled", "serial": 7, "outcome": "succeeded", "at": 1763999990}],
+ "samples": [{"at": 1763999998, "ready": [{"pool": "linux", "count": 4}]}]}
 ```
 
 `slots` lists every `[[worker]]` entry, with its optional `host` label. A
@@ -107,8 +111,21 @@ memory and lost on restart, because writing it to the replicated queue would
 replicate every idle poll. `unseen` means this controller has not served a
 poll from the slot since it started. Behind a gateway that spreads polls
 over voters, a live slot can read as `unseen` on one controller. `proofs`
-counts the remembered proofs available for cache reuse. The route changes
-nothing.
+counts the remembered proofs available for cache reuse.
+
+`events` and `samples` are the last fifteen minutes this controller saw, at
+most 3,000 entries, held in memory. A `granted` event is recorded once the
+claim commits and is keyed by its lease serial, so a replayed poll adds
+nothing. A `settled` event is recorded once the result commits. A sample
+counts the ready actions per pool each time the snapshot is read, so samples
+exist only while some page is watching. `since` is the oldest second the
+history covers: the controller's start, the window's start, or the newest
+entry dropped by the cap, whichever is latest. Before `since` the history
+knows nothing, which is not the same as idle. Expiries and cache reuse happen
+inside a claim and have no events; a reader infers a lapse from a grant
+without a result whose lease is no longer active.
+
+The route changes nothing in the queue. Reading it records one sample.
 
 ## Errors
 
