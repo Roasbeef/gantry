@@ -13,10 +13,18 @@
 //// [[worker]]
 //// id = "linux-01"
 //// token_sha256 = "<sha256 of the token, as 64 lowercase hex digits>"
+//// host = "gilgamesh"  # optional label the dashboard shows for the slot
 //// ```
 ////
 //// A configuration without any `[[worker]]` entry is the earlier format,
 //// where every worker shared `GANTRY_WORKER_TOKEN`. It fails to load.
+////
+//// ## The view token
+////
+//// `GANTRY_VIEW_TOKEN` is optional. When it is set, it may read run status,
+//// the fleet snapshot, and blobs, and nothing else, so a dashboard in a
+//// browser never holds a credential that can admit work. It must be as long
+//// as the role tokens and differ from both.
 ////
 //// ## Retention
 ////
@@ -40,6 +48,7 @@ import gleam/crypto
 import gleam/dict.{type Dict}
 import gleam/dynamic/decode
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import simplifile
@@ -71,7 +80,7 @@ pub type Repository {
 
 /// One registered worker: its identity and the digest of its token.
 pub type Worker {
-  Worker(id: String, token_sha256: String)
+  Worker(id: String, token_sha256: String, host: Option(String))
 }
 
 /// Controller storage, listener and operator-registered projects.
@@ -86,13 +95,14 @@ pub type Config {
     retention: queue.Retention,
     agent_token: String,
     submit_token: String,
+    view_token: Option(String),
     github_token: String,
   )
 }
 
 /// The role credentials and GitHub token read from the environment.
 pub type Secrets {
-  Secrets(agent: String, submit: String, github: String)
+  Secrets(agent: String, submit: String, view: Option(String), github: String)
 }
 
 /// The failure to report when a configuration uses the earlier shared worker
@@ -114,8 +124,9 @@ pub fn load() -> Result(Config, String) {
   use contents <- result.try(
     simplifile.read(path) |> result.replace_error("cannot read GANTRY_CONFIG"),
   )
+  use view <- result.try(optional_secret("GANTRY_VIEW_TOKEN"))
   let github = envoy.get("GH_TOKEN") |> result.unwrap("")
-  parse(contents, Secrets(agent, submit, github))
+  parse(contents, Secrets(agent, submit, view, github))
 }
 
 /// Decode a configuration document and check it against the role secrets.
@@ -148,6 +159,7 @@ pub fn parse(contents: String, secrets: Secrets) -> Result(Config, String) {
     retention,
     secrets.agent,
     secrets.submit,
+    secrets.view,
     secrets.github,
   ))
 }
@@ -210,6 +222,15 @@ fn secret(key: String) -> Result(String, String) {
   }
 }
 
+/// Load a credential that may be absent, holding a present one to the same
+/// length floor as the required ones.
+fn optional_secret(key: String) -> Result(Option(String), String) {
+  case envoy.get(key) {
+    Ok(_) -> secret(key) |> result.map(Some)
+    Error(Nil) -> Ok(None)
+  }
+}
+
 /// Hold credentials and writable roots to the controller's local policy.
 fn validate_controller(
   data: String,
@@ -223,6 +244,8 @@ fn validate_controller(
     && port > 0
     && port <= 65_535
     && secrets.submit != secrets.agent
+    && secrets.view != Some(secrets.agent)
+    && secrets.view != Some(secrets.submit)
   {
     True -> Ok(Nil)
     False ->
@@ -235,13 +258,17 @@ fn validate_controller(
 /// Check the worker table: at least one worker, valid unique identifiers,
 /// valid unique digests, and no digest that is also a role token's.
 fn validate_workers(
-  rows: List(#(String, String)),
+  rows: List(#(String, String, Option(String))),
   secrets: Secrets,
 ) -> Result(List(Worker), String) {
-  let workers = list.map(rows, fn(row) { Worker(row.0, row.1) })
+  let workers = list.map(rows, fn(row) { Worker(row.0, row.1, row.2) })
   let ids = list.map(workers, fn(worker) { worker.id })
   let digests = list.map(workers, fn(worker) { worker.token_sha256 })
-  let roles = [token_digest(secrets.agent), token_digest(secrets.submit)]
+  let roles = [
+    token_digest(secrets.agent),
+    token_digest(secrets.submit),
+    ..option.values([option.map(secrets.view, token_digest)])
+  ]
 
   // No entry at all is the earlier shared-token format.
   case workers {
@@ -249,6 +276,9 @@ fn validate_workers(
     _ ->
       case
         list.all(ids, request.valid_id)
+        && list.all(workers, fn(worker) {
+          option.map(worker.host, request.valid_id) != Some(False)
+        })
         && list.all(digests, blobs.valid)
         && list.unique(ids) == ids
         && list.unique(digests) == digests
@@ -257,7 +287,7 @@ fn validate_workers(
         True -> Ok(workers)
         False ->
           Error(
-            "each [[worker]] needs a unique id and a unique token_sha256 of 64 lowercase hex digits that is not a role token's digest",
+            "each [[worker]] needs a unique id, a unique token_sha256 of 64 lowercase hex digits that is not a role token's digest, and a host label that is a valid identifier when one is given",
           )
       }
   }
@@ -299,7 +329,12 @@ fn config_decoder() {
   let worker = {
     use id <- decode.field("id", decode.string)
     use digest <- decode.field("token_sha256", decode.string)
-    decode.success(#(id, digest))
+    use host <- decode.optional_field(
+      "host",
+      None,
+      decode.optional(decode.string),
+    )
+    decode.success(#(id, digest, host))
   }
   use data <- decode.field("data_dir", decode.string)
   use blobs <- decode.field("blob_dir", decode.string)

@@ -10,6 +10,7 @@ import gantry_core/queue
 import gleam/bit_array
 import gleam/crypto
 import gleam/dict
+import gleam/option
 import gleam/string
 import simplifile
 
@@ -120,6 +121,7 @@ pub fn config_for(
       retention:,
       agent_token: "",
       submit_token: "",
+      view_token: option.None,
       github_token: "",
     )
   #(cfg, repo)

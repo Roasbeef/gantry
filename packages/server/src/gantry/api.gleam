@@ -3,8 +3,10 @@
 import gantry/blobs
 import gantry/config.{type Config}
 import gantry/fault.{type Fault}
+import gantry/internal/ffi_presence
 import gantry/prepare
 import gantry/store
+import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
@@ -195,11 +197,48 @@ pub fn claim(
     request.valid_id(pool),
     fault.Invalid("invalid identifier"),
   ))
-  let #(now, _) =
-    timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
+  let now = unix_now()
+  ffi_presence.record(worker, pool, now)
 
   store.claim(worker, pool, now)
   |> result.map(option.map(_, protocol.encode_assignment))
+}
+
+/// Read the dashboard's snapshot: every retained run, each registered slot
+/// with the latest poll this controller served for it, and the clock. It
+/// changes nothing. A slot's presence is this controller's memory, so behind a
+/// gateway that spreads polls over voters a slot can read as `Unseen` here.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // api.fleet(config)
+/// ```
+pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
+  use state <- result.try(store.read())
+  let polls =
+    ffi_presence.all()
+    |> list.map(fn(poll) { #(poll.0, fleet.Polled(poll.1, poll.2)) })
+    |> dict.from_list
+  let slots =
+    list.map(cfg.workers, fn(worker) {
+      let presence = dict.get(polls, worker.id) |> result.unwrap(fleet.Unseen)
+      fleet.Slot(worker.id, worker.host, presence)
+    })
+  Ok(
+    fleet.encode(fleet.Fleet(
+      now: unix_now(),
+      slots:,
+      runs: state.runs,
+      proofs: list.length(state.cache),
+    )),
+  )
+}
+
+fn unix_now() -> Int {
+  let #(now, _) =
+    timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
+  now
 }
 
 /// Accept a result only after the worker staged its log and output bytes.

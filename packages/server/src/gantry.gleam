@@ -20,6 +20,7 @@
 import gantry/config.{type Config}
 import gantry/http_api
 import gantry/internal/ffi_host
+import gantry/internal/ffi_presence
 import gantry/reconcile
 import gantry/store
 import gleam/erlang/process
@@ -62,6 +63,7 @@ pub fn main() -> Nil {
 fn start() -> Result(process.Pid, String) {
   use cfg <- result.try(config.load())
   use Nil <- result.try(store.boot(cfg.data, cfg.seed))
+  ffi_presence.start()
   supervise(cfg)
   |> result.map(fn(started) { started.pid })
   |> result.map_error(fn(_) { "cannot start the controller supervisor" })

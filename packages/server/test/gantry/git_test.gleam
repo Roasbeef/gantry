@@ -8,6 +8,7 @@ import gleam/crypto
 import gleam/dict
 import gleam/erlang/process
 import gleam/list
+import gleam/option
 import gleam/string
 import simplifile
 
@@ -42,6 +43,7 @@ fn config_for(
       workers: [],
       retention: queue.Retention(200, 1000),
       submit_token: "",
+      view_token: option.None,
       github_token: "",
     )
   #(cfg, repo)

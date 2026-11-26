@@ -147,6 +147,7 @@ pub fn the_local_controller_config_registers_its_worker_test() {
     config.Secrets(
       agent: profile.agent_token(local),
       submit: profile.submit_token(local),
+      view: None,
       github: "",
     )
 
