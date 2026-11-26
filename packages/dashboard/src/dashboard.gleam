@@ -88,7 +88,19 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
       #(next, effect.none())
     }
-    model.RunChosen(run) -> #(model.choose_run(m, run), effect.none())
+    model.RunChosen(run) -> {
+      let #(next, digest) = model.choose_run(m, run)
+
+      // A broken run opens on its failed action, whose log is fetched now.
+      case digest {
+        Some(digest) -> #(next, fetch_log(m.token, digest))
+        None -> #(next, effect.none())
+      }
+    }
+    model.FinishedToggled -> #(
+      model.Model(..m, show_finished: !m.show_finished),
+      effect.none(),
+    )
     model.ActionChosen(run, action) -> {
       let #(next, digest) = model.choose_action(m, run, action)
 

@@ -4,6 +4,15 @@
 //// that names why it is or is not moving. It imports no Lustre and no DOM, so
 //// its tests run under Node without a page.
 ////
+//// ## Flow
+////
+//// `build` is the one entry: it places each run's actions with their cells
+//// and layers, reads each slot's occupation from the leases, derives each
+//// pool's numbers and `verdict`, and only then calls `diagnose` on each run,
+//// because a run's diagnosis depends on its pools. The view then reads
+//// `bands`, `by_layer`, `tally`, `rail_order` and `slot_pool` from the
+//// finished board.
+////
 //// ## What the snapshot cannot say
 ////
 //// Steps carry no timestamps, so a finished action's duration is known only
@@ -272,6 +281,36 @@ pub fn live(run: RunRow) -> Bool {
     Moving | Stalled -> True
     Settled | Broken -> False
   }
+}
+
+/// Split runs into the list's three bands, each in board order: live runs
+/// (moving or stalled), then broken ones, then settled ones. A failure stays
+/// above the fold however many settled runs are retained.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // let #(live, broken, settled) = board.bands(board.runs)
+/// ```
+pub fn bands(
+  runs: List(RunRow),
+) -> #(List(RunRow), List(RunRow), List(RunRow)) {
+  let of = fn(health) {
+    list.filter(runs, fn(run) { run.diagnosis.health == health })
+  }
+  #(list.filter(runs, live), of(Broken), of(Settled))
+}
+
+/// The first failed or expired action of a run, which holds the run's log of
+/// interest.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // board.first_failure(row)
+/// ```
+pub fn first_failure(run: RunRow) -> Result(Action, Nil) {
+  list.find(run.actions, fn(a) { a.cell == Failed || a.cell == Expired })
 }
 
 /// The short word for a cell, used in labels and the legend.

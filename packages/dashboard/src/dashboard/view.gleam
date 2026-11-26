@@ -89,13 +89,13 @@ fn brand() -> Element(Msg) {
   ])
 }
 
-/// Draw the top bar with the totals, the connection state, and the sign-out control.
+/// Draw the top bar with the pool chips, the connection state, and the sign-out control.
 fn top(m: Model, b: Option(Board)) -> Element(Msg) {
   html.header([class("top")], [
     brand(),
     case b {
-      Some(b) -> totals(b)
-      None -> html.div([class("totals")], [])
+      Some(b) -> chips(b)
+      None -> html.ul([class("chips")], [])
     },
     link(m, b),
     html.button([class("signout"), event.on_click(model.SignOut)], [
@@ -104,38 +104,44 @@ fn top(m: Model, b: Option(Board)) -> Element(Msg) {
   ])
 }
 
-/// Draw the header counts, with the cache rate shown only once an action has finished.
-fn totals(b: Board) -> Element(Msg) {
-  let t = b.totals
-  let finished = t.passed + t.reused
-
-  // With nothing finished there is no cache rate to show.
-  let cache = case finished {
-    0 -> "—"
-    _ -> int.to_string(t.reused * 100 / finished) <> "%"
-  }
-
-  html.dl([class("totals")], [
-    stat("live runs", int.to_string(t.live_runs), "t-runs"),
-    stat("ready", int.to_string(t.ready), case t.ready {
-      0 -> "t-ready"
-      _ -> "t-ready hot"
+/// Draw one chip per pool in place of fleet totals, so a pool's verdict
+/// reads on every tab and at every width. A pool that is busy or idle has no
+/// work waiting, so its chip is muted and the pools that need attention
+/// stand out.
+fn chips(b: Board) -> Element(Msg) {
+  html.ul(
+    [class("chips"), attribute.aria_label("Pool pressure")],
+    list.map(b.pools, fn(p) {
+      let label = board.verdict_label(p.verdict)
+      html.li([class("chip v-" <> label)], [
+        html.span([class("chip-name")], [text(p.name)]),
+        html.span([class("chip-verdict")], [text(label)]),
+        html.span([class("chip-nums")], [
+          text(
+            int.to_string(p.busy)
+            <> "/"
+            <> int.to_string(p.live)
+            <> case p.ready {
+              0 -> ""
+              n -> " · " <> int.to_string(n) <> " ready"
+            },
+          ),
+        ]),
+      ])
     }),
-    stat("leased", int.to_string(t.active), "t-active"),
-    stat(
-      "slots live",
-      int.to_string(t.live_slots) <> "/" <> int.to_string(t.slots),
-      "t-slots",
-    ),
-    stat("cache reuse", cache, "t-cache"),
-  ])
+  )
 }
 
-fn stat(label: String, value: String, extra: String) -> Element(Msg) {
-  html.div([class("stat " <> extra)], [
-    html.dt([], [text(label)]),
-    html.dd([], [text(value)]),
-  ])
+/// The share of finished actions that reused a stored proof, or a dash when
+/// nothing has finished.
+fn cache_rate(b: Board) -> String {
+  let finished = b.totals.passed + b.totals.reused
+
+  // With nothing finished there is no rate to show.
+  case finished {
+    0 -> "—"
+    _ -> int.to_string(b.totals.reused * 100 / finished) <> "%"
+  }
 }
 
 /// Draw the connection dot and its words from the connection state.
@@ -412,19 +418,60 @@ fn lease_bar(holder: board.Holder, timeout: Int, now: Int) -> Element(Msg) {
 
 /// Draw the middle pane: the run rows and the legend.
 fn runs(m: Model, b: Board) -> Element(Msg) {
+  let #(live, broken, settled) = board.bands(b.runs)
   html.section([class("runs"), attribute.aria_label("Runs")], [
     html.h2([class("pane-title")], [
       text("Runs"),
       html.span([class("pane-count")], [
-        text(int.to_string(list.length(b.runs))),
+        text(
+          int.to_string(list.length(live))
+          <> " live · "
+          <> int.to_string(b.totals.ready)
+          <> " ready · cache "
+          <> cache_rate(b),
+        ),
       ]),
       legend(),
     ]),
-    case b.runs {
-      [] -> html.p([class("quiet-note")], [text("No runs are retained.")])
-      rows -> html.div([class("run-list")], list.map(rows, run_row(_, m)))
+    band(live, m, "No run is live."),
+    case broken {
+      [] -> element.none()
+      _ ->
+        html.div([class("band")], [
+          html.h3([class("band-title bad")], [
+            text("Failed · " <> int.to_string(list.length(broken))),
+          ]),
+          band(broken, m, ""),
+        ])
+    },
+    case settled {
+      [] -> element.none()
+      _ ->
+        html.div([class("band")], [
+          html.button(
+            [
+              class("band-title band-fold"),
+              attribute.aria_expanded(m.show_finished),
+              event.on_click(model.FinishedToggled),
+            ],
+            [text("Finished · " <> int.to_string(list.length(settled)))],
+          ),
+          case m.show_finished {
+            True -> band(settled, m, "")
+            False -> element.none()
+          },
+        ])
     },
   ])
+}
+
+/// Draw one band of runs, or a note when the band is empty.
+fn band(rows: List(RunRow), m: Model, empty: String) -> Element(Msg) {
+  // An empty live band says so; the other bands are drawn only when filled.
+  case rows {
+    [] -> html.p([class("quiet-note")], [text(empty)])
+    rows -> html.div([class("run-list")], list.map(rows, run_row(_, m)))
+  }
 }
 
 /// Draw the key to the cell colours.
@@ -660,7 +707,7 @@ fn members_text(members: List(Int)) -> String {
 
 /// Draw a run's action graph as nodes laid out by layer with a curve for each prerequisite.
 fn graph(run: RunRow, chosen: Option(String)) -> Element(Msg) {
-  use <- bool.guard(run.actions == [], element.none())
+  use <- bool.lazy_guard(run.actions == [], element.none)
   let placed = layout.place(run.actions)
   let touches = fn(edge: layout.Edge) {
     chosen == Some(edge.from) || chosen == Some(edge.to)

@@ -4,14 +4,19 @@
 
 const key = "gantry.dashboard.token";
 
+// How long one request may take. The page sends one request at a time, so a
+// request that never answered would stop the page from polling again.
+const timeout_ms = 10000;
+
 // Answer the status and body text of a GET carrying a bearer token. A network
-// failure answers status 0 with the error's message, so the caller sees one
-// shape for every outcome.
+// failure or a timeout answers status 0 with the error's message, so the
+// caller sees one shape for every outcome.
 export function get(url, token, done) {
   fetch(url, {
     headers: { authorization: "Bearer " + token },
     cache: "no-store",
     credentials: "omit",
+    signal: AbortSignal.timeout(timeout_ms),
   })
     .then((response) =>
       response.text().then((body) => done(response.status, body)),

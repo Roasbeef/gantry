@@ -3,7 +3,8 @@
 //// app turns them into messages.
 
 /// Fetch `url` with a bearer token and call `done` with the status and body.
-/// A network failure calls it with status 0 and the error's message.
+/// A network failure, or no answer within 10 s, calls it with status 0 and
+/// the error's message.
 ///
 /// ## Examples
 ///

@@ -74,6 +74,7 @@ pub type Model {
     chosen_action: Option(String),
     log: Log,
     tab: Tab,
+    show_finished: Bool,
     in_flight: Bool,
   )
 }
@@ -89,6 +90,7 @@ pub type Msg {
   ActionChosen(run: String, action: String)
   LogAnswered(digest: String, status: Int, body: String)
   TabChosen(Tab)
+  FinishedToggled
 }
 
 /// The most log lines the pane holds. A longer log shows its tail.
@@ -115,6 +117,7 @@ pub fn initial(token: String) -> Model {
     chosen_action: None,
     log: NoLog,
     tab: RunsTab,
+    show_finished: False,
     in_flight: False,
   )
 }
@@ -226,21 +229,41 @@ pub fn choose_action(
   #(model, digest)
 }
 
-/// Choose a run, clearing the chosen action.
+/// Choose a run. A broken run opens on its first failed action, so its log
+/// is one step from the run list; any other run clears the chosen action.
+/// The answer names the log digest to fetch, when there is one.
 ///
 /// ## Examples
 ///
 /// ```gleam
 /// // model.choose_run(model, "check-1")
 /// ```
-pub fn choose_run(model: Model, run: String) -> Model {
-  Model(
-    ..model,
-    chosen_run: Some(run),
-    chosen_action: None,
-    log: NoLog,
-    tab: DetailTab,
-  )
+pub fn choose_run(model: Model, run: String) -> #(Model, Option(String)) {
+  let failure =
+    model.board
+    |> option.to_result(Nil)
+    |> result.try(board.find(_, run))
+    |> result.try(fn(row) {
+      case row.diagnosis.health {
+        board.Broken -> board.first_failure(row)
+        board.Moving | board.Stalled | board.Settled -> Error(Nil)
+      }
+    })
+
+  // A failed action takes the action path, which also asks for its log.
+  case failure {
+    Ok(action) -> choose_action(model, run, action.name)
+    Error(Nil) -> #(
+      Model(
+        ..model,
+        chosen_run: Some(run),
+        chosen_action: None,
+        log: NoLog,
+        tab: DetailTab,
+      ),
+      None,
+    )
+  }
 }
 
 /// Keep at most the last `lines` lines of a log.

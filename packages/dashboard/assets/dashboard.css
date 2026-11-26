@@ -131,15 +131,38 @@ button:focus-visible, input:focus-visible {
   background: var(--ink-sunk);
   position: sticky; top: 0; z-index: 2;
 }
-.totals { display: flex; gap: 22px; margin: 0; flex: 1; min-width: 0; }
-.stat { display: grid; gap: 1px; }
-.stat dt {
-  font: 600 9.5px/1.2 var(--mono); color: var(--fg-faint);
-  text-transform: uppercase; letter-spacing: 0.14em;
+
+/* The pool chips: the rail's gauge reduced to a word and two numbers, with
+   the same left bar and verdict colours, so the header reads as a pressure
+   readout and not a row of KPI tiles. */
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; flex: 1; min-width: 0; }
+.chip {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  padding: 5px 10px 5px 8px; background: var(--ink-raised);
+  border-left: 3px solid var(--rule); font: 11.5px var(--mono); white-space: nowrap;
 }
-.stat dd { margin: 0; font: 600 17px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
-.stat.t-ready.hot dd { color: var(--ready); }
-.stat.t-active dd { color: var(--active); }
+.chip-name { font-weight: 600; }
+.chip-verdict { font: 700 9.5px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.14em; }
+.chip-nums { color: var(--fg-quiet); font-variant-numeric: tabular-nums; }
+.chip.v-starved { border-left-color: var(--failed); }
+.chip.v-starved .chip-verdict { color: var(--failed); }
+.chip.v-saturated { border-left-color: var(--ready); }
+.chip.v-saturated .chip-verdict { color: var(--ready); }
+.chip.v-draining { border-left-color: var(--active); }
+.chip.v-draining .chip-verdict { color: var(--active); }
+.chip.v-busy, .chip.v-idle { background: transparent; color: var(--fg-quiet); }
+.chip.v-busy .chip-verdict, .chip.v-idle .chip-verdict { color: var(--fg-faint); }
+
+.band { margin-top: 18px; }
+.band-title {
+  display: block; margin: 0 0 6px; padding: 0;
+  font: 600 10px/1.4 var(--mono); color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.16em; text-align: left;
+}
+.band-title.bad { color: var(--failed); }
+.band-fold::before { content: "▸ "; }
+.band-fold[aria-expanded="true"]::before { content: "▾ "; }
+.band-fold:hover { color: var(--fg); }
 
 .link { display: flex; align-items: center; gap: 7px; color: var(--fg-quiet); font: 11.5px var(--mono); min-width: 0; }
 .link-words { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
@@ -408,9 +431,8 @@ button:focus-visible, input:focus-visible {
 
 @media (max-width: 760px) {
   .top { flex-wrap: wrap; gap: 10px 16px; padding: 10px var(--gap); }
-  .totals { order: 3; flex-basis: 100%; justify-content: space-between; gap: 8px; }
-  .stat dd { font-size: 15px; }
-  .stat dt { font-size: 8.5px; letter-spacing: 0.08em; }
+  .chips { order: 3; flex-basis: 100%; gap: 6px; }
+  .chip { padding: 4px 8px 4px 6px; gap: 6px; }
   .link { flex: 1; justify-content: flex-end; }
   .link-words { max-width: 22ch; }
   .tabs {

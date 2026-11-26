@@ -149,3 +149,44 @@ pub fn layout_places_layers_in_columns_and_links_each_need_test() {
   assert placed.width >= second.x + layout.node_width
   assert layout.place([]).nodes == []
 }
+
+pub fn a_broken_run_opens_on_its_failed_action_test() {
+  let state = leased(10)
+  let assert Ok(state) =
+    queue.finish(state, "r", "build", "w1", 1, queue.Rejected("boom", "abc"))
+  let m = model.receive(model.initial("t"), 200, body(state, 20))
+  let #(m, digest) = model.choose_run(m, "r")
+  assert digest == Some("abc")
+  assert m.chosen_action == Some("build")
+  assert m.log == model.Loading("abc")
+}
+
+pub fn a_live_run_opens_with_no_action_test() {
+  let m = model.receive(model.initial("t"), 200, body(leased(10), 12))
+  let #(m, digest) = model.choose_run(m, "r")
+  assert digest == None
+  assert m.chosen_action == None
+}
+
+pub fn runs_split_into_live_broken_and_settled_bands_test() {
+  let live = leased(10)
+  let assert Ok(#(state, _)) =
+    queue.admit(live, "bad", "repo", "rev", "check", queue.Build, [
+      task("other", []),
+    ])
+  let assert #(state, Some(job)) = queue.claim(state, "w2", "linux", 11)
+  let assert Ok(state) =
+    queue.finish(
+      state,
+      "bad",
+      "other",
+      "w2",
+      queue.lease_serial(job.lease),
+      queue.Rejected("no", "log"),
+    )
+  let b = board.build(fleet.Fleet(12, [], state.runs, 0))
+  let #(l, broken, settled) = board.bands(b.runs)
+  assert list.map(l, fn(r) { r.id }) == ["r"]
+  assert list.map(broken, fn(r) { r.id }) == ["bad"]
+  assert settled == []
+}
