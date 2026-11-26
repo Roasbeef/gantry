@@ -84,13 +84,18 @@ pub fn an_attempt_carries_the_slots_limits_test() {
   assert cgroup.limit_files(limits, ["cpu", "memory", "pids"])
     == [
       #("memory.max", "805306368"),
+      #("memory.swap.max", "805306368"),
       #("pids.max", "4096"),
       #("cpu.max", "1200000 100000"),
     ]
 
   // Without a delegated cpu controller there is no CPU quota to write.
   assert cgroup.limit_files(limits, ["memory", "pids"])
-    == [#("memory.max", "805306368"), #("pids.max", "4096")]
+    == [
+      #("memory.max", "805306368"),
+      #("memory.swap.max", "805306368"),
+      #("pids.max", "4096"),
+    ]
 }
 
 pub fn the_remove_of_a_missing_attempt_is_a_no_op_test() {

@@ -23,6 +23,7 @@
 //// | --------- | ---------------------------------------------- | ----------------------------------------------- |
 //// | `prepare` | check the base, enable its child controllers   | the base is a process-empty cgroup v2 directory |
 //// | `create`  | mkdir the attempt cgroup, write limits, open it | the action can manage children, not its limits  |
+//// |           | cap its depth at one level                     | every cgroup below it is one the worker can rmdir |
 //// | `remove`  | rmdir the attempt cgroup depth first           | a removed attempt leaves no cgroup behind       |
 ////
 //// See `docs/design-notes/sandbox-profiles.md`.
@@ -161,9 +162,17 @@ pub fn create(
     |> result.map_error(fn(_) { "cannot create cgroup " <> attempt }),
   )
   use Nil <- result.try(enable(attempt, wanted(controllers)))
+
+  // The action's cgroups are owned by its uid, so the worker could not
+  // remove a grandchild. One level is all Docker and Loom's jail make.
+  use Nil <- result.try(write(attempt, "cgroup.max.depth", "1"))
   use Nil <- result.try(
     list.try_each(limit_files(limits, controllers), fn(pair) {
-      write(attempt, pair.0, pair.1)
+      // A kernel without swap accounting has no swap file to bound.
+      case pair.0, simplifile.is_file(attempt <> "/" <> pair.0) {
+        "memory.swap.max", Ok(False) | "memory.swap.max", Error(_) -> Ok(Nil)
+        _, _ -> write(attempt, pair.0, pair.1)
+      }
     }),
   )
 
@@ -258,27 +267,35 @@ fn wanted(available: List(String)) -> List(String) {
 }
 
 /// The limit files written on an attempt cgroup, for the controllers its
-/// parent hands it: memory and pids always, and a CPU quota when the cpu
-/// controller is delegated.
+/// parent hands it: memory, swap and pids always, and a CPU quota when the
+/// cpu controller is delegated. Swap is bounded at the memory size, as
+/// Docker bounds a container given `--memory` alone, because a process moved
+/// out of the container's cgroup leaves Docker's bound behind.
 ///
 /// ## Examples
 ///
 /// ```gleam
 /// assert cgroup.limit_files(cgroup.Limits(1, 64, 2), ["memory", "pids"])
-///   == [#("memory.max", "1048576"), #("pids.max", "64")]
+///   == [
+///     #("memory.max", "1048576"),
+///     #("memory.swap.max", "1048576"),
+///     #("pids.max", "64"),
+///   ]
 /// ```
 pub fn limit_files(
   limits: Limits,
   controllers: List(String),
 ) -> List(#(String, String)) {
-  let memory = #("memory.max", int.to_string(limits.memory_mib * 1_048_576))
+  let bytes = int.to_string(limits.memory_mib * 1_048_576)
+  let memory = #("memory.max", bytes)
+  let swap = #("memory.swap.max", bytes)
   let pids = #("pids.max", int.to_string(limits.pids))
   let cpu = #("cpu.max", int.to_string(limits.cpus * 100_000) <> " 100000")
 
   // A CPU ceiling needs the cpu controller, which older delegation lacks.
   case list.contains(controllers, "cpu") {
-    True -> [memory, pids, cpu]
-    False -> [memory, pids]
+    True -> [memory, swap, pids, cpu]
+    False -> [memory, swap, pids]
   }
 }
 
