@@ -522,13 +522,14 @@ fn run(
     ]),
     "",
   ))
-  let container = string.trim(identity)
 
   // Start Docker by immutable container ID after validating its response.
-  use Nil <- result.try(case blobs.valid(container) {
-    True -> Ok(Nil)
-    False -> Error(Unavailable("Docker returned an invalid container ID"))
-  })
+  use container <- result.try(
+    container_id(identity)
+    |> result.replace_error(Unavailable(
+      "Docker returned an invalid container ID",
+    )),
+  )
 
   // From here the action can run, so a restart must treat it as started.
   use Nil <- result.try(start() |> result.map_error(JournalFault))
@@ -746,6 +747,34 @@ fn read_artifact(
       |> result.map_error(JournalFault)
       |> result.map(queue.Artifact(path, _))
     _ -> Error(Rejected(reason))
+  }
+}
+
+/// Read the container ID from `docker create` output.
+///
+/// The capture combines both streams so a failure keeps its diagnostic, and
+/// Docker writes warnings to stderr before it prints the ID on stdout: a
+/// platform mismatch, or a kernel without swap accounting. The ID is the last
+/// line, and it must be a full 64-digit hexadecimal ID, so a warning can never
+/// be mistaken for one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.container_id("WARNING: platform mismatch\n<64 hex digits>\n")
+/// ```
+pub fn container_id(output: String) -> Result(String, Nil) {
+  use last <- result.try(
+    string.split(output, "\n")
+    |> list.map(string.trim)
+    |> list.filter(fn(line) { line != "" })
+    |> list.last,
+  )
+
+  // Accept only a full ID, so a trailing warning fails closed.
+  case blobs.valid(last) {
+    True -> Ok(last)
+    False -> Error(Nil)
   }
 }
 
