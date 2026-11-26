@@ -17,6 +17,7 @@ fn secrets() -> config.Secrets {
   config.Secrets(
     agent: "agent-token-agent-token-agent-token-0",
     submit: "submit-token-submit-token-submit-tok0",
+    view: None,
     github: "",
   )
 }

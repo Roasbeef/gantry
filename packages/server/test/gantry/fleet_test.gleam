@@ -11,6 +11,7 @@ import gantry/support
 import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -62,7 +63,8 @@ pub fn history_records_one_grant_per_lease_and_its_result_test() {
       queue.Retention(200, 1000),
     )
   let action = graph.Action("only", ["true"], [], [], [], [], 30)
-  let task = queue.Task(action, "source", id <> "-recipe", pool, "image")
+  let task =
+    queue.Task(action, "source", id <> "-recipe", pool, "image", sandbox.Strict)
   let assert Ok(_) =
     store.admit(id, "repo", "rev", "check", queue.Build, [task])
   let poll =
