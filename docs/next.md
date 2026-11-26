@@ -134,6 +134,15 @@ the third slice.
    so the exit is not yet met. What remains is mostly writes to `/var/tmp`
    under the read-only root and a jail that wants a delegated cgroup; the
    note lists each cause.
+   **Status (2026-11-26):** met. `sandbox-profiles` merged, every action got
+   a private `/var/tmp` (#20), and a `userns` attempt now gets its own cgroup
+   inside the worker user's delegated subtree (#22), capped one level deep
+   with the slot's memory, swap, pids and CPU limits. That needs root once per
+   host (CPU delegation to user managers, and a second Docker daemon on the
+   `cgroupfs` driver with its networking off; see the runbook in
+   [running](running.md)). On the `loom` slots the 16 `project_template_test`
+   cases and 4 evolution tests that wanted the cgroup pass, and the action's
+   own writes to its limits are refused.
 4. **Stage Git metadata when an action needs it.** *Built, 2026-11-25
    ([design](design-notes/git-metadata-and-chunked-inputs.md)); the stated exit
    is not met, and the diagnosis was wrong.* An action may declare
@@ -175,6 +184,20 @@ the third slice.
    within 1.15 times max(critical path, total work divided by slots).
    **Guard:** the same pass and fail per lane as Loom's CI at that commit.
    Depends on slices 3 to 5.
+   **Status (2026-11-26):** Loom's ten lanes run on the fleet's two `loom`
+   slots from Loom branch `gantry/lanes` (not yet on Loom's GitHub). A
+   measured climb took the full set's makespan from 2,828 s to 1,107 s with
+   every lane's outcome unchanged: parallel test modules, a warm build cache
+   baked into the action image, and preparation that reuses the image's
+   builds. Remaining failures are one per client shard (a newly exposed
+   remote evolution test, `tui_e2e` as uid 65534, a deadline flake) and
+   `eval`, which does not compile on Loom's main. The exit is not met for lack
+   of slots: the worker host has about 10 GiB free beside its other services
+   and a client lane peaks near 5 GiB, so two slots are its limit. With
+   enough slots the floor is the longest lane, about 7 minutes. Gantry's own
+   overhead is 2 to 7 s per action with the worker's blob cache (#21).
+   Staged sources all carry the 2000-01-01 mtime, so a warm cache must touch
+   the tree after extracting ([running](running.md#start-a-worker)).
 7. **Deploy the first fleet.** The gateway and one controller on
    a four-vCPU controller host, worker slots on the 32-core worker host, and
    the laptop's Docker as an optional worker. **Exit:** a Loom group lands through the gateway. Add a second
@@ -216,10 +239,12 @@ the third slice.
    - Done on `worker-drain`: an attempt interrupted after `docker start`
      is reported `Interrupted`, lapses at once, and is reassigned, and a
      worker drains on SIGTERM up to `GANTRY_WORKER_DRAIN`
-     ([drain a worker](operations.md#drain-a-worker)). Not yet rehearsed:
-     a real `make update` of a live fleet mid-action, and the systemd unit
-     settings the operations page now asks for (`KillMode=mixed`, a
-     `TimeoutStopSec` above the drain deadline).
+     ([drain a worker](operations.md#drain-a-worker)). A live restart of a
+     `loom` slot mid-action drained, released the attempt, and the controller
+     reassigned it, but systemd killed the worker during the release because
+     its stop timeout equalled the 60 s drain. The worker host's unit now has
+     `TimeoutStopSec=120s`, and the laptop's launchd agents `ExitTimeOut` 120
+     (#23). Not yet rehearsed: a real `make update` of a live fleet.
    - Roll a future format change out in two steps, a release that reads both
      formats and then one that writes the new one, so voters can be upgraded
      one at a time. The format now has a name (`indexed-v1`) that a release
