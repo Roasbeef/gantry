@@ -30,6 +30,13 @@ fn sample() -> fleet.Fleet {
     ],
     runs: state.runs,
     proofs: 0,
+    since: 40,
+    events: [
+      fleet.Granted(1, "r", "build", "w1", "linux", 100, 760),
+      fleet.Settled(1, fleet.Succeeded, 110),
+      fleet.Settled(2, fleet.Rejected, 115),
+    ],
+    samples: [fleet.Sample(100, [#("linux", 1)]), fleet.Sample(102, [])],
   )
 }
 
@@ -67,4 +74,38 @@ pub fn decoder_refuses_an_unknown_presence_test() {
     json.to_string(fleet.encode(sample()))
     |> string.replace("\"kind\":\"unseen\"", "\"kind\":\"asleep\"")
   let assert Error(_) = json.parse(text, fleet.decoder())
+}
+
+pub fn decoder_refuses_an_unknown_outcome_test() {
+  let text =
+    json.to_string(fleet.encode(sample()))
+    |> string.replace("\"outcome\":\"rejected\"", "\"outcome\":\"maybe\"")
+  let assert Error(_) = json.parse(text, fleet.decoder())
+}
+
+pub fn ready_follows_the_claim_rule_test() {
+  // The leased root holds its leaf back, so nothing is ready.
+  let assert [run] = sample().runs
+  assert fleet.ready(run) == []
+  assert fleet.ready_by_pool(sample().runs) == []
+  // Once the root passes, the leaf is ready in its pool.
+  let assert Ok(#(state, _)) =
+    queue.admit(queue.empty(), "r", "repo", "rev", "check", queue.Build, [
+      task("build", []),
+      task("test", ["build"]),
+      task("lint", []),
+    ])
+  assert fleet.ready_by_pool(state.runs) == [#("linux", 2)]
+  let assert #(state, Some(job)) = queue.claim(state, "w1", "linux", 0)
+  let assert Ok(state) =
+    queue.finish(
+      state,
+      "r",
+      job.task.action.name,
+      "w1",
+      queue.lease_serial(job.lease),
+      queue.Rejected("no", "log"),
+    )
+  // A failed run offers nothing.
+  assert fleet.ready_by_pool(state.runs) == []
 }

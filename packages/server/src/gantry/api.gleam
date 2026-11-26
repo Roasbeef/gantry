@@ -3,6 +3,7 @@
 import gantry/blobs
 import gantry/config.{type Config}
 import gantry/fault.{type Fault}
+import gantry/internal/ffi_history
 import gantry/internal/ffi_presence
 import gantry/prepare
 import gantry/store
@@ -13,6 +14,7 @@ import gantry_core/queue
 import gantry_core/request
 import gleam/dict
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -199,9 +201,27 @@ pub fn claim(
   ))
   let now = unix_now()
   ffi_presence.record(worker, pool, now)
+  use assignment <- result.try(store.claim(worker, pool, now))
 
-  store.claim(worker, pool, now)
-  |> result.map(option.map(_, protocol.encode_assignment))
+  // Only a committed lease enters the dashboard's history, keyed by its
+  // serial, so a replayed poll that returns the same lease adds nothing.
+  case assignment {
+    Some(granted) -> {
+      let lease = granted.lease
+      ffi_history.granted(
+        queue.lease_serial(lease),
+        granted.run,
+        granted.task.action.name,
+        queue.lease_worker(lease),
+        granted.task.pool,
+        now,
+        queue.lease_until(lease),
+      )
+    }
+    None -> Nil
+  }
+
+  Ok(option.map(assignment, protocol.encode_assignment))
 }
 
 /// Read the dashboard's snapshot: every retained run, each registered slot
@@ -216,6 +236,12 @@ pub fn claim(
 /// ```
 pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
   use state <- result.try(store.read())
+  let now = unix_now()
+
+  // Each read samples the ready work, so the samples cover the times a page
+  // was watching and nothing else; the page draws the gaps as unknown.
+  ffi_history.sample(now, fleet.ready_by_pool(state.runs))
+  ffi_history.prune(now, history_window)
   let polls =
     ffi_presence.all()
     |> list.map(fn(poll) { #(poll.0, fleet.Polled(poll.1, poll.2)) })
@@ -225,14 +251,47 @@ pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
       let presence = dict.get(polls, worker.id) |> result.unwrap(fleet.Unseen)
       fleet.Slot(worker.id, worker.host, presence)
     })
+  let grants =
+    ffi_history.grants()
+    |> list.map(fn(row) {
+      fleet.Granted(row.0, row.1, row.2, row.3, row.4, row.5, row.6)
+    })
+  let settlements =
+    ffi_history.settlements()
+    |> list.map(fn(row) {
+      let outcome = case row.1 {
+        True -> fleet.Succeeded
+        False -> fleet.Rejected
+      }
+      fleet.Settled(row.0, outcome, row.2)
+    })
+  let events =
+    list.append(grants, settlements)
+    |> list.sort(fn(a, b) { int.compare(event_time(a), event_time(b)) })
+  let samples =
+    ffi_history.samples()
+    |> list.map(fn(row) { fleet.Sample(row.0, row.1) })
+    |> list.sort(fn(a, b) { int.compare(a.at, b.at) })
   Ok(
     fleet.encode(fleet.Fleet(
-      now: unix_now(),
+      now:,
+      since: int.max(ffi_history.since(), now - history_window),
       slots:,
       runs: state.runs,
       proofs: list.length(state.cache),
+      events:,
+      samples:,
     )),
   )
+}
+
+/// How far back the dashboard's history reaches, in seconds.
+const history_window = 900
+
+fn event_time(event: fleet.Event) -> Int {
+  case event {
+    fleet.Granted(at:, ..) | fleet.Settled(at:, ..) -> at
+  }
 }
 
 fn unix_now() -> Int {
@@ -262,8 +321,18 @@ pub fn finish(
   use Nil <- result.try(bound(identity, worker))
   use Nil <- result.try(verify_blobs(cfg.blobs, completion))
 
-  store.finish(run, action, worker, serial, completion)
-  |> result.map(fn(_) { json.object([#("accepted", json.bool(True))]) })
+  use Nil <- result.try(store.finish(run, action, worker, serial, completion))
+
+  // The result is durable now, so the dashboard's history may show it.
+  ffi_history.settled(
+    serial,
+    case completion {
+      queue.Succeeded(_, _) -> True
+      queue.Rejected(_, _) -> False
+    },
+    unix_now(),
+  )
+  Ok(json.object([#("accepted", json.bool(True))]))
 }
 
 /// Check that every referenced object exists before storing references. An

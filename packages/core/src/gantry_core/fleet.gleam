@@ -8,6 +8,20 @@
 //// controller has not served a poll from the slot", never "the slot is idle".
 //// The decoder refuses a negative clock, a negative proof count, a repeated
 //// slot, and a repeated run, as the queue image's decoder does.
+////
+//// ## History
+////
+//// `events` and `samples` are the recent past: each lease a controller
+//// granted, each result it accepted, and the ready work it counted per pool
+//// each time the snapshot was read. `since` is the oldest second the history
+//// covers. Before it the page knows nothing, which is different from idle.
+//// The types do not say where the history came from: today it is the
+//// controller's memory, lost on restart, and a later change can fill the
+//// same types from durable step times without changing the page.
+////
+//// `ready` is the one statement of which pending actions a poll could lease
+//// now. The controller counts samples with it and the dashboard colours
+//// cells with it, and it mirrors the claim rule in `queue`.
 
 import gantry_core/protocol
 import gantry_core/queue
@@ -16,6 +30,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
+import gleam/string
 
 /// What one controller last heard from a slot.
 pub type Presence {
@@ -32,9 +47,47 @@ pub type Slot {
   Slot(worker: String, host: Option(String), presence: Presence)
 }
 
+/// How an accepted result ended.
+pub type Outcome {
+  Succeeded
+
+  Rejected
+}
+
+/// One thing a controller saw happen to a lease.
+pub type Event {
+  /// The controller granted lease `serial` on `action` of `run` to `worker`
+  /// at `at`, to lapse at `until`.
+  Granted(
+    serial: Int,
+    run: String,
+    action: String,
+    worker: String,
+    pool: String,
+    at: Int,
+    until: Int,
+  )
+
+  /// The controller accepted the result for lease `serial` at `at`.
+  Settled(serial: Int, outcome: Outcome, at: Int)
+}
+
+/// The ready actions in each pool at one moment.
+pub type Sample {
+  Sample(at: Int, ready: List(#(String, Int)))
+}
+
 /// The dashboard's view of one controller.
 pub type Fleet {
-  Fleet(now: Int, slots: List(Slot), runs: List(queue.Run), proofs: Int)
+  Fleet(
+    now: Int,
+    since: Int,
+    slots: List(Slot),
+    runs: List(queue.Run),
+    proofs: Int,
+    events: List(Event),
+    samples: List(Sample),
+  )
 }
 
 /// Encode a snapshot. Each run carries its derived phase, as status output
@@ -43,14 +96,17 @@ pub type Fleet {
 /// ## Examples
 ///
 /// ```gleam
-/// // fleet.encode(fleet.Fleet(0, [], [], 0))
+/// // fleet.encode(fleet.Fleet(0, 0, [], [], 0, [], []))
 /// ```
 pub fn encode(value: Fleet) -> json.Json {
   json.object([
     #("now", json.int(value.now)),
+    #("since", json.int(value.since)),
     #("slots", json.array(value.slots, encode_slot)),
     #("runs", json.array(value.runs, protocol.encode_run)),
     #("proofs", json.int(value.proofs)),
+    #("events", json.array(value.events, encode_event)),
+    #("samples", json.array(value.samples, encode_sample)),
   ])
 }
 
@@ -73,7 +129,186 @@ pub fn decoder() -> decode.Decoder(Fleet) {
     unique(decode.list(protocol.run_decoder()), fn(run: queue.Run) { run.id }),
   )
   use proofs <- decode.field("proofs", natural())
-  decode.success(Fleet(now, slots, runs, proofs))
+  use since <- decode.field("since", natural())
+  use events <- decode.field("events", decode.list(event_decoder()))
+  use samples <- decode.field("samples", decode.list(sample_decoder()))
+  decode.success(Fleet(now, since, slots, runs, proofs, events, samples))
+}
+
+/// The pending actions of a run that a poll in their pool could lease now:
+/// the run is a build or a queued candidate that has not failed, and every
+/// action each one depends on or runs after has passed or been reused. This
+/// is the claim rule of `queue.claim`, stated once for readers.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // fleet.ready(run)
+/// ```
+pub fn ready(run: queue.Run) -> List(queue.Work) {
+  let done =
+    list.filter_map(run.work, fn(work) {
+      case work.step {
+        queue.Passed(_) | queue.Reused(_) -> Ok(work.task.action.name)
+        queue.Pending(_)
+        | queue.Active(_)
+        | queue.Failed(_, _)
+        | queue.Skipped -> Error(Nil)
+      }
+    })
+    |> set.from_list
+
+  // Only a servable run offers work, and only pending work whose
+  // prerequisites all hold results.
+  case servable(run) {
+    False -> []
+    True ->
+      list.filter(run.work, fn(work) {
+        let action = work.task.action
+        case work.step {
+          queue.Pending(_) ->
+            list.all(
+              list.append(action.dependencies, action.after),
+              set.contains(done, _),
+            )
+          queue.Active(_)
+          | queue.Passed(_)
+          | queue.Reused(_)
+          | queue.Failed(_, _)
+          | queue.Skipped -> False
+        }
+      })
+  }
+}
+
+/// Count the ready actions of every run by pool, in pool name order.
+///
+/// ## Examples
+///
+/// ```gleam
+/// fleet.ready_by_pool([]) == []
+/// ```
+pub fn ready_by_pool(runs: List(queue.Run)) -> List(#(String, Int)) {
+  runs
+  |> list.flat_map(ready)
+  |> list.map(fn(work) { work.task.pool })
+  |> list.sort(string.compare)
+  |> list.chunk(fn(pool) { pool })
+  |> list.map(fn(group) {
+    case group {
+      [pool, ..] -> #(pool, list.length(group))
+      [] -> #("", 0)
+    }
+  })
+}
+
+/// Whether the queue leases this run's pending actions: a build or queued
+/// candidate that has not failed.
+fn servable(run: queue.Run) -> Bool {
+  case run.submission, queue.phase(run) {
+    queue.Build, queue.PhaseFailed | queue.Queued(_), queue.PhaseFailed -> False
+    queue.Build, _ | queue.Queued(_), _ -> True
+    queue.Waiting(_, _), _
+    | queue.Landing(_), _
+    | queue.Landed(_), _
+    | queue.Blocked(_, _), _
+    | queue.Unprepared(_, _, _), _
+    -> False
+  }
+}
+
+fn encode_event(value: Event) -> json.Json {
+  // Each event kind carries its own fields under one tag.
+  case value {
+    Granted(serial, run, action, worker, pool, at, until) ->
+      json.object([
+        #("kind", json.string("granted")),
+        #("serial", json.int(serial)),
+        #("run", json.string(run)),
+        #("action", json.string(action)),
+        #("worker", json.string(worker)),
+        #("pool", json.string(pool)),
+        #("at", json.int(at)),
+        #("until", json.int(until)),
+      ])
+    Settled(serial, outcome, at) ->
+      json.object([
+        #("kind", json.string("settled")),
+        #("serial", json.int(serial)),
+        #(
+          "outcome",
+          json.string(case outcome {
+            Succeeded -> "succeeded"
+            Rejected -> "rejected"
+          }),
+        ),
+        #("at", json.int(at)),
+      ])
+  }
+}
+
+fn event_decoder() -> decode.Decoder(Event) {
+  use kind <- decode.field("kind", decode.string)
+
+  // The tag decides which fields must follow.
+  case kind {
+    "granted" -> {
+      use serial <- decode.field("serial", natural())
+      use run <- decode.field("run", decode.string)
+      use action <- decode.field("action", decode.string)
+      use worker <- decode.field("worker", decode.string)
+      use pool <- decode.field("pool", decode.string)
+      use at <- decode.field("at", natural())
+      use until <- decode.field("until", natural())
+      decode.success(Granted(serial, run, action, worker, pool, at, until))
+    }
+    "settled" -> {
+      use serial <- decode.field("serial", natural())
+      use outcome <- decode.field("outcome", outcome_decoder())
+      use at <- decode.field("at", natural())
+      decode.success(Settled(serial, outcome, at))
+    }
+    _ -> decode.failure(Settled(0, Rejected, 0), "known event tag")
+  }
+}
+
+fn outcome_decoder() -> decode.Decoder(Outcome) {
+  use word <- decode.then(decode.string)
+
+  // Only the two outcomes a controller records are accepted.
+  case word {
+    "succeeded" -> decode.success(Succeeded)
+    "rejected" -> decode.success(Rejected)
+    _ -> decode.failure(Rejected, "known outcome")
+  }
+}
+
+fn encode_sample(value: Sample) -> json.Json {
+  json.object([
+    #("at", json.int(value.at)),
+    #(
+      "ready",
+      json.array(value.ready, fn(pair) {
+        json.object([
+          #("pool", json.string(pair.0)),
+          #("count", json.int(pair.1)),
+        ])
+      }),
+    ),
+  ])
+}
+
+fn sample_decoder() -> decode.Decoder(Sample) {
+  use at <- decode.field("at", natural())
+  use ready <- decode.field(
+    "ready",
+    decode.list({
+      use pool <- decode.field("pool", decode.string)
+      use count <- decode.field("count", natural())
+      decode.success(#(pool, count))
+    }),
+  )
+  decode.success(Sample(at, ready))
 }
 
 /// The Unix second a lease was granted. The core sets a lease's deadline once,
