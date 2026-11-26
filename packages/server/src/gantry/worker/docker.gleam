@@ -26,6 +26,7 @@ import gantry/blobs
 import gantry/internal/ffi_host
 import gantry/internal/ffi_worker
 import gantry/worker/cache
+import gantry/worker/cgroup
 import gantry/worker/controllers
 import gantry/worker/inputs
 import gantry_core/chunks
@@ -85,6 +86,7 @@ pub opaque type Limits {
     tmp: String,
     cache: Int,
     userns_seccomp: Option(String),
+    userns_cgroup: Option(cgroup.Base),
   )
 }
 
@@ -107,6 +109,7 @@ pub type Fault {
 /// | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 |
 /// | `GANTRY_WORKER_CACHE_MIB` | 2048 | 0 to 1048576 |
 /// | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path |
+/// | `GANTRY_WORKER_USERNS_CGROUP` | unset | a cgroup below /sys/fs/cgroup |
 ///
 /// The process default lets a BEAM build start its scheduler and dirty
 /// threads on a many-core host. The `/tmp` tmpfs counts against the
@@ -118,6 +121,11 @@ pub type Fault {
 /// `GANTRY_WORKER_USERNS_SECCOMP` names the seccomp profile that the `userns`
 /// sandbox runs under. A worker without it is not capable of `userns` and
 /// rejects such an action before creating anything.
+///
+/// `GANTRY_WORKER_USERNS_CGROUP` names a cgroup the worker's user owns. Each
+/// `userns` attempt then runs inside a child of it carrying the slot's
+/// limits, which the action can divide further. It needs the seccomp profile
+/// and a Docker daemon on the `cgroupfs` driver.
 ///
 /// ## Examples
 ///
@@ -194,7 +202,25 @@ pub fn limits_from(
       }
   })
 
-  Ok(Limits(cpus, memory, workspace, pids, nofile, tmp, cache, userns_seccomp))
+  use userns_cgroup <- result.try(cgroup.from_lookup(lookup))
+
+  // A cgroup only serves the userns profile, so it needs that profile too.
+  case userns_cgroup, userns_seccomp {
+    Some(_), None ->
+      Error("GANTRY_WORKER_USERNS_CGROUP needs GANTRY_WORKER_USERNS_SECCOMP")
+    Some(_), Some(_) | None, _ ->
+      Ok(Limits(
+        cpus,
+        memory,
+        workspace,
+        pids,
+        nofile,
+        tmp,
+        cache,
+        userns_seccomp,
+        userns_cgroup,
+      ))
+  }
 }
 
 /// Check that the host files the configured sandbox profiles need exist
@@ -255,37 +281,144 @@ pub fn try_sandboxes(limits: Limits) -> Result(Nil, String) {
     // Only a worker configured for the profile is asked to prove it.
     Error(_) -> Ok(Nil)
     Ok(flags) -> {
-      let reply =
-        ffi_worker.docker(
-          list.flatten([
-            ["run", "--rm"],
-            flags,
-            ["--entrypoint", "/bin/sh", collector, "-c", userns_trial],
-          ]),
-          60_000,
-          4096,
-          ffi_host.Combined,
-        )
+      use Nil <- result.try(trial(
+        flags,
+        userns_trial,
+        "this host cannot create user namespaces under the userns sandbox, so the slot will not serve it",
+        "check kernel.apparmor_restrict_unprivileged_userns",
+      ))
 
-      // Only a clean exit shows the namespaces were created.
-      case reply {
-        Ok(ffi_host.Command(exit: ffi_host.Exited(0), ..)) -> Ok(Nil)
-        Ok(ffi_host.Command(bytes:, ..)) ->
-          Error(
-            "this host cannot create user namespaces under the userns sandbox, so the slot will not serve it ("
-            <> {
-              bit_array.to_string(bytes)
-              |> result.unwrap("no output")
-              |> string.trim
-              |> string.slice(0, 256)
-            }
-            <> "); check kernel.apparmor_restrict_unprivileged_userns",
-          )
-        Error(reason) ->
-          Error("could not run the userns sandbox trial: " <> reason)
+      // A configured cgroup base is proven by entering a child of it.
+      case limits.userns_cgroup {
+        None -> Ok(Nil)
+        Some(base) -> try_cgroup(base, limits, flags)
       }
     }
   }
+}
+
+/// The command a trial container runs to show that the action's uid can
+/// create a cgroup below its attempt cgroup and move itself into it, which
+/// is what Loom's jail does for each execution, and that it cannot nest a
+/// second level the worker could not remove.
+const cgroup_trial =
+  "mkdir \"$GANTRY_CGROUP_BASE/trial\" && echo $$ > \"$GANTRY_CGROUP_BASE/trial/cgroup.procs\" && ! mkdir \"$GANTRY_CGROUP_BASE/trial/deeper\" 2>/dev/null"
+
+/// The attempt name the startup trial uses for its cgroup.
+const trial_name = "gantry-trial"
+
+/// Prove a cgroup base at startup: the daemon must place containers by path,
+/// the base must pass on its controllers, and a trial action must be able to
+/// enter a cgroup it made below its attempt cgroup.
+fn try_cgroup(
+  base: cgroup.Base,
+  limits: Limits,
+  flags: List(String),
+) -> Result(Nil, String) {
+  use driver <- result.try(
+    control(["info", "--format", "{{.CgroupDriver}}"], "")
+    |> result.map_error(fn(fault) {
+      case fault {
+        Rejected(reason) | Unavailable(reason) | JournalFault(reason) -> reason
+      }
+    }),
+  )
+
+  // Only the cgroupfs driver accepts a cgroup path as a container's parent.
+  use Nil <- result.try(case string.trim(driver) {
+    "cgroupfs" -> Ok(Nil)
+    other ->
+      Error(
+        "GANTRY_WORKER_USERNS_CGROUP needs a Docker daemon on the cgroupfs driver, and this one uses "
+        <> other
+        <> "; point DOCKER_HOST at one",
+      )
+  })
+
+  use Nil <- result.try(cgroup.prepare(base))
+
+  // The trial container is named for its base, because slots share a
+  // daemon, and one left by an earlier boot is removed before its cgroup.
+  let container =
+    "gantry-trial-"
+    <> string.slice(blobs.digest(<<cgroup.path(base):utf8>>), 0, 16)
+  let clear = fn() {
+    remove_container(container)
+    |> result.map_error(fn(fault) {
+      case fault {
+        Rejected(reason) | Unavailable(reason) | JournalFault(reason) -> reason
+      }
+    })
+  }
+  use _ <- result.try(clear())
+  use Nil <- result.try(cgroup.remove(base, trial_name))
+  use attempt <- result.try(cgroup.create(
+    base,
+    trial_name,
+    cgroup_limits(limits),
+  ))
+  let entered =
+    trial(
+      list.flatten([flags, cgroup.flags(attempt), ["--name", container]]),
+      cgroup_trial,
+      "a userns action cannot enter a cgroup below " <> attempt,
+      "check that the base is owned by the worker's user and delegated",
+    )
+  let removed = {
+    use _ <- result.try(clear())
+    cgroup.remove(base, trial_name)
+  }
+  use Nil <- result.try(entered)
+  removed
+}
+
+/// Run one throwaway container on the collector image and read its exit.
+fn trial(
+  flags: List(String),
+  command: String,
+  failure: String,
+  hint: String,
+) -> Result(Nil, String) {
+  let reply =
+    ffi_worker.docker(
+      list.flatten([
+        ["run", "--rm"],
+        flags,
+        ["--entrypoint", "/bin/sh", collector, "-c", command],
+      ]),
+      60_000,
+      4096,
+      ffi_host.Combined,
+    )
+
+  // Only a clean exit shows the trial did what the profile needs.
+  case reply {
+    Ok(ffi_host.Command(exit: ffi_host.Exited(0), ..)) -> Ok(Nil)
+    Ok(ffi_host.Command(bytes:, ..)) ->
+      Error(
+        failure
+        <> " ("
+        <> {
+          bit_array.to_string(bytes)
+          |> result.unwrap("no output")
+          |> string.trim
+          |> string.slice(0, 256)
+        }
+        <> "); "
+        <> hint,
+      )
+    Error(reason) -> Error("could not run the sandbox trial: " <> reason)
+  }
+}
+
+/// The slot's limits as the attempt cgroup takes them. They were bounded
+/// when read, so a parse cannot fail here.
+fn cgroup_limits(limits: Limits) -> cgroup.Limits {
+  cgroup.Limits(
+    memory_mib: int.parse(limits.memory) |> result.unwrap(128),
+    pids: int.parse(limits.pids) |> result.unwrap(64),
+    cpus: int.parse(limits.cpus) |> result.unwrap(1),
+  )
 }
 
 /// The sandbox flags an action container receives, apart from its mounts.
@@ -347,11 +480,22 @@ pub fn action_flags(
 /// ## Examples
 ///
 /// ```gleam
-/// // docker.cleanup(directory, name)
+/// // docker.cleanup(directory, limits, name)
 /// ```
-pub fn cleanup(directory: String, name: String) -> Result(Nil, Fault) {
+pub fn cleanup(
+  directory: String,
+  limits: Limits,
+  name: String,
+) -> Result(Nil, Fault) {
   use _ <- result.try(remove_container(name))
   use _ <- result.try(remove_container(name <> "-collector"))
+
+  // The attempt cgroup goes once no container can hold a process in it.
+  use Nil <- result.try(case limits.userns_cgroup {
+    None -> Ok(Nil)
+    Some(base) -> cgroup.remove(base, name) |> result.map_error(Unavailable)
+  })
+
   use _ <- result.try(control(["volume", "rm", name], "no such volume"))
   unstage(directory, name)
 }
@@ -472,7 +616,7 @@ pub fn execute(
   let path = directory <> "/" <> name <> ".staging"
 
   // An earlier try can have stopped after creating resources but before start.
-  use Nil <- result.try(cleanup(directory, name))
+  use Nil <- result.try(cleanup(directory, limits, name))
   use Nil <- result.try(
     simplifile.create_directory(path)
     |> result.replace_error(Unavailable(
@@ -484,7 +628,39 @@ pub fn execute(
     assignment,
     fetcher(directory, limits, network),
   ))
-  run(path, name, assignment.task, limits, flags, start, spool)
+  use extra <- result.try(attempt_cgroup(limits, assignment.task.sandbox, name))
+  run(
+    path,
+    name,
+    assignment.task,
+    limits,
+    list.append(flags, extra),
+    start,
+    spool,
+  )
+}
+
+/// Give a userns attempt its own cgroup when the worker has a base for one,
+/// and return the flags that place the container inside it. Any other
+/// attempt gets no cgroup and no flags, without touching the host.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.attempt_cgroup(limits, sandbox.Strict, "gantry-ab12")
+/// ```
+pub fn attempt_cgroup(
+  limits: Limits,
+  profile: sandbox.Profile,
+  name: String,
+) -> Result(List(String), Fault) {
+  case profile, limits.userns_cgroup {
+    sandbox.Userns, Some(base) ->
+      cgroup.create(base, name, cgroup_limits(limits))
+      |> result.map(cgroup.flags)
+      |> result.map_error(Unavailable)
+    sandbox.Userns, None | sandbox.Strict, _ -> Ok([])
+  }
 }
 
 /// Delete the slot-owned staging directory after its archives are unused.

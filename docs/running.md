@@ -449,6 +449,7 @@ its bounds at startup, and a value outside them stops the worker.
 | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The size of each of the `/tmp` and `/var/tmp` tmpfs mounts |
 | `GANTRY_WORKER_CACHE_MIB` | 2048 | 0 to 1048576 | The slot's cache of fetched input blobs under `GANTRY_WORKER_DIR/chunks`, pruned oldest first before each stage; 0 turns it off |
 | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path to a readable file | Makes the slot able to run the `userns` sandbox |
+| `GANTRY_WORKER_USERNS_CGROUP` | unset | an empty cgroup below `/sys/fs/cgroup` that the worker's user owns | Gives each `userns` attempt a delegated cgroup |
 
 `GANTRY_WORKER_DRAIN` (default 60, in seconds, 0 or more) bounds how long
 a worker sent SIGTERM waits for its current action before it gives the
@@ -476,6 +477,46 @@ set also runs one throwaway container under the `userns` flags at startup,
 creating a user, mount, and PID namespace, and refuses to start with that
 reason if the host says no.
 [Sandbox profiles](design-notes/sandbox-profiles.md)
+
+A `userns` action whose own sandbox sets cgroup limits, as Loom's jail does,
+also needs a cgroup v2 subtree it can manage. Docker cannot give it one:
+it mounts `/sys/fs/cgroup` read-only in every unprivileged container, and its
+`systemd` driver keeps each container in a root-owned scope. Three things
+provide it.
+
+- **The worker user's manager delegates the controllers.** As root, add
+  `/etc/systemd/system/user@.service.d/delegate.conf` with `[Service]` and
+  `Delegate=cpu cpuset io memory pids`, then run `systemctl daemon-reload`.
+- **The slot uses a second Docker daemon on the `cgroupfs` driver**, which
+  accepts a cgroup path as a container's parent, for example
+  `dockerd -H unix:///run/docker-loom.sock --exec-opt native.cgroupdriver=cgroupfs --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker --bridge=none --iptables=false --ip6tables=false --ip-masq=false`.
+  Actions run with no network, so this daemon needs none. Without the last
+  four flags it manages iptables and the `docker0` bridge beside the host's
+  own daemon. On the worker host the slots lost the controller 34 seconds
+  after it first started that way. The rule that blocked them was the agent
+  namespace's egress filter in `DOCKER-USER`, which rejects the tailnet
+  range, and root added a narrow exception for the controller's address.
+  The slot points `DOCKER_HOST` at it, and that daemon needs the collector
+  and action images.
+- **The slot names an empty cgroup the worker user owns** in
+  `GANTRY_WORKER_USERNS_CGROUP`, one per slot, for example
+  `/sys/fs/cgroup/user.slice/user-1002.slice/user@1002.service/gantry-01`.
+  Create it as that user with `mkdir`.
+
+For each `userns` attempt the worker then makes a child of that cgroup and
+writes the slot's memory, swap, process, and CPU limits on it. Swap is
+bounded at the memory size, as Docker bounds a container given `--memory`.
+It caps the cgroup's depth at one level, because the cgroups the action
+makes belong to its uid and the worker could not remove a deeper one. It opens only the
+files that create and move processes to the action's uid, places the
+container inside it, and bind-mounts it read-write at its own path. The
+container shares the host's cgroup namespace, and the action reads the path
+from `GANTRY_CGROUP_BASE` and from `LOOM_CGROUP_BASE`. Processes the action
+moves out of the container's own cgroup stay under the attempt cgroup's
+limits. At startup the worker checks the daemon's driver and the base. It
+also runs a trial action that must create a cgroup and move itself into it,
+and if any check fails the slot refuses to start with the reason. Cleanup
+removes the attempt cgroup with the attempt's containers.
 
 At startup the worker takes an exclusive SQLite lock on its journal, so a
 second worker with the same directory exits with an error. It then

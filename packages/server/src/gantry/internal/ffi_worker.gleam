@@ -104,3 +104,16 @@ pub fn archive_add(
 /// ```
 @external(erlang, "gantry_worker_ffi", "archive_close")
 pub fn archive_close(archive: Archive) -> Result(Nil, String)
+
+/// Remove one empty directory with rmdir(2), treating a missing one as
+/// removed. OTP's `file:del_dir/1` is the primitive: a cgroup v2 directory
+/// cannot be deleted recursively, because its interface files cannot be
+/// unlinked, and simplifile only offers the recursive delete.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_worker.remove_directory("/sys/fs/cgroup/.../gantry-1")
+/// ```
+@external(erlang, "gantry_worker_ffi", "remove_directory")
+pub fn remove_directory(path: String) -> Result(Nil, String)

@@ -49,7 +49,10 @@ process with its own ID, token, and journal directory. Controllers need a new
    the sum of their limits within the host. A slot in a pool whose
    repositories use `sandbox = "userns"` also needs
    `GANTRY_WORKER_USERNS_SECCOMP` ([runbook](running.md)), and that pool
-   belongs on a host with no strict repository's slots.
+   belongs on a host with no strict repository's slots. If its actions run
+   their own cgroup-limited sandbox, give each slot a cgroup base in
+   `GANTRY_WORKER_USERNS_CGROUP` and a `cgroupfs` Docker daemon in
+   `DOCKER_HOST`, as the runbook describes.
 9. **Verify.** Run an uncached action on a repository in the pool and check
    `.work[].step.lease.worker` in `gantry watch RUN_ID`. Fetch its log with
    `gantry blob`. If several slots can claim the action, use a smoke pool.

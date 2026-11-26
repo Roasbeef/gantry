@@ -391,3 +391,198 @@ the exit is not met. What remains, by cause:
 Gates: `make check`, `make e2e` on Linux, and the DST sweep. The TLA model
 does not describe task contents, so it should not need to change, and the
 step that adds the field confirms that.
+
+## Addendum · 2026-11-25 · a delegated cgroup for `userns`
+
+With `userns` deployed on the `loom` pool, 20 of Loom's remaining 22 test
+failures are one cause. Loom's jail wants a cgroup v2 base it can manage,
+and it reports `skip:cgroup-v2: cgroup /sys/fs/cgroup not delegated`. That
+fails 16 `project_template_test` cases ("the sandbox ran Git without full
+enforcement") and 4 evolution acceptance tests that refuse to author under
+`DegradedExecution`.
+
+**What Loom checks.** `DetectBase` in Loom's
+`packages/sandbox/internal/cgroup/cgroup.go` takes `LOOM_CGROUP_BASE`, or
+falls back to the helper's own cgroup. It accepts a base under four
+conditions:
+
+- The base is a cgroup2 directory with `memory` and `pids` in
+  `cgroup.controllers`.
+- It holds no processes. `/sys/fs/cgroup` itself is exempt.
+- The helper can `mkdir` a child in it.
+- The helper's own cgroup is inside the base, or the helper can write the
+  `cgroup.procs` of their common ancestor, as cgroup v2's containment rule
+  requires for moving a process.
+
+So the action, running as uid 65534 with every capability dropped, needs a
+writable cgroup subtree that contains its own processes.
+
+**The experiment.** It ran on the worker host (Ubuntu 22.04.1, kernel 5.15,
+systemd 249, Docker 23.0.1 with the `systemd` cgroup driver, runc 1.1.4,
+cgroup v2), through `systemd-run --user`, beside the live slots and without
+touching them. Each case ran the Gantry-shaped container: the strict flags
+plus the three `userns` flags, on the pinned Alpine image. Inside, it read
+`/proc/self/cgroup` and the cgroup mount, and tried `mkdir` in its own cgroup,
+both as uid 65534 and as root of a fresh `unshare -U -r` namespace.
+
+| Extra flags | The action's cgroup view | `mkdir` | As namespace root |
+| --- | --- | --- | --- |
+| `--cgroupns=private` | `0::/`, all controllers, mounted `ro`, `root:root 755` | `Read-only file system` | `Read-only file system` |
+| `--cgroupns=host` | `/system.slice/docker-<id>.scope`, mounted `ro` | `Read-only file system` | `Read-only file system` |
+| `--cgroup-parent=<a path in the user's delegated subtree>` | refused: `cgroup-parent for systemd cgroup should be a valid slice named as "xxx.slice"`, exit 125 | | |
+| `--cgroupns=private --cgroup-parent=gantry-probe.slice` | `0::/`, mounted `ro` | `Read-only file system` | `Read-only file system` |
+
+On the host, every cgroup Docker made is `root:root 755`. That covers the
+`gantry.slice` and `gantry-probe.slice` that systemd created for the parent,
+and the container's `docker-<id>.scope`, which systemd marks `Delegate=yes`.
+`chmod o+w` on a scope's `cgroup.procs` as the worker user fails with
+`Operation not permitted`.
+
+The one rootless candidate left was a cgroup the worker user does own. The
+user's manager (`user@1002.service`, `Delegate=pids memory`) owns its subtree,
+with `memory` and `pids` available. The worker made
+`user@1002.service/gantry-probe`, set it to mode 0777 with writable
+`cgroup.procs` and `cgroup.subtree_control`, and bind-mounted it into the
+container at `/cg` with `--cgroupns=host`. Inside, as uid 65534:
+
+| Step | Result |
+| --- | --- |
+| `mkdir /cg/exec-1` | ok |
+| `echo +pids > /cg/cgroup.subtree_control` | ok |
+| `echo 16 > /cg/exec-1/pids.max` | ok |
+| `echo $$ > /cg/exec-1/cgroup.procs` | `Permission denied` |
+
+The cgroup can be managed but never entered. The container's processes live
+in Docker's root-owned scope under `system.slice`, so the common ancestor of
+source and destination is the root cgroup, whose `cgroup.procs` only root can
+write. Loom's `unreachableBase` refuses exactly this base.
+
+**There is no rootless path on this host.** Two things block it, and each
+needs root to change:
+
+1. **The cgroup mount.** Docker mounts `/sys/fs/cgroup` read-only in every
+   container it does not run `--privileged`, whatever the `cgroupns` mode,
+   and no `docker run` flag changes that.
+2. **Where containers live.** With the `systemd` driver a container's cgroup
+   can only sit under a system slice, and those are root-owned. Neither the
+   worker user nor uid 65534 can own a cgroup that holds the action's
+   processes.
+
+Rootless Docker does not get around this. Its containers' cgroups belong to
+the container's root, not uid 65534. It also needs the `uidmap` package
+(`newuidmap` is absent here), and it can't apply `--cpus`, because the user
+manager delegates only `memory` and `pids`.
+
+**What root would need to do.** The narrowest design keeps the fleet's
+Docker untouched. It gives the `loom` slots their own daemon that places
+containers inside a cgroup the worker owns. The steps, none of which this
+session can run:
+
+1. Delegate the CPU controller to user managers, so per-attempt limits can
+   be set on the worker's own cgroups. Add
+   `/etc/systemd/system/user@.service.d/delegate.conf` with
+   `[Service]` and `Delegate=cpu cpuset io memory pids`, then run
+   `systemctl daemon-reload`. It takes effect when the worker user's manager
+   next starts, and that restarts the live `gantry-worker@` user units.
+2. Run a second daemon for the `loom` pool with the `cgroupfs` driver, for
+   example `docker-loom.service` running `dockerd -H
+   unix:///run/docker-loom.sock --exec-opt native.cgroupdriver=cgroupfs
+   --data-root /var/lib/docker-loom --exec-root /run/docker-loom --group docker
+   --bridge=none --iptables=false --ip6tables=false --ip-masq=false`. The
+   last four flags were missing from this note's first edition. Without
+   them the second daemon manages iptables and the `docker0` bridge beside
+   the system daemon. On the worker host the slots lost the controller 34
+   seconds after it started. The blocking rule was the agent namespace's
+   egress filter in `DOCKER-USER`, which rejects 100.64.0.0/10. Root added
+   an exception for the controller's address and port, and restarted the
+   daemon with the four flags.
+   With that driver `--cgroup-parent` takes a path, so it can name a cgroup
+   inside the worker's delegated subtree.
+3. Pull the action and collector images into that daemon.
+
+The worker change that would follow, untested here because it needs step 2:
+
+- For each `userns` attempt, make a cgroup `C` in the worker's own subtree.
+  Write the slot's `memory.max`, `pids.max`, and `cpu.max` there, since the
+  action can move processes out of the container's own cgroup and so out of
+  Docker's limits.
+- Make `C` writable for uid 65534 and pass `--cgroup-parent=C` and
+  `--cgroupns=host` to the daemon from `DOCKER_HOST`.
+- Bind-mount `C` read-write at its own path and set `LOOM_CGROUP_BASE=C`.
+- Remove `C` in `cleanup`.
+
+Strict and its recipe stay unchanged. Whether the `cgroupfs` daemon accepts
+a parent inside a user manager's subtree, and how it coexists with systemd
+there, is the first thing to measure once root sets it up.
+
+The other root paths are wider. Switching the fleet's daemon to the `cgroupfs`
+driver restarts every container on the host. A root helper that chowns each
+container's scope would race the container's start and work against
+systemd's delegation contract. gVisor would need `runsc` installed and its
+cgroupfs support measured.
+
+**Left behind by the experiment.** Two empty transient system slices,
+`gantry.slice` and `gantry-probe.slice`, which systemd made for the
+`--cgroup-parent` probe. They hold no processes, removing them needs root, and
+they go away at reboot. The scratch scripts were deleted.
+
+### After root's setup · 2026-11-26
+
+Root ran steps 1 and 2 on the worker host:
+- **Delegation:** `delegate.conf` gives user managers `cpu cpuset io memory
+  pids`, and the worker user's running manager already showed all five.
+- **Daemon:** `docker-loom` runs on `unix:///run/docker-loom.sock` with the
+  `cgroupfs` driver.
+
+Step 3 was done through the `docker` group. The collector image came from
+Docker Hub by digest, and Loom's action image came from the local registry by
+the digest `controller.toml` names.
+
+The sketch then held, as measured through `systemd-run --user` beside the
+live slots:
+
+- **The daemon accepts the parent.** The probe made an attempt cgroup `C`
+  under `user@1002.service/gantry-probe` and passed
+  `--cgroup-parent=<C without the /sys/fs/cgroup prefix> --cgroupns=host`.
+  The container landed at `C/<container id>`, inside `C`.
+- **The action can enter what it makes.** With `C` mode 0777 and its
+  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` mode 0666,
+  uid 65534 made `C/exec-1`, wrote `pids.max`, and moved a process into it.
+  The move that failed with `Permission denied` before now succeeds, because
+  the common ancestor is `C`.
+- **Loom's own check accepts it.** `loom-exec --self-test`, built in the
+  container from Loom's source with `LOOM_CGROUP_BASE=C`, advertised
+  `features: rlimits, pgroup, bwrap, landlock, seccomp, cgroup-v2`. It
+  reported 11 enforced and 0 skipped, including "fork bomb capped by pids
+  limit". Without the variable it skips cgroup v2, because the container's
+  own cgroup holds processes.
+
+**Built.** A slot with `GANTRY_WORKER_USERNS_CGROUP` set, naming an empty
+cgroup its user owns, gives each `userns` attempt a child of it, and
+`gantry/worker/cgroup` owns those effects.
+- **Limits:** the attempt cgroup carries the slot's limits (`memory.max`,
+  `memory.swap.max` at the same size when the kernel accounts swap,
+  `pids.max`, and `cpu.max` when delegated), so processes moved out of the
+  container's cgroup stay bounded. The limit files keep the worker's mode,
+  so the action cannot raise them.
+- **Depth:** `cgroup.max.depth` is 1 on the attempt cgroup. Each cgroup the
+  action makes is owned by its uid with mode 0755, so the worker could not
+  remove a cgroup two levels down, and cleanup would retry forever. Docker's
+  container cgroup and Loom's per-execution cgroups both sit one level
+  down, and the startup trial checks that a second level is refused.
+- **Flags:** the container gets `--cgroup-parent`, `--cgroupns=host`, a
+  read-write bind of the attempt cgroup at its own path, and
+  `GANTRY_CGROUP_BASE` and `LOOM_CGROUP_BASE` set to that path.
+- **Cleanup:** cleanup removes the attempt cgroup depth first, through
+  rmdir(2), after the containers.
+- **Startup checks:** at startup the worker checks that the daemon uses the
+  `cgroupfs` driver and that the base passes on `memory` and `pids` and holds
+  no processes. It also runs a trial action that must create a cgroup and
+  enter it, and refuses to start otherwise.
+- **Unchanged:** strict actions, and `userns` actions on a worker without
+  the setting, get the same flags as before. The recipe does not change,
+  because the cgroup is the slot's capacity, not an input.
+
+`--cgroupns=host` lets the action read the host's cgroup paths. That is a
+smaller exposure than what `userns` already gives up, and only `userns`
+attempts get it.

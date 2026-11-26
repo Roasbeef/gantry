@@ -34,8 +34,14 @@ const strict = [
 ]
 
 pub fn a_strict_action_keeps_todays_flags_exactly_test() {
-  // A userns-capable worker still runs a strict task with the strict flags.
-  list.each([[], seccomp], fn(settings) {
+  // A userns-capable worker, with or without a cgroup base, still runs a
+  // strict task with the strict flags. The cgroup flags are added apart from
+  // these, and the test below shows a strict task never gets them.
+  let with_cgroup =
+    list.append(seccomp, [
+      #("GANTRY_WORKER_USERNS_CGROUP", "/sys/fs/cgroup/user.slice/gantry-01"),
+    ])
+  list.each([[], seccomp, with_cgroup], fn(settings) {
     assert docker.action_flags(limits(settings), sandbox.Strict) == Ok(strict)
   })
 }
@@ -122,4 +128,21 @@ pub fn execute_refuses_before_creating_anything_test() {
 fn absolute(path: String) -> String {
   let assert Ok(cwd) = simplifile.current_directory()
   cwd <> "/" <> path
+}
+
+pub fn only_a_userns_attempt_gets_a_cgroup_test() {
+  // The base is never touched: neither case reaches the host.
+  let configured =
+    limits(
+      list.append(seccomp, [
+        #(
+          "GANTRY_WORKER_USERNS_CGROUP",
+          "/sys/fs/cgroup/user.slice/gantry-never-made",
+        ),
+      ]),
+    )
+  assert docker.attempt_cgroup(configured, sandbox.Strict, "gantry-ab12")
+    == Ok([])
+  assert docker.attempt_cgroup(limits(seccomp), sandbox.Userns, "gantry-ab12")
+    == Ok([])
 }
