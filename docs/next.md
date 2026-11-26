@@ -38,6 +38,7 @@ including a worker sent SIGTERM mid-action whose run passes.
 | Throughput | One voter holds 100 actions per second across 100 repositories on four vCPUs (ready p99 145 ms), and saturates near 110. Three voters on that host hold 75 ([measurements](controller-load.md#the-indexed-layout-9f273c1)) |
 | GitHub | Pilot done on a disposable, unprotected branch. Protected-branch rules are not piloted |
 | Documentation | Brought level with the code in this pass, and a tour, an API reference, a scheduling page, and an operations page added |
+| Dashboard | A Lustre pressure board at `/ui` reads `GET /v1/fleet` with an optional view token, verified against a local controller and two Docker slots, and not yet against the live fleet ([design note](design-notes/dashboard.md)) |
 
 ### What this series changed
 
@@ -207,6 +208,15 @@ the third slice.
    - Pilot protected-branch rules on a disposable repository
      ([integrating](integrating.md#check-a-live-deployment)).
    - Collect unreferenced blobs and bundles.
+10. **Finish the dashboard.** Set `GANTRY_VIEW_TOKEN` and `host` labels on
+    the live fleet and watch a Loom group through `/ui`, with the user's
+    go-ahead. Then the open items in the
+    [design note](design-notes/dashboard.md#open): durable step times in the
+    queue image to replace the per-controller lease history (a format
+    change, so after snapshot versioning and the indexed layout), presence
+    and history gathered across voters, and a push stream. **Exit:** an operator names
+    a stuck run's cause from the board alone. **Guard:** `/v1/fleet` stays
+    read-only and the view token cannot admit work.
 
 ## Rulings already made
 

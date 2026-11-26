@@ -3,14 +3,18 @@
 import gantry/blobs
 import gantry/config.{type Config}
 import gantry/fault.{type Fault}
+import gantry/internal/ffi_history
+import gantry/internal/ffi_presence
 import gantry/prepare
 import gantry/store
+import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
 import gantry_core/request
 import gleam/dict
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -195,11 +199,111 @@ pub fn claim(
     request.valid_id(pool),
     fault.Invalid("invalid identifier"),
   ))
+  let now = unix_now()
+  ffi_presence.record(worker, pool, now)
+  use assignment <- result.try(store.claim(worker, pool, now))
+
+  // Only a committed lease enters the dashboard's history, keyed by its
+  // serial, so a replayed poll that returns the same lease adds nothing.
+  case assignment {
+    Some(granted) -> {
+      let lease = granted.lease
+      ffi_history.granted(
+        queue.lease_serial(lease),
+        granted.run,
+        granted.task.action.name,
+        queue.lease_worker(lease),
+        granted.task.pool,
+        now,
+        queue.lease_until(lease),
+      )
+    }
+    None -> Nil
+  }
+
+  Ok(option.map(assignment, protocol.encode_assignment))
+}
+
+/// Read the dashboard's snapshot: every retained run, each registered slot
+/// with the latest poll this controller served for it, and the clock. It
+/// changes nothing. A slot's presence is this controller's memory, so behind a
+/// gateway that spreads polls over voters a slot can read as `Unseen` here.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // api.fleet(config)
+/// ```
+pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
+  use runs <- result.try(store.runs())
+  let now = unix_now()
+
+  // Each read samples the ready work, so the samples cover the times a page
+  // was watching and nothing else; the page draws the gaps as unknown.
+  ffi_history.sample(now, fleet.ready_by_pool(runs))
+  ffi_history.prune(now, history_window)
+
+  // Every registered slot, with the latest poll this controller served.
+  let polls =
+    ffi_presence.all()
+    |> list.map(fn(poll) { #(poll.0, fleet.Polled(poll.1, poll.2)) })
+    |> dict.from_list
+  let slots =
+    list.map(cfg.workers, fn(worker) {
+      let presence = dict.get(polls, worker.id) |> result.unwrap(fleet.Unseen)
+      fleet.Slot(worker.id, worker.host, presence)
+    })
+
+  // The recorded past, oldest first, typed from the table's rows.
+  let grants =
+    ffi_history.grants()
+    |> list.map(fn(row) {
+      fleet.Granted(row.0, row.1, row.2, row.3, row.4, row.5, row.6)
+    })
+  let settlements =
+    ffi_history.settlements()
+    |> list.map(fn(row) {
+      // The table stores success as a boolean.
+      let outcome = case row.1 {
+        True -> fleet.Succeeded
+        False -> fleet.Rejected
+      }
+
+      fleet.Settled(row.0, outcome, row.2)
+    })
+  let events =
+    list.append(grants, settlements)
+    |> list.sort(fn(a, b) { int.compare(event_time(a), event_time(b)) })
+  let samples =
+    ffi_history.samples()
+    |> list.map(fn(row) { fleet.Sample(row.0, row.1) })
+    |> list.sort(fn(a, b) { int.compare(a.at, b.at) })
+
+  Ok(
+    fleet.encode(fleet.Fleet(
+      now:,
+      since: int.max(ffi_history.since(), now - history_window),
+      slots:,
+      runs:,
+      events:,
+      samples:,
+    )),
+  )
+}
+
+/// How far back the dashboard's history reaches, in seconds.
+const history_window = 900
+
+fn event_time(event: fleet.Event) -> Int {
+  case event {
+    fleet.Granted(at:, ..) | fleet.Settled(at:, ..) -> at
+  }
+}
+
+fn unix_now() -> Int {
   let #(now, _) =
     timestamp.system_time() |> timestamp.to_unix_seconds_and_nanoseconds
-
-  store.claim(worker, pool, now)
-  |> result.map(option.map(_, protocol.encode_assignment))
+  now
 }
 
 /// Accept a result only after the worker staged its log and output bytes.
@@ -223,8 +327,18 @@ pub fn finish(
   use Nil <- result.try(bound(identity, worker))
   use Nil <- result.try(verify_blobs(cfg.blobs, completion))
 
-  store.finish(run, action, worker, serial, completion)
-  |> result.map(fn(_) { json.object([#("accepted", json.bool(True))]) })
+  use Nil <- result.try(store.finish(run, action, worker, serial, completion))
+
+  // The result is durable now, so the dashboard's history may show it. An
+  // interrupted attempt lapses and is reassigned, so it stays unsettled and
+  // the history shows it as a lapse, the same as an expired lease.
+  case completion {
+    queue.Succeeded(_, _) -> ffi_history.settled(serial, True, unix_now())
+    queue.Rejected(_, _) -> ffi_history.settled(serial, False, unix_now())
+    queue.Interrupted -> Nil
+  }
+
+  Ok(json.object([#("accepted", json.bool(True))]))
 }
 
 /// Check that every referenced object exists before storing references. An

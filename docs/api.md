@@ -9,12 +9,17 @@ request schemas.
 
 ## Roles and routes
 
-A request carries `Authorization: Bearer TOKEN`. There are three kinds of
+A request carries `Authorization: Bearer TOKEN`. There are four kinds of
 credential. The agent token and the submit token are role tokens set in the
 controller's environment as `GANTRY_TOKEN` and `GANTRY_SUBMIT_TOKEN` (at least
 32 bytes each, and different from each other). A worker token is per worker.
 The controller stores only its SHA-256 in a `[[worker]]` entry, and the
 worker's identity comes from which entry matches, never from the request body.
+The optional view token, `GANTRY_VIEW_TOKEN`, reads run status, the fleet
+snapshot, and blobs, and nothing else. It is meant for the dashboard, so a
+browser never holds a credential that admits work. It has the same length
+floor as the role tokens and must differ from them and from every worker
+token.
 
 | Route | Credential | Purpose |
 | --- | --- | --- |
@@ -24,11 +29,13 @@ worker's identity comes from which entry matches, never from the request body.
 | `POST /v1/plans` | agent | Resolve a graph without admitting it |
 | `POST /v1/runs` | agent | Admit a pinned build |
 | `POST /v1/submits` | submit | Admit an ordered group of PRs |
-| `GET /v1/runs/{id}` | agent or submit | Read a run's status |
+| `GET /v1/runs/{id}` | agent, submit, or view | Read a run's status |
+| `GET /v1/fleet` | agent, submit, or view | Read the dashboard's snapshot |
 | `POST /v1/claims` | worker | Poll for an assignment |
 | `POST /v1/results` | worker | Report a finished action |
 | `PUT /v1/blobs/{sha256}` | worker | Upload a log or output |
-| `GET /v1/blobs/{sha256}` | agent or worker | Download a blob |
+| `GET /v1/blobs/{sha256}` | agent, view, or worker | Download a blob |
+| `GET /ui`, `GET /ui/{file}` | none | The dashboard's page, script and stylesheet |
 
 `/health` and `/ready` return 503 when Ra cannot confirm a majority. Any
 other route answers 404. Bodies of POST requests are JSON and at most 256 KiB
@@ -78,6 +85,46 @@ lease. The worker treats that 409 as final and clears its journal entry.
 
 A blob upload answers `{"digest": SHA}` and refuses (400) a body whose SHA-256
 differs from the path.
+
+## The fleet snapshot
+
+`GET /v1/fleet` answers what the dashboard draws, encoded and decoded by
+one module, `gantry_core/fleet`:
+
+```json
+{"now": 1764000000, "since": 1763999100,
+ "slots": [{"worker": "linux-01", "host": "builder",
+            "presence": {"kind": "polled", "pool": "linux", "at": 1763999998}},
+           {"worker": "linux-02", "host": null,
+            "presence": {"kind": "unseen"}}],
+ "runs": [ ...each retained run, as GET /v1/runs/{id} answers it... ],
+ "events": [{"kind": "granted", "serial": 7, "run": "check-1", "action": "verify",
+             "worker": "linux-01", "pool": "linux", "at": 1763999950, "until": 1764001500},
+            {"kind": "settled", "serial": 7, "outcome": "succeeded", "at": 1763999990}],
+ "samples": [{"at": 1763999998, "ready": [{"pool": "linux", "count": 4}]}]}
+```
+
+`slots` lists every `[[worker]]` entry, with its optional `host` label. A
+slot's `presence` is the latest poll that this controller served, kept in
+memory and lost on restart, because writing it to the replicated queue would
+replicate every idle poll. `unseen` means this controller has not served a
+poll from the slot since it started. Behind a gateway that spreads polls
+over voters, a live slot can read as `unseen` on one controller. The runs
+are read through the indexed layout's run index, without the proof index.
+
+`events` and `samples` are the last fifteen minutes this controller saw, at
+most 3,000 entries, held in memory. A `granted` event is recorded once the
+claim commits and is keyed by its lease serial, so a replayed poll adds
+nothing. A `settled` event is recorded once the result commits. A sample
+counts the ready actions per pool each time the snapshot is read, so samples
+exist only while some page is watching. `since` is the oldest second the
+history covers: the controller's start, the window's start, or the newest
+entry dropped by the cap, whichever is latest. Before `since` the history
+knows nothing, which is not the same as idle. Expiries and cache reuse happen
+inside a claim and have no events; a reader infers a lapse from a grant
+without a result whose lease is no longer active.
+
+The route changes nothing in the queue. Reading it records one sample.
 
 ## Errors
 

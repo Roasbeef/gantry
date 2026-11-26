@@ -2,6 +2,7 @@ import gantry/api
 import gantry/config
 import gantry/fault
 import gleam/dict
+import gleam/option
 import gleam/string
 
 const agent = "agent-token-agent-token-agent-token-0"
@@ -9,7 +10,7 @@ const agent = "agent-token-agent-token-agent-token-0"
 const submit = "submit-token-submit-token-submit-tok0"
 
 fn secrets() -> config.Secrets {
-  config.Secrets(agent:, submit:, github: "")
+  config.Secrets(agent:, submit:, view: option.None, github: "")
 }
 
 /// A complete configuration whose workers section is `workers`.
@@ -119,4 +120,44 @@ pub fn a_result_naming_another_worker_is_forbidden_test() {
     <> string.repeat("0", 64)
     <> "\"}}"
   let assert Error(fault.Forbidden(_)) = api.finish(loaded(), "linux-01", body)
+}
+
+pub fn a_worker_may_carry_a_host_label_test() {
+  let text =
+    document(
+      worker_entry("linux-01", "token-for-linux-01")
+      <> "host = \"gilgamesh\"\n"
+      <> worker_entry("linux-02", "token-for-linux-02"),
+    )
+  let assert Ok(cfg) = config.parse(text, secrets())
+  let assert [first, second] = cfg.workers
+  assert first.host == option.Some("gilgamesh")
+  assert second.host == option.None
+}
+
+pub fn a_host_label_must_be_an_identifier_test() {
+  let text =
+    document(
+      worker_entry("linux-01", "token-for-linux-01") <> "host = \"../x\"\n",
+    )
+  let assert Error(_) = config.parse(text, secrets())
+}
+
+pub fn the_view_token_must_differ_from_the_role_tokens_test() {
+  let text = document(worker_entry("linux-01", "token-for-linux-01"))
+  let view = "view-token-view-token-view-token-0000"
+  let assert Ok(cfg) =
+    config.parse(text, config.Secrets(..secrets(), view: option.Some(view)))
+  assert cfg.view_token == option.Some(view)
+  let assert Error(_) =
+    config.parse(text, config.Secrets(..secrets(), view: option.Some(agent)))
+  let assert Error(_) =
+    config.parse(text, config.Secrets(..secrets(), view: option.Some(submit)))
+}
+
+pub fn a_worker_token_cannot_be_the_view_token_test() {
+  let view = "view-token-view-token-view-token-0000"
+  let text = document(worker_entry("linux-01", view))
+  let assert Error(_) =
+    config.parse(text, config.Secrets(..secrets(), view: option.Some(view)))
 }

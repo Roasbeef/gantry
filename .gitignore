@@ -4,3 +4,4 @@
 /build/
 .env
 erl_crash.dump
+/packages/*/.lustre/

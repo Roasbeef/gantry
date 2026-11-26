@@ -1,11 +1,17 @@
 //// The loopback API authenticates build, worker, and submission authority.
 //// Large objects travel outside the replicated queue snapshot.
+////
+//// The read routes (run status, the fleet snapshot, and blobs) also accept
+//// the optional view token, which reads and never writes. The dashboard's
+//// static files under `/ui` carry no queue data and need no credential; the
+//// page asks for a token and sends it with each read.
 
 import gantry/api
 import gantry/blobs
 import gantry/config.{type Config}
 import gantry/fault.{type Fault}
 import gantry/store
+import gantry/ui
 import gantry_core/request as admission
 import gleam/bit_array
 import gleam/bytes_tree
@@ -51,9 +57,15 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
       with_json(req, fn(body) { api.group(cfg, body) |> respond })
     }
     Get, ["v1", "runs", id] -> {
-      use <- authorized_either(req, cfg.agent_token, cfg.submit_token)
+      use <- reader(req, cfg)
       api.get(id) |> respond
     }
+    Get, ["v1", "fleet"] -> {
+      use <- reader(req, cfg)
+      api.fleet(cfg) |> respond
+    }
+    Get, ["ui"] -> ui.asset("index.html")
+    Get, ["ui", name] -> ui.asset(name)
     Post, ["v1", "claims"] -> {
       use identity <- worker(req, cfg)
       with_json(req, fn(body) { claim_reply(identity, body) })
@@ -68,7 +80,7 @@ pub fn handle(cfg: Config, req: Request(Connection)) -> Reply {
       upload(cfg.blobs, id, body)
     }
     Get, ["v1", "blobs", id] -> {
-      use <- agent_or_worker(req, cfg)
+      use <- agent_viewer_or_worker(req, cfg)
       download(cfg.blobs, id)
     }
     _, _ -> error(404, "route not found")
@@ -121,22 +133,29 @@ fn authorized(
   }
 }
 
-/// Allow two roles to read shared state.
+/// Allow the agent, submit, and view roles to read shared state.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // use <- authorized_either(request, agent_token, submit_token)
+/// // use <- reader(request, config)
 /// ```
-fn authorized_either(
-  req: Request(Connection),
-  first: String,
-  second: String,
-  then: fn() -> Reply,
-) -> Reply {
-  case accepts(req, first) || accepts(req, second) {
+fn reader(req: Request(Connection), cfg: Config, then: fn() -> Reply) -> Reply {
+  case
+    accepts(req, cfg.agent_token)
+    || accepts(req, cfg.submit_token)
+    || viewer(req, cfg)
+  {
     True -> then()
     False -> fault_reply(fault.Unauthorized("authentication required"))
+  }
+}
+
+/// Whether the request presents the view token, when one is configured.
+fn viewer(req: Request(Connection), cfg: Config) -> Bool {
+  case cfg.view_token {
+    Some(token) -> accepts(req, token)
+    None -> False
   }
 }
 
@@ -160,22 +179,23 @@ fn worker(
   }
 }
 
-/// Allow the build agent or any registered worker to read shared artifacts.
+/// Allow the build agent, the view role, or any registered worker to read
+/// shared artifacts.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // use <- agent_or_worker(request, config)
+/// // use <- agent_viewer_or_worker(request, config)
 /// ```
-fn agent_or_worker(
+fn agent_viewer_or_worker(
   req: Request(Connection),
   cfg: Config,
   then: fn() -> Reply,
 ) -> Reply {
   let worker = bearer(req) |> result.try(config.worker_for(cfg, _))
 
-  // The agent token or any registered worker credential may read.
-  case accepts(req, cfg.agent_token), worker {
+  // The agent token, the view token, or any registered worker may read.
+  case accepts(req, cfg.agent_token) || viewer(req, cfg), worker {
     True, _ | False, Ok(_) -> then()
     False, Error(Nil) ->
       fault_reply(fault.Unauthorized("authentication required"))

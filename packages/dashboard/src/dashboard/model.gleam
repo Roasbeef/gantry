@@ -1,0 +1,343 @@
+//// The page's state and every transition that does not touch the browser.
+//// `dashboard` wires these to fetches and timers; this module imports no
+//// Lustre, so its tests run without a page.
+////
+//// ## Flow
+////
+//// | Message | From | To |
+//// | --- | --- | --- |
+//// | `TokenSubmitted` | `SignedOut` | `Connecting`, and the first fetch |
+//// | `Tick` | any signed-in state with no fetch in flight | the same, with a fetch in flight |
+//// | `FleetAnswered` 200 | any | `Live`, with the board rebuilt |
+//// | `FleetAnswered` 401 | any | `SignedOut`, the token forgotten |
+//// | `FleetAnswered` other | any | `Lost`, the last board kept and marked stale |
+//// | `FleetAnswered` for an earlier token | any | unchanged: the answer is dropped |
+//// | `SignedOut` | any | `SignedOut`, the board dropped |
+////
+//// The path through the module: `initial` builds the signed-out or
+//// connecting model, `receive` folds each fleet answer into it,
+//// `choose_run` and `choose_action` move the selection, and `receive_log`
+//// installs a log once its blob arrives.
+////
+//// A fetch in flight blocks the next tick, so a slow controller never sees
+//// more than one request at a time from a page.
+
+import dashboard/board.{type Board}
+import dashboard/history.{type History}
+import gantry_core/fleet
+import gleam/dynamic/decode
+import gleam/int
+import gleam/json
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
+
+/// How the page stands with the controller.
+pub type Connection {
+  /// No token yet, or the controller refused the last one.
+  SignedOut(notice: Option(String))
+
+  /// A token is set and the first answer has not arrived.
+  Connecting
+
+  /// The latest answer was a snapshot.
+  Live
+
+  /// The latest answer was an error; the board shown is the last good one.
+  Lost(reason: String)
+}
+
+/// The log pane for the chosen action.
+pub type Log {
+  NoLog
+  Loading(digest: String)
+  Loaded(digest: String, text: String)
+  LogFailed(digest: String, reason: String)
+}
+
+/// The pane a narrow screen shows.
+pub type Tab {
+  PoolsTab
+  RunsTab
+  DetailTab
+}
+
+/// The whole page.
+pub type Model {
+  Model(
+    token: String,
+    draft: String,
+    connection: Connection,
+    board: Option(Board),
+    history: Option(History),
+    chosen_run: Option(String),
+    chosen_action: Option(String),
+    log: Log,
+    tab: Tab,
+    show_finished: Bool,
+    in_flight: Bool,
+  )
+}
+
+/// Everything that can happen to the page.
+pub type Msg {
+  DraftChanged(String)
+  TokenSubmitted
+  SignOut
+  Tick
+  FleetAnswered(token: String, status: Int, body: String)
+  RunChosen(String)
+  ActionChosen(run: String, action: String)
+  LogAnswered(digest: String, status: Int, body: String)
+  TabChosen(Tab)
+  FinishedToggled
+  RunCleared
+}
+
+/// The most log lines the pane holds. A longer log shows its tail.
+pub const log_lines = 400
+
+/// The page before anything is fetched, given the stored token.
+///
+/// ## Examples
+///
+/// ```gleam
+/// model.initial("").connection == model.SignedOut(option.None)
+/// ```
+pub fn initial(token: String) -> Model {
+  Model(
+    token:,
+    draft: "",
+    connection: case token {
+      "" -> SignedOut(None)
+      _ -> Connecting
+    },
+    board: None,
+    history: None,
+    chosen_run: None,
+    chosen_action: None,
+    log: NoLog,
+    tab: RunsTab,
+    show_finished: False,
+    in_flight: False,
+  )
+}
+
+/// Whether the page holds a token it may fetch with.
+///
+/// ## Examples
+///
+/// ```gleam
+/// model.signed_in(model.initial("t")) == True
+/// ```
+pub fn signed_in(model: Model) -> Bool {
+  case model.connection {
+    SignedOut(_) -> False
+    Connecting | Live | Lost(_) -> True
+  }
+}
+
+/// Fold one answer from `GET /v1/fleet` into the page.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // model.receive(model, 200, body)
+/// ```
+pub fn receive(
+  model: Model,
+  token: String,
+  status: Int,
+  body: String,
+) -> Model {
+  // An answer fetched with another token belongs to a sign-in that has since
+  // ended or changed, so it must neither restore a board nor sign out.
+  case token == model.token && signed_in(model) {
+    True -> apply(model, status, body)
+    False -> model
+  }
+}
+
+/// Fold an answer that belongs to the current sign-in.
+fn apply(model: Model, status: Int, body: String) -> Model {
+  let model = Model(..model, in_flight: False)
+
+  // The status picks between a snapshot, a refused token, an unreachable
+  // controller, and any other failure.
+  case status {
+    200 ->
+      case json.parse(body, fleet.decoder()) {
+        Ok(snapshot) -> {
+          let next = board.build(snapshot)
+          show(model, next, history.read(snapshot, next))
+        }
+        Error(_) ->
+          Model(
+            ..model,
+            connection: Lost(
+              "the controller sent a snapshot this page cannot read",
+            ),
+          )
+      }
+    401 ->
+      Model(
+        ..initial(""),
+        connection: SignedOut(Some("The controller refused that token.")),
+      )
+    0 ->
+      Model(..model, connection: Lost("cannot reach the controller: " <> body))
+    _ -> Model(..model, connection: Lost(failure(status, body)))
+  }
+}
+
+/// Fold one answer for a log blob into the page. An answer for a log that is
+/// no longer chosen is dropped.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // model.receive_log(model, digest, 200, text)
+/// ```
+pub fn receive_log(
+  model: Model,
+  digest: String,
+  status: Int,
+  body: String,
+) -> Model {
+  case model.log {
+    Loading(wanted) if wanted == digest ->
+      Model(..model, log: case status {
+        200 -> Loaded(digest, tail(body, log_lines))
+        0 -> LogFailed(digest, "cannot reach the controller")
+        _ -> LogFailed(digest, failure(status, body))
+      })
+    _ -> model
+  }
+}
+
+/// Choose an action, and say which log digest to fetch when it has one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // model.choose_action(model, "check-1", "verify")
+/// ```
+pub fn choose_action(
+  model: Model,
+  run: String,
+  action: String,
+) -> #(Model, Option(String)) {
+  let digest =
+    model.board
+    |> option.to_result(Nil)
+    |> result.try(board.find(_, run))
+    |> result.try(fn(row) { list.find(row.actions, fn(a) { a.name == action }) })
+    |> result.map(fn(a) { a.log })
+    |> result.unwrap(None)
+  let model =
+    Model(
+      ..model,
+      chosen_run: Some(run),
+      chosen_action: Some(action),
+      tab: DetailTab,
+      log: case digest {
+        Some(digest) -> Loading(digest)
+        None -> NoLog
+      },
+    )
+  #(model, digest)
+}
+
+/// Choose a run. A broken run opens on its first failed action, so its log
+/// is one step from the run list; any other run clears the chosen action.
+/// The answer names the log digest to fetch, when there is one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // model.choose_run(model, "check-1")
+/// ```
+pub fn choose_run(model: Model, run: String) -> #(Model, Option(String)) {
+  let failure =
+    model.board
+    |> option.to_result(Nil)
+    |> result.try(board.find(_, run))
+    |> result.try(fn(row) {
+      case row.diagnosis.health {
+        board.Broken -> board.first_failure(row)
+        board.Moving | board.Stalled | board.Settled -> Error(Nil)
+      }
+    })
+
+  // A failed action takes the action path, which also asks for its log.
+  case failure {
+    Ok(action) -> choose_action(model, run, action.name)
+    Error(Nil) -> #(
+      Model(
+        ..model,
+        chosen_run: Some(run),
+        chosen_action: None,
+        log: NoLog,
+        tab: DetailTab,
+      ),
+      None,
+    )
+  }
+}
+
+/// Keep at most the last `lines` lines of a log.
+///
+/// ## Examples
+///
+/// ```gleam
+/// model.tail("a\nb\nc", 2) == "b\nc"
+/// ```
+pub fn tail(text: String, lines: Int) -> String {
+  let all = string.split(text, "\n")
+  let extra = list.length(all) - lines
+
+  // Drop leading lines only when the log is longer than the limit.
+  case extra > 0 {
+    True -> list.drop(all, extra) |> string.join("\n")
+    False -> text
+  }
+}
+
+/// Install a new board. A chosen run that is no longer retained gives way to
+/// the first stalled run, or the first run when none is stalled.
+fn show(model: Model, next: Board, past: History) -> Model {
+  let kept =
+    model.chosen_run
+    |> option.to_result(Nil)
+    |> result.try(board.find(next, _))
+    |> result.is_ok
+
+  // A chosen run the controller no longer retains returns the detail pane to
+  // the fleet summary; nothing is chosen on the reader's behalf.
+  case kept {
+    True ->
+      Model(..model, connection: Live, board: Some(next), history: Some(past))
+    False ->
+      Model(
+        ..model,
+        connection: Live,
+        board: Some(next),
+        history: Some(past),
+        chosen_run: None,
+        chosen_action: None,
+        log: NoLog,
+      )
+  }
+}
+
+/// Describe an error answer from its `{"error": ...}` body, or its status.
+fn failure(status: Int, body: String) -> String {
+  let detail = json.parse(body, decode.at(["error"], decode.string))
+  "HTTP "
+  <> int.to_string(status)
+  <> case detail {
+    Ok(message) -> ": " <> message
+    Error(_) -> ""
+  }
+}

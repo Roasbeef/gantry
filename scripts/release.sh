@@ -26,6 +26,9 @@ rm -f "$stage/libs/entrypoint.sh" "$stage/libs/entrypoint.ps1"
 rm -rf -- "$stage/libs/gantry/priv"
 install -D -m 0644 packages/server/priv/worker-schema.sql "$stage/libs/gantry/priv/worker-schema.sql"
 install -D -m 0644 packages/server/priv/gantry-schema.json "$stage/libs/gantry/priv/gantry-schema.json"
+for asset in index.html dashboard.mjs dashboard.css; do
+  install -D -m 0644 "packages/server/priv/ui/$asset" "$stage/libs/gantry/priv/ui/$asset"
+done
 install -D -m 0644 skills/gantry/SKILL.md "$stage/libs/gantry/priv/skill/SKILL.md"
 cat > "$stage/rebar.config" <<CONFIG
 {erl_opts, []}.

@@ -35,6 +35,7 @@ import gleam/bool
 import gleam/erlang/process
 import gleam/int
 import gleam/json
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
@@ -429,6 +430,21 @@ pub fn ready() -> Result(Nil, Fault) {
 /// ```
 pub fn read() -> Result(queue.State, Fault) {
   layout.materialize(reader()) |> result.map_error(fault_of)
+}
+
+/// Read every retained run, oldest enrollment first, through the run index
+/// alone. The dashboard's snapshot reads this; it skips the proof index that
+/// `read` also decodes.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // store.runs()
+/// ```
+pub fn runs() -> Result(List(queue.Run), Fault) {
+  layout.numbered(reader())
+  |> result.map(list.map(_, fn(pair) { pair.1 }))
+  |> result.map_error(fault_of)
 }
 
 /// Look up a run by its stable ID. A majority confirms the answer.
