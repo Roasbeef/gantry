@@ -504,7 +504,10 @@ provide it.
   Create it as that user with `mkdir`.
 
 For each `userns` attempt the worker then makes a child of that cgroup and
-writes the slot's memory, process, and CPU limits on it. It opens only the
+writes the slot's memory, swap, process, and CPU limits on it. Swap is
+bounded at the memory size, as Docker bounds a container given `--memory`.
+It caps the cgroup's depth at one level, because the cgroups the action
+makes belong to its uid and the worker could not remove a deeper one. It opens only the
 files that create and move processes to the action's uid, places the
 container inside it, and bind-mounts it read-write at its own path. The
 container shares the host's cgroup namespace, and the action reads the path

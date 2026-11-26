@@ -561,9 +561,15 @@ live slots:
 cgroup its user owns, gives each `userns` attempt a child of it, and
 `gantry/worker/cgroup` owns those effects.
 - **Limits:** the attempt cgroup carries the slot's limits (`memory.max`,
+  `memory.swap.max` at the same size when the kernel accounts swap,
   `pids.max`, and `cpu.max` when delegated), so processes moved out of the
   container's cgroup stay bounded. The limit files keep the worker's mode,
   so the action cannot raise them.
+- **Depth:** `cgroup.max.depth` is 1 on the attempt cgroup. Each cgroup the
+  action makes is owned by its uid with mode 0755, so the worker could not
+  remove a cgroup two levels down, and cleanup would retry forever. Docker's
+  container cgroup and Loom's per-execution cgroups both sit one level
+  down, and the startup trial checks that a second level is refused.
 - **Flags:** the container gets `--cgroup-parent`, `--cgroupns=host`, a
   read-write bind of the attempt cgroup at its own path, and
   `GANTRY_CGROUP_BASE` and `LOOM_CGROUP_BASE` set to that path.
