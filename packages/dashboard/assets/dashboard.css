@@ -359,7 +359,7 @@ button:focus-visible, input:focus-visible {
 .run-list { display: grid; }
 .run {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas: "lane head" ". strip" ". diag";
   column-gap: 10px; row-gap: 6px;
   padding: 10px 10px 10px 6px;
@@ -412,7 +412,7 @@ button:focus-visible, input:focus-visible {
   background: var(--rule);
 }
 .strip .cell { width: 8px; height: 8px; }
-.strip .cell.crit { box-shadow: 0 2px 0 -0.5px var(--fg); }
+.strip .cell.crit { box-shadow: 0 3px 0 -1px var(--ready); }
 .strip .cell:hover { outline: 1.5px solid var(--fg); outline-offset: 1px; }
 
 .diag { grid-area: diag; margin: 0; font: 12px var(--mono); color: var(--fg-quiet); }
@@ -443,6 +443,9 @@ button:focus-visible, input:focus-visible {
 }
 .graph svg { display: block; }
 .edge { fill: none; stroke: var(--rule); stroke-width: 1.25; }
+.edge.crit { stroke: var(--ready); stroke-width: 1.5; }
+.node.crit .node-name { font-weight: 700; }
+.node.crit .node-box { stroke: var(--ready); }
 .edge.lit { stroke: var(--fg-quiet); stroke-width: 1.75; }
 .node { cursor: pointer; }
 .node-box { fill: var(--ink-raised); stroke: var(--rule); }

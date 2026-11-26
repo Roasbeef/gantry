@@ -667,7 +667,10 @@ fn detail(m: Model, b: Board) -> Element(Msg) {
             ])
           }),
         ),
-        graph(run, m.chosen_action),
+        graph(run, m.chosen_action, case m.history {
+          Some(h) -> history.critical(h, run)
+          None -> set.new()
+        }),
         case m.chosen_action {
           Some(name) ->
             case list.find(run.actions, fn(a) { a.name == name }) {
@@ -695,7 +698,11 @@ fn members_text(members: List(Int)) -> String {
 }
 
 /// Draw a run's action graph as nodes laid out by layer with a curve for each prerequisite.
-fn graph(run: RunRow, chosen: Option(String)) -> Element(Msg) {
+fn graph(
+  run: RunRow,
+  chosen: Option(String),
+  critical: set.Set(String),
+) -> Element(Msg) {
   use <- bool.lazy_guard(run.actions == [], element.none)
   let placed = layout.place(run.actions)
   let touches = fn(edge: layout.Edge) {
@@ -718,15 +725,31 @@ fn graph(run: RunRow, chosen: Option(String)) -> Element(Msg) {
       ],
       list.append(
         list.map(placed.edges, fn(edge) {
+          let on_path =
+            set.contains(critical, edge.from) && set.contains(critical, edge.to)
           svg.path([
-            class(case touches(edge) {
-              True -> "edge lit"
-              False -> "edge"
-            }),
+            class(
+              "edge"
+              <> case touches(edge) {
+                True -> " lit"
+                False -> ""
+              }
+              <> case on_path {
+                True -> " crit"
+                False -> ""
+              },
+            ),
             attribute("d", edge.path),
           ])
         }),
-        list.map(placed.nodes, fn(node) { graph_node(run, node, chosen) }),
+        list.map(placed.nodes, fn(node) {
+          graph_node(
+            run,
+            node,
+            chosen,
+            set.contains(critical, node.action.name),
+          )
+        }),
       ),
     ),
   ])
@@ -737,6 +760,7 @@ fn graph_node(
   run: RunRow,
   node: layout.Node,
   chosen: Option(String),
+  on_path: Bool,
 ) -> Element(Msg) {
   let label = board.cell_label(node.action.cell)
   let picked = chosen == Some(node.action.name)
@@ -747,6 +771,10 @@ fn graph_node(
         <> label
         <> case picked {
           True -> " picked"
+          False -> ""
+        }
+        <> case on_path {
+          True -> " crit"
           False -> ""
         },
       ),
