@@ -62,6 +62,7 @@
 //// Failure text is capped at `max_detail_bytes` where it is recorded.
 
 import gantry_core/graph.{type Action}
+import gantry_core/sandbox
 import gleam/bool
 import gleam/int
 import gleam/list
@@ -96,6 +97,7 @@ pub type Task {
     recipe: String,
     pool: String,
     image: String,
+    sandbox: sandbox.Profile,
   )
 }
 

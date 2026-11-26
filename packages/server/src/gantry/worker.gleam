@@ -114,6 +114,7 @@ fn boot() -> Result(#(slot.Slot, controllers.Controllers, Int), String) {
   })
 
   use Nil <- result.try(docker.preflight())
+  use Nil <- result.try(docker.check_sandboxes(limits))
 
   let engine =
     slot.Engine(

@@ -43,6 +43,7 @@ import gantry/blobs
 import gantry_core/job
 import gantry_core/queue
 import gantry_core/request
+import gantry_core/sandbox
 import gleam/bit_array
 import gleam/crypto
 import gleam/dict.{type Dict}
@@ -75,6 +76,7 @@ pub type Repository {
     target: String,
     pool: String,
     image: String,
+    sandbox: sandbox.Profile,
   )
 }
 
@@ -146,6 +148,9 @@ pub fn parse(contents: String, secrets: Secrets) -> Result(Config, String) {
     |> result.replace_error("invalid controller configuration"),
   )
   use repositories <- result.try(list.try_map(projects, validate_repository))
+  use Nil <- result.try(
+    validate_pools(list.map(repositories, fn(row) { row.1 })),
+  )
   use workers <- result.try(validate_workers(workers, secrets))
   use retention <- result.try(validate_retention(retention))
   use Nil <- result.try(validate_controller(data, blobs, port, secrets))
@@ -309,6 +314,29 @@ fn validate_retention(bounds: #(Int, Int)) -> Result(queue.Retention, String) {
   }
 }
 
+/// Check that each worker pool serves one sandbox profile, so a slot never
+/// receives work that needs a different sandbox from the rest of its pool.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // validate_pools(repositories)
+/// ```
+fn validate_pools(repositories: List(Repository)) -> Result(Nil, String) {
+  list.try_fold(repositories, dict.new(), fn(seen, repo) {
+    case dict.get(seen, repo.pool) {
+      Ok(profile) if profile != repo.sandbox ->
+        Error(
+          "pool "
+          <> repo.pool
+          <> " mixes sandbox profiles; give each profile its own pool",
+        )
+      Ok(_) | Error(Nil) -> Ok(dict.insert(seen, repo.pool, repo.sandbox))
+    }
+  })
+  |> result.replace(Nil)
+}
+
 /// Describe the configuration and its registered repositories.
 fn config_decoder() {
   let project = {
@@ -324,7 +352,21 @@ fn config_decoder() {
       "default",
       decode.string,
     )
-    decode.success(#(name, branch, target, pool, image, local, github_target))
+    use profile <- decode.optional_field(
+      "sandbox",
+      sandbox.Strict,
+      sandbox.decoder(),
+    )
+    decode.success(#(
+      name,
+      branch,
+      target,
+      pool,
+      image,
+      local,
+      github_target,
+      profile,
+    ))
   }
   let worker = {
     use id <- decode.field("id", decode.string)
@@ -359,9 +401,18 @@ fn config_decoder() {
 /// // validate_repository(project)
 /// ```
 fn validate_repository(
-  row: #(String, String, String, String, String, String, String),
+  row: #(
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    sandbox.Profile,
+  ),
 ) -> Result(#(String, Repository), String) {
-  let #(name, branch, target, pool, image, local, github_target) = row
+  let #(name, branch, target, pool, image, local, github_target, profile) = row
   let name = string.lowercase(name)
 
   // Only an explicit GitHub configuration can authorize a non-default branch.
@@ -383,7 +434,11 @@ fn validate_repository(
     && string.contains(image, "@sha256:")
     && { local == "" || string.starts_with(local, "/") }
   {
-    True -> Ok(#(name, Repository(name, provider, branch, target, pool, image)))
+    True ->
+      Ok(#(
+        name,
+        Repository(name, provider, branch, target, pool, image, profile),
+      ))
     False -> Error("invalid repository settings or unpinned OCI image")
   }
 }

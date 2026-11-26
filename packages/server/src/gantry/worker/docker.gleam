@@ -15,10 +15,12 @@ import gantry/internal/ffi_worker
 import gantry/worker/controllers
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/bit_array
 import gleam/erlang/process
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
@@ -52,7 +54,9 @@ size=$(stat -c %s \"$current\") || exit 1
 [ \"$size\" -le \"$2\" ] || exit 1
 exec cat \"$current\""
 
-/// Resource limits reserved for one physical worker slot.
+/// Resource limits reserved for one physical worker slot, and the host
+/// files a wider sandbox profile needs. Both come from the worker's own
+/// environment, never from a task.
 pub opaque type Limits {
   Limits(
     cpus: String,
@@ -61,6 +65,7 @@ pub opaque type Limits {
     pids: String,
     nofile: String,
     tmp: String,
+    userns_seccomp: Option(String),
   )
 }
 
@@ -81,10 +86,15 @@ pub type Fault {
 /// | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 |
 /// | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 |
 /// | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 |
+/// | `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path |
 ///
 /// The process default lets a BEAM build start its scheduler and dirty
 /// threads on a many-core host. The `/tmp` tmpfs counts against the
 /// container's memory limit, so a larger size only bounds the file it holds.
+///
+/// `GANTRY_WORKER_USERNS_SECCOMP` names the seccomp profile that the `userns`
+/// sandbox runs under. A worker without it is not capable of `userns` and
+/// rejects such an action before creating anything.
 ///
 /// ## Examples
 ///
@@ -141,25 +151,92 @@ pub fn limits_from(
     16,
     65_536,
   ))
-  Ok(Limits(cpus, memory, workspace, pids, nofile, tmp))
+
+  // The userns profile is optional. When named, its path must be absolute.
+  use userns_seccomp <- result.try(case lookup("GANTRY_WORKER_USERNS_SECCOMP") {
+    Error(Nil) | Ok("") -> Ok(None)
+    Ok(path) ->
+      case string.starts_with(path, "/") {
+        True -> Ok(Some(path))
+        False -> Error("GANTRY_WORKER_USERNS_SECCOMP must be an absolute path")
+      }
+  })
+
+  Ok(Limits(cpus, memory, workspace, pids, nofile, tmp, userns_seccomp))
 }
 
-/// The sandbox flags an action container receives, apart from its mounts.
+/// Check that the host files the configured sandbox profiles need exist
+/// before the slot claims work, as `preflight` checks the collector image.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// // docker.action_flags(limits)
+/// // docker.check_sandboxes(limits)
 /// ```
-pub fn action_flags(limits: Limits) -> List(String) {
-  list.append(restrictions, [
-    "--pids-limit=" <> limits.pids,
-    "--ulimit=nofile=" <> limits.nofile <> ":" <> limits.nofile,
-    "--memory=" <> limits.memory <> "m",
-    "--cpus=" <> limits.cpus,
-    "--tmpfs",
-    "/tmp:rw,nosuid,nodev,size=" <> limits.tmp <> "m,mode=1777",
-  ])
+pub fn check_sandboxes(limits: Limits) -> Result(Nil, String) {
+  case limits.userns_seccomp {
+    None -> Ok(Nil)
+    Some(path) ->
+      case simplifile.is_file(path) {
+        Ok(True) -> Ok(Nil)
+        Ok(False) | Error(_) ->
+          Error(
+            "GANTRY_WORKER_USERNS_SECCOMP names "
+            <> path
+            <> ", which is not a readable file",
+          )
+      }
+  }
+}
+
+/// The sandbox flags an action container receives, apart from its mounts.
+/// The strict restrictions and the limits come first for every profile, and
+/// a wider profile only appends to them. A profile this worker is not
+/// configured for is a rejection, never a narrower or wider run.
+///
+/// | Profile  | Appended flags                                              |
+/// | -------- | ----------------------------------------------------------- |
+/// | `Strict` | none                                                        |
+/// | `Userns` | its seccomp profile, `systempaths` and `apparmor` unconfined |
+///
+/// All three `userns` flags were measured as necessary for a nested `bwrap`;
+/// see `docs/design-notes/sandbox-profiles.md`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.action_flags(limits, sandbox.Strict)
+/// ```
+pub fn action_flags(
+  limits: Limits,
+  profile: sandbox.Profile,
+) -> Result(List(String), Fault) {
+  let strict =
+    list.append(restrictions, [
+      "--pids-limit=" <> limits.pids,
+      "--ulimit=nofile=" <> limits.nofile <> ":" <> limits.nofile,
+      "--memory=" <> limits.memory <> "m",
+      "--cpus=" <> limits.cpus,
+      "--tmpfs",
+      "/tmp:rw,nosuid,nodev,size=" <> limits.tmp <> "m,mode=1777",
+    ])
+
+  // Only the profile chooses what is appended. The strict prefix is shared.
+  case profile, limits.userns_seccomp {
+    sandbox.Strict, _ -> Ok(strict)
+    sandbox.Userns, Some(seccomp) ->
+      Ok(
+        list.append(strict, [
+          "--security-opt=seccomp=" <> seccomp,
+          "--security-opt=systempaths=unconfined",
+          "--security-opt=apparmor=unconfined",
+        ]),
+      )
+    sandbox.Userns, None ->
+      Error(Rejected(
+        "this worker is not configured for the userns sandbox; set GANTRY_WORKER_USERNS_SECCOMP",
+      ))
+  }
 }
 
 /// Remove all resources associated with a previously started attempt.
@@ -286,6 +363,9 @@ pub fn execute(
   spool: fn(BitArray) -> Result(String, String),
 ) -> Result(queue.Completion, Fault) {
   use Nil <- result.try(validate_image(assignment.task.image))
+
+  // An unsupported profile is refused before any resource exists.
+  use flags <- result.try(action_flags(limits, assignment.task.sandbox))
   let path = directory <> "/" <> name <> ".staging"
 
   // An earlier try can have stopped after creating resources but before start.
@@ -297,7 +377,7 @@ pub fn execute(
     )),
   )
   use Nil <- result.try(stage(path, assignment, network))
-  run(path, name, assignment.task, limits, start, spool)
+  run(path, name, assignment.task, limits, flags, start, spool)
 }
 
 /// Delete the slot-owned staging directory after its archives are unused.
@@ -465,6 +545,7 @@ fn run(
   name: String,
   task: queue.Task,
   limits: Limits,
+  flags: List(String),
   start: fn() -> Result(Nil, String),
   spool: fn(BitArray) -> Result(String, String),
 ) -> Result(queue.Completion, Fault) {
@@ -501,7 +582,7 @@ fn run(
     "",
   ))
   use identity <- result.try(control(
-    list.append(["create", ..action_flags(limits)], [
+    list.append(["create", ..flags], [
       "--name",
       name,
       "--mount",

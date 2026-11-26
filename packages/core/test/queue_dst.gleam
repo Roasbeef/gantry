@@ -10,6 +10,7 @@
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/io
@@ -17,6 +18,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 
 type Reply {
   Deliver
@@ -191,9 +193,32 @@ fn tasks(id: String) -> List(queue.Task) {
   let producer = graph.Action("build", ["build"], [], ["out"], [], [], 10)
   let consumer = graph.Action("test", ["test"], [], [], ["build"], [], 10)
   [
-    queue.Task(producer, id, "producer-" <> id, "build", "image"),
-    queue.Task(consumer, id, "consumer-" <> id, "test", "image"),
+    queue.Task(
+      producer,
+      id,
+      "producer-" <> id,
+      "build",
+      "image",
+      pool_profile("build"),
+    ),
+    queue.Task(
+      consumer,
+      id,
+      "consumer-" <> id,
+      "test",
+      "image",
+      pool_profile("test"),
+    ),
   ]
+}
+
+/// Each pool serves one sandbox profile, as `controller.toml` requires. The
+/// consumer's pool is the wider one, so profiles cross a dependency edge.
+fn pool_profile(pool: String) -> sandbox.Profile {
+  case pool {
+    "test" -> sandbox.Userns
+    _ -> sandbox.Strict
+  }
 }
 
 fn top(world: World) -> String {
@@ -277,6 +302,14 @@ fn restart(world: World) -> World {
   let encoded = json.to_string(protocol.encode_state(world.durable))
   let assert Ok(snapshot) = json.parse(encoded, protocol.state_decoder())
   assert snapshot == world.durable as "restart preserves the durable snapshot"
+
+  // A snapshot written before profiles existed has no sandbox field. Its
+  // tasks were strict, so dropping the strict fields must decode the same.
+  let old = string.replace(encoded, "\"sandbox\":\"strict\",", "")
+  let old = string.replace(old, ",\"sandbox\":\"strict\"", "")
+  let assert Ok(upgraded) = json.parse(old, protocol.state_decoder())
+  assert upgraded == world.durable
+    as "a snapshot without profiles decodes its tasks as strict"
   World(..world, snapshot:, intents: [])
 }
 
@@ -311,6 +344,12 @@ fn claim(
   case world.snapshot == world.durable, assignment, reply {
     False, _, _ -> #(world, Error(Nil))
     True, Some(job), Deliver -> {
+      assert job.task.sandbox == pool_profile(pool)
+        as "an assignment carries its pool's sandbox profile unchanged"
+      let world = case job.task.sandbox {
+        sandbox.Userns -> bump(world, "userns_assignments")
+        sandbox.Strict -> world
+      }
       let world = case queue.lease_attempt(job.lease) > 1 {
         True -> bump(world, "reassigned")
         False -> world

@@ -1,4 +1,5 @@
 import gantry/worker/docker
+import gantry_core/sandbox
 import gleam/list
 
 fn with(
@@ -9,7 +10,8 @@ fn with(
 
 fn flags(settings: List(#(String, String))) -> List(String) {
   let assert Ok(limits) = docker.limits_from(with(settings))
-  docker.action_flags(limits)
+  let assert Ok(flags) = docker.action_flags(limits, sandbox.Strict)
+  flags
 }
 
 pub fn defaults_let_a_beam_build_start_on_a_many_core_host_test() {

@@ -22,6 +22,7 @@ import gantry_core/graph
 import gantry_core/image.{type Image}
 import gantry_core/protocol
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/io
@@ -457,8 +458,8 @@ fn tasks(id: String) -> List(queue.Task) {
   let producer = graph.Action("build", ["build"], [], ["out"], [], [], 10)
   let consumer = graph.Action("test", ["test"], [], [], ["build"], [], 10)
   [
-    queue.Task(producer, id, recipe_of(id), "build", "image"),
-    queue.Task(consumer, id, "consumer-" <> id, "test", "image"),
+    queue.Task(producer, id, recipe_of(id), "build", "image", sandbox.Strict),
+    queue.Task(consumer, id, "consumer-" <> id, "test", "image", sandbox.Strict),
   ]
 }
 
@@ -1591,6 +1592,7 @@ pub fn growth(runs: Int) -> #(Int, Int, Int) {
           "recipe-" <> int.to_string(i % 7),
           "build",
           "image",
+          sandbox.Strict,
         )
       let assert Ok(#(state, _)) =
         queue.admit(state, id, "repo", id, "check", queue.Build, [task])

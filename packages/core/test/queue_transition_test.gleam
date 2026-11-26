@@ -3,6 +3,7 @@
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -13,7 +14,14 @@ fn action(name: String, dependencies: List(String)) -> graph.Action {
 }
 
 fn task(id: String, name: String, dependencies: List(String)) -> queue.Task {
-  queue.Task(action(name, dependencies), id, id <> name, "pool", "image")
+  queue.Task(
+    action(name, dependencies),
+    id,
+    id <> name,
+    "pool",
+    "image",
+    sandbox.Strict,
+  )
 }
 
 fn member(id: String) -> queue.Member {
@@ -192,7 +200,14 @@ pub fn a_provider_denial_blocks_the_landing_with_a_typed_reason_test() {
 
 pub fn retention_keeps_reuse_working_after_the_run_is_dropped_test() {
   let first_task =
-    queue.Task(action("build", []), "s", "shared", "pool", "image")
+    queue.Task(
+      action("build", []),
+      "s",
+      "shared",
+      "pool",
+      "image",
+      sandbox.Strict,
+    )
   let assert Ok(#(state, _)) =
     queue.admit(queue.empty(), "one", "repo", "s", "check", queue.Build, [
       first_task,

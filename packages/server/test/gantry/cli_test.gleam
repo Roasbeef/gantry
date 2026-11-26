@@ -8,6 +8,7 @@ import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
 import gantry_core/request
+import gantry_core/sandbox
 import gleam/bit_array
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -666,6 +667,7 @@ fn task() -> queue.Task {
     blob,
     "default",
     "alpine",
+    sandbox.Strict,
   )
 }
 

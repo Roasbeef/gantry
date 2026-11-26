@@ -6,6 +6,7 @@ import gantry/blobs
 import gantry/worker/custody
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/int
 import gleam/result
 import simplifile
@@ -58,6 +59,7 @@ pub fn assignment(serial: Int) -> queue.Assignment {
       recipe: digest,
       pool: "linux",
       image: "alpine",
+      sandbox: sandbox.Strict,
     ),
     lease: lease,
   )
