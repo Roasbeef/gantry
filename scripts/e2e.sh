@@ -26,6 +26,7 @@ export GANTRY_TOKEN="agent-$(openssl rand -hex 24)"
 # Each worker has its own token. The controllers hold only their digests.
 export GANTRY_WORKER_TOKEN="worker-$(openssl rand -hex 24)"
 probe_token="probe-$(openssl rand -hex 24)"
+wide_token="wide-$(openssl rand -hex 24)"
 token_digest() { printf '%s' "$1" | sha256sum | cut -d ' ' -f 1; }
 export GANTRY_SUBMIT_TOKEN="submit-$(openssl rand -hex 24)"
 cookie=$(openssl rand -hex 20)
@@ -109,6 +110,15 @@ target = "check"
 pool = "default"
 image = "$image"
 
+[[repository]]
+name = "fixture/wide"
+local_remote = "$remote"
+branch = "main"
+target = "check"
+pool = "wide"
+image = "$image"
+sandbox = "userns"
+
 [[worker]]
 id = "worker-one"
 token_sha256 = "$(token_digest "$GANTRY_WORKER_TOKEN")"
@@ -116,6 +126,10 @@ token_sha256 = "$(token_digest "$GANTRY_WORKER_TOKEN")"
 [[worker]]
 id = "probe"
 token_sha256 = "$(token_digest "$probe_token")"
+
+[[worker]]
+id = "worker-wide"
+token_sha256 = "$(token_digest "$wide_token")"
 TOML
   start "node$i" env GANTRY_CONFIG="$tmp/node$i.toml" ERL_FLAGS="+S 2:2 -name ${node}$i@127.0.0.1 -setcookie $cookie" "${controller[@]}"
   wait_for "voter $i" healthy "${endpoints[i-1]}"
@@ -292,6 +306,62 @@ failed_log=$(jq -ser 'last | select(.phase == "failed") | .work[0].step | select
 "$cli" blob "$failed_log" > "$tmp/adhoc-result.log"
 grep -Fx 'fixture-error' "$tmp/adhoc-result.log"
 echo 'Passed agent plan, ad hoc admission replay, failure diagnostics, and submit authorization'
+
+# The same action creates a user namespace. A strict repository's container
+# refuses it, and the operator-approved userns profile runs it on its own pool.
+cat > "$tmp/userns.json" <<'JSON'
+{"name":"userns","argv":["sh","-ec","unshare -U -r -m -p -f --mount-proc sh -ec 'test \"$(id -u)\" = 0'"],"inputs":[],"outputs":[]}
+JSON
+"$cli" run userns-strict fixture/project "$candidate" check "$tmp/userns.json" >/dev/null
+if GANTRY_WATCH_SECONDS=120 "$cli" watch userns-strict > "$tmp/userns-strict.jsonl"; then
+  echo 'A strict repository created a user namespace' >&2
+  exit 1
+fi
+jq -se 'last | .phase == "failed"' "$tmp/userns-strict.jsonl" >/dev/null
+# Whether this host lets the userns flags create the namespaces decides what
+# the wide slot must do: refuse to start with a named reason, or run the
+# action. The probe uses the slot's own sandbox flags, and the slot must agree.
+seccomp="$root/packages/server/priv/sandbox/userns-seccomp.json"
+host_userns=no
+if docker run --rm --pull=never --network=none --cap-drop=ALL --read-only \
+  --user=65534:65534 --security-opt=no-new-privileges --log-driver=none \
+  "--security-opt=seccomp=$seccomp" --security-opt=systempaths=unconfined \
+  --security-opt=apparmor=unconfined --entrypoint /bin/sh "$image" \
+  -c 'unshare -U -r -m -p -f --mount-proc true' >/dev/null 2>&1; then
+  host_userns=yes
+fi
+echo "Host creates user namespaces under the userns flags: $host_userns ($(uname -r))"
+start worker-wide env 'ERL_FLAGS=+S 2:2' "GANTRY_ENDPOINT=$worker_urls" GANTRY_POOL=wide \
+  GANTRY_WORKER_ID=worker-wide "GANTRY_WORKER_TOKEN=$wide_token" "GANTRY_WORKER_DIR=$tmp/wide-journal" \
+  "GANTRY_WORKER_USERNS_SECCOMP=$seccomp" "${worker[@]}"
+wide_pid=${pids[-1]}
+refused() { grep -Fq 'cannot create user namespaces under the userns sandbox' "$tmp/worker-wide.log"; }
+if [[ $host_userns == yes ]]; then
+  "$cli" run userns-wide fixture/wide "$candidate" check "$tmp/userns.json" >/dev/null
+  if ! GANTRY_WATCH_SECONDS=120 "$cli" watch userns-wide > "$tmp/userns-wide.jsonl"; then
+    jq -sc 'last | .work[0].step' "$tmp/userns-wide.jsonl" >&2 || true
+    exit 1
+  fi
+  jq -se 'last | .phase == "passed"' "$tmp/userns-wide.jsonl" >/dev/null
+  if refused; then
+    echo 'The wide slot refused a host that ran the userns action' >&2
+    exit 1
+  fi
+  kill -TERM -- "-$wide_pid"
+  wait "$wide_pid" 2>/dev/null || true
+  echo 'Passed the userns profile on its own pool and the strict refusal of the same action'
+else
+  # The slot must stop at boot with the reason, before it can claim anything.
+  wait_for 'the wide slot to refuse the userns sandbox' refused
+  if wait "$wide_pid"; then
+    echo 'The wide slot exited cleanly on a host without user namespaces' >&2
+    exit 1
+  fi
+  echo 'Passed the userns slot refusing to start on a host without user namespaces, and the strict refusal'
+fi
+for index in "${!pids[@]}"; do
+  if [[ ${pids[index]} == "$wide_pid" ]]; then unset "pids[$index]"; fi
+done
 
 # Kill the executor after Docker has acknowledged its start. The restarted
 # slot must clean up the original resources and report the attempt

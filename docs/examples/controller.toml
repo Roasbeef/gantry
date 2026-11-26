@@ -9,6 +9,10 @@ branch = "main"
 target = "check"
 pool = "linux"
 image = "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
+# Optional. "strict" (the default) or "userns", which lets the repository's
+# own tests create user namespaces. A pool serves one profile, and its slots
+# need GANTRY_WORKER_USERNS_SECCOMP. See docs/design-notes/sandbox-profiles.md.
+# sandbox = "strict"
 
 # One entry per worker. token_sha256 is the SHA-256 of that worker's own
 # token, as 64 lowercase hex digits:

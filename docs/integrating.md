@@ -43,6 +43,15 @@ pre-pulled image digest. The controller's `GH_TOKEN` needs access to
 the registered repository. Deploy the controller and matching workers
 using the runbook. [Controller example](examples/controller.toml) · [Runbook](running.md)
 
+A repository whose own tests start a nested sandbox, such as a `bwrap`
+jail, cannot create user namespaces under the default flags. The operator
+can approve the wider `userns` profile with `sandbox = "userns"` on the
+repository's entry, in a pool that serves only that profile. Nothing in
+`gantry.json` or a request can ask for it. The profile keeps the network
+off, the root read-only, and the user unprivileged, and it relaxes seccomp,
+AppArmor, and Docker's masked paths for the action.
+[Sandbox profiles](design-notes/sandbox-profiles.md)
+
 GitHub submissions target the default branch by default. To use another
 branch, set `branch` to that exact ref name and
 `github_target = "registered"` in the controller's repository entry.

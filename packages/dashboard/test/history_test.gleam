@@ -6,12 +6,20 @@ import dashboard/history
 import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/option.{None, Some}
 import gleam/set
 
 fn task(name: String, needs: List(String)) -> queue.Task {
   let action = graph.Action(name, [name], [], [], needs, [], 60)
-  queue.Task(action, "source", "recipe-" <> name, "linux", "image")
+  queue.Task(
+    action,
+    "source",
+    "recipe-" <> name,
+    "linux",
+    "image",
+    sandbox.Strict,
+  )
 }
 
 fn read(state: queue.State, now: Int, events, samples, since) {

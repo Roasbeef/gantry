@@ -46,7 +46,10 @@ process with its own ID, token, and journal directory. Controllers need a new
    `GANTRY_WORKSPACE_MIB`, `GANTRY_WORKER_PIDS`, `GANTRY_WORKER_NOFILE`, and
    `GANTRY_WORKER_TMP_MIB` become Docker flags for that slot only. For
    several slots on one host, give each its own ID and directory and keep
-   the sum of their limits within the host.
+   the sum of their limits within the host. A slot in a pool whose
+   repositories use `sandbox = "userns"` also needs
+   `GANTRY_WORKER_USERNS_SECCOMP` ([runbook](running.md)), and that pool
+   belongs on a host with no strict repository's slots.
 9. **Verify.** Run an uncached action on a repository in the pool and check
    `.work[].step.lease.worker` in `gantry watch RUN_ID`. Fetch its log with
    `gantry blob`. If several slots can claim the action, use a smoke pool.

@@ -121,6 +121,15 @@ the third slice.
    `client` lanes pass under the approved profile. **Guard:** an action in a
    repository without the profile still runs with `--cap-drop=ALL` and no
    network. **Cut:** no change to untrusted defaults.
+   **Status (2026-11-25):** built on branch `sandbox-profiles`, not deployed.
+   The [note](design-notes/sandbox-profiles.md) records a host experiment:
+   `userns` needs a narrowed seccomp profile, `systempaths=unconfined`, and
+   `apparmor=unconfined`, and was taken with all three. A `userns` pool waits
+   for a host with no strict slots. Under it Loom's client shards drop from
+   130 and 129 failures to 16, 15, and 4, and `fast` passes every Gleam shard,
+   so the exit is not yet met. What remains is mostly writes to `/var/tmp`
+   under the read-only root and a jail that wants a delegated cgroup; the
+   note lists each cause.
 4. **Stage Git metadata when an action needs it.** Gantry stages a `git
    archive` tree, and "repository metadata query failed" was the most common
    client error, 105 occurrences across two shards. Let a declared action receive the commit's

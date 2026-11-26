@@ -8,6 +8,7 @@ import gantry/github
 import gantry_core/graph
 import gantry_core/queue
 import gantry_core/request
+import gantry_core/sandbox
 import gleam/int
 import gleam/json
 import gleam/list
@@ -338,6 +339,14 @@ fn tasks(
     use bytes <- result.try(archive(s, revision, action.inputs))
     use source <- result.try(blobs.put(cfg.blobs, bytes))
 
+    // A strict task keeps the identity it had before profiles existed, so
+    // its proofs stay valid. Any wider profile is part of the key, so its
+    // proofs can never satisfy a strict task.
+    let profile = case repo.sandbox {
+      sandbox.Strict -> []
+      sandbox.Userns -> [json.string(sandbox.name(repo.sandbox))]
+    }
+
     let identity =
       json.to_string(
         json.array(
@@ -349,12 +358,13 @@ fn tasks(
             json.string(repo.image),
             json.string(source),
             graph.encode_action(action),
+            ..profile
           ],
           fn(i) { i },
         ),
       )
     let recipe = blobs.digest(<<identity:utf8>>)
-    Ok(queue.Task(action, source, recipe, repo.pool, repo.image))
+    Ok(queue.Task(action, source, recipe, repo.pool, repo.image, repo.sandbox))
   })
 }
 

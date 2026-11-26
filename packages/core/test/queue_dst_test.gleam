@@ -34,6 +34,7 @@ pub fn new_faults_are_reachable_test() {
       "expiries", "reassigned", "result_after_expiry_rejected",
       "result_after_reassign_rejected", "prepared", "preparation_refused",
       "policy_denied", "landed", "target_advanced", "retained_dropped",
+      "userns_assignments",
     ],
     fn(name) {
       assert result.unwrap(dict.get(totals, name), 0) > 0 as name

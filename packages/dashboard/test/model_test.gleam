@@ -7,6 +7,7 @@ import dashboard/model
 import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -14,7 +15,14 @@ import gleam/string
 
 fn task(name: String, needs: List(String)) -> queue.Task {
   let action = graph.Action(name, [name], [], [], needs, [], 60)
-  queue.Task(action, "source", "recipe-" <> name, "linux", "image")
+  queue.Task(
+    action,
+    "source",
+    "recipe-" <> name,
+    "linux",
+    "image",
+    sandbox.Strict,
+  )
 }
 
 /// A two-action chain, its first action leased at `granted`.

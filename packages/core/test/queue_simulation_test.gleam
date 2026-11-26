@@ -2,6 +2,7 @@
 
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -27,6 +28,7 @@ fn task(id: String) -> queue.Task {
     id,
     "pool",
     "image",
+    sandbox.Strict,
   )
 }
 

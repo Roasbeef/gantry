@@ -3,6 +3,7 @@
 import gantry_core/graph
 import gantry_core/protocol
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/int
 import gleam/json
 import gleam/list
@@ -186,7 +187,14 @@ fn pending_run(
       number % 3600 + 1,
     )
   let task =
-    queue.Task(action, "tree-" <> suffix, "recipe-" <> suffix, "linux", "image")
+    queue.Task(
+      action,
+      "tree-" <> suffix,
+      "recipe-" <> suffix,
+      "linux",
+      "image",
+      sandbox.Strict,
+    )
   let candidate =
     queue.candidate("main", "base-" <> suffix, "commit-" <> suffix, [
       queue.Member(number + 1, "head-" <> suffix),

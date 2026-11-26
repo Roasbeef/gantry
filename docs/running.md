@@ -447,6 +447,7 @@ its bounds at startup, and a value outside them stops the worker.
 | `GANTRY_WORKER_PIDS` | 4096 | 64 to 1048576 | Processes and threads in the container |
 | `GANTRY_WORKER_NOFILE` | 65536 | 256 to 1048576 | Open files per process |
 | `GANTRY_WORKER_TMP_MIB` | 1024 | 16 to 65536 | The `/tmp` tmpfs size |
+| `GANTRY_WORKER_USERNS_SECCOMP` | unset | an absolute path to a readable file | Makes the slot able to run the `userns` sandbox |
 
 `GANTRY_WORKER_DRAIN` (default 60, in seconds, 0 or more) bounds how long
 a worker sent SIGTERM waits for its current action before it gives the
@@ -458,6 +459,21 @@ processes. `/tmp` counts against the memory limit, so a larger size
 bounds the file it can hold and does not reserve memory. Match capacity
 and isolation policy across slots in the same named pool, and match
 `GANTRY_POOL` to the controller's repository pool.
+
+A slot runs every action with the strict flags unless the action's
+repository has `sandbox = "userns"` in `controller.toml`. To serve such a
+pool, set `GANTRY_WORKER_USERNS_SECCOMP` to the release's
+`priv/sandbox/userns-seccomp.json` on every slot in that pool. The worker
+checks the file at startup. A slot without it rejects a `userns` action
+before creating anything, and the run fails with that reason. The profile
+also turns off AppArmor and Docker's masked paths for the action, so give
+the pool a host that runs no strict repository's slots. A host can accept
+every flag and still refuse the namespace, for example with
+`kernel.apparmor_restrict_unprivileged_userns=1`. So a slot with the variable
+set also runs one throwaway container under the `userns` flags at startup,
+creating a user, mount, and PID namespace, and refuses to start with that
+reason if the host says no.
+[Sandbox profiles](design-notes/sandbox-profiles.md)
 
 At startup the worker takes an exclusive SQLite lock on its journal, so a
 second worker with the same directory exits with an error. It then

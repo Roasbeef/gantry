@@ -11,6 +11,7 @@
 
 import gantry_core/graph
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
@@ -635,9 +636,15 @@ fn task_decoder() -> decode.Decoder(queue.Task) {
   use source <- decode.field("source", decode.string)
   use recipe <- decode.field("recipe", decode.string)
   use pool <- decode.field("pool", decode.string)
-
   use image <- decode.field("image", decode.string)
-  decode.success(queue.Task(action, source, recipe, pool, image))
+
+  // A task written before profiles existed ran with the strict flags.
+  use profile <- decode.optional_field(
+    "sandbox",
+    sandbox.Strict,
+    sandbox.decoder(),
+  )
+  decode.success(queue.Task(action, source, recipe, pool, image, profile))
 }
 
 /// Encode an immutable task.
@@ -648,5 +655,6 @@ fn encode_task(value: queue.Task) -> json.Json {
     #("recipe", json.string(value.recipe)),
     #("pool", json.string(value.pool)),
     #("image", json.string(value.image)),
+    #("sandbox", json.string(sandbox.name(value.sandbox))),
   ])
 }

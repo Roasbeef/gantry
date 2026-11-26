@@ -3,6 +3,7 @@ import gantry/git
 import gantry/internal/ffi_host
 import gantry/prepare
 import gantry_core/queue
+import gantry_core/sandbox
 import gleam/bit_array
 import gleam/crypto
 import gleam/dict
@@ -31,6 +32,7 @@ fn config_for(
       target: "check",
       pool: "default",
       image: "image@sha256:" <> string.repeat("a", 64),
+      sandbox: sandbox.Strict,
     )
   let cfg =
     config.Config(
