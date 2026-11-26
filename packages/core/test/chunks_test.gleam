@@ -130,6 +130,37 @@ pub fn identity_with_shallow_tracks_the_commit_test() {
   assert id(graph.Shallow, a, "c1") != id(graph.NoGit, a, "c1")
 }
 
+pub fn identity_names_a_wider_profile_before_the_commit_test() {
+  let profiled = fn(git, profile) {
+    graph.identity(
+      "declared",
+      "o/r",
+      "linux",
+      "img",
+      a,
+      action(git),
+      profile,
+      "c1",
+    )
+  }
+  let strict = id(graph.NoGit, a, "c1")
+
+  // A userns key is the strict array with the profile's name appended, as
+  // keys were hashed before metadata existed, so those proofs stay valid.
+  assert profiled(graph.NoGit, sandbox.Userns)
+    == string.drop_end(strict, 1) <> ",\"userns\"]"
+
+  // Metadata follows the profile, so each part moves the key on its own.
+  let shallow = profiled(graph.Shallow, sandbox.Strict)
+  assert string.ends_with(shallow, ",\"git-shallow-v1\",\"c1\"]")
+  assert profiled(graph.Shallow, sandbox.Userns)
+    == string.replace(
+      shallow,
+      ",\"git-shallow-v1\"",
+      ",\"userns\",\"git-shallow-v1\"",
+    )
+}
+
 pub fn git_key_decodes_totally_test() {
   let body = fn(git) {
     "{\"name\":\"a\",\"argv\":[\"x\"],\"git\":" <> git <> "}"
