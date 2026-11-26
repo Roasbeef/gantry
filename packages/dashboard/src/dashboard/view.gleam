@@ -8,13 +8,15 @@
 import dashboard/board.{
   type Action, type Board, type Pool, type RunRow, type Slot,
 }
+import dashboard/fleet_view
+import dashboard/history.{type History}
 import dashboard/layout
 import dashboard/model.{type Model, type Msg}
-import dashboard/timing
 import gleam/bool
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/set
 import gleam/string
 import lustre/attribute.{attribute, class}
 import lustre/element.{type Element, text}
@@ -94,7 +96,7 @@ fn top(m: Model, b: Option(Board)) -> Element(Msg) {
   html.header([class("top")], [
     brand(),
     case b {
-      Some(b) -> chips(b)
+      Some(b) -> chips(b, m.history)
       None -> html.ul([class("chips")], [])
     },
     link(m, b),
@@ -108,7 +110,7 @@ fn top(m: Model, b: Option(Board)) -> Element(Msg) {
 /// reads on every tab and at every width. A pool that is busy or idle has no
 /// work waiting, so its chip is muted and the pools that need attention
 /// stand out.
-fn chips(b: Board) -> Element(Msg) {
+fn chips(b: Board, h: Option(History)) -> Element(Msg) {
   html.ul(
     [class("chips"), attribute.aria_label("Pool pressure")],
     list.map(b.pools, fn(p) {
@@ -124,12 +126,27 @@ fn chips(b: Board) -> Element(Msg) {
             <> case p.ready {
               0 -> ""
               n -> " · " <> int.to_string(n) <> " ready"
-            },
+            }
+            <> since(p, b, h),
           ),
         ]),
       ])
     }),
   )
+}
+
+/// How long a backed-up pool has had work waiting, as " · 6m", when the
+/// history can say.
+fn since(p: Pool, b: Board, h: Option(History)) -> String {
+  // Only a pool that cannot take its waiting work gets a duration.
+  case p.verdict, h {
+    board.Starved, Some(h) | board.Saturated, Some(h) ->
+      case history.backlog_since(h, p.name) {
+        Some(at) -> " · for " <> board.span(b.now - at)
+        None -> ""
+      }
+    _, _ -> ""
+  }
 }
 
 /// The share of finished actions that reused a stored proof, or a dash when
@@ -148,7 +165,7 @@ fn cache_rate(b: Board) -> String {
 fn link(m: Model, b: Option(Board)) -> Element(Msg) {
   // The connection and the board decide the dot's state and its words.
   let #(state, words) = case m.connection, b {
-    model.Live, _ -> #("live", "live · polling every 2s")
+    model.Live, _ -> #("live", "live")
     model.Connecting, _ -> #("connecting", "connecting")
     model.Lost(reason), Some(_) -> #("lost", "stale · " <> reason)
     model.Lost(reason), None -> #("lost", reason)
@@ -185,7 +202,7 @@ fn tabs(m: Model) -> Element(Msg) {
     )
   }
   html.nav([class("tabs"), attribute.role("tablist")], [
-    tab(model.PoolsTab, "Pools"),
+    tab(model.PoolsTab, "Fleet"),
     tab(model.RunsTab, "Runs"),
     tab(model.DetailTab, "Detail"),
   ])
@@ -200,6 +217,10 @@ fn main(m: Model, b: Board) -> Element(Msg) {
   }
 
   html.main([class("board " <> shown)], [
+    case m.history {
+      Some(h) -> fleet_view.timeline(b, h)
+      None -> element.none()
+    },
     rail(b),
     runs(m, b),
     detail(m, b),
@@ -213,108 +234,48 @@ fn main(m: Model, b: Board) -> Element(Msg) {
 /// Draw the left pane: one card per pool and the list of slots.
 fn rail(b: Board) -> Element(Msg) {
   html.aside([class("rail"), attribute.aria_label("Pools and slots")], [
-    html.h2([class("pane-title")], [text("Pressure")]),
-    case b.pools {
-      [] -> html.p([class("quiet-note")], [text("No pool has work or a slot.")])
-      pools -> html.div([class("pools")], list.map(pools, pool(_, b)))
-    },
     html.h2([class("pane-title")], [
-      text("Slots"),
+      text("Hosts"),
       html.span([class("pane-count")], [
-        text(int.to_string(list.length(b.slots))),
+        text(int.to_string(list.length(b.slots)) <> " slots"),
       ]),
     ]),
-    html.ul([class("slots")], list.map(board.rail_order(b.slots), slot(_, b))),
+    html.div([class("hosts")], list.map(board.hosts(b.slots), host(_, b))),
     html.p([class("rail-foot")], [
       text(
-        "Pools and polls are what this controller has served since it started.",
+        "Polls and leases are what this controller has served since it started.",
       ),
     ]),
   ])
 }
 
-/// Draw one pool card with its slots, its ready work, and its counts.
-fn pool(p: Pool, b: Board) -> Element(Msg) {
-  // The slots that serve this pool, drawn as squares.
-  let in_pool =
-    board.rail_order(b.slots)
-    |> list.filter(fn(s) { board.slot_pool(s, b.runs) == Some(p.name) })
-  let squares =
-    list.map(in_pool, fn(s) {
-      // The slot's occupation picks the pip's colour class.
-      let kind = case s.occupation {
-        board.Working(_, _, _, _) -> "busy"
-        board.Waiting(_, _) -> "free"
-        board.Quiet(_, _) -> "gone"
-        board.Unseen -> "gone"
-      }
-
+/// Draw one host: its label, how many of its slots hold a lease, and a row
+/// per slot.
+fn host(h: board.Host, b: Board) -> Element(Msg) {
+  let total = list.length(h.slots)
+  html.section([class("host")], [
+    html.header([class("host-head")], [
+      html.span([class("host-name")], [
+        text(option.unwrap(h.name, "unlabelled")),
+      ]),
+      html.span([class("host-load")], [
+        text(int.to_string(h.busy) <> "/" <> int.to_string(total) <> " busy"),
+      ]),
       html.span(
-        [class("sq sq-" <> kind), attribute.title(s.worker <> " · " <> kind)],
-        [],
-      )
-    })
+        [class("host-bar"), attribute.aria_hidden(True)],
+        list.map(h.slots, fn(s) {
+          // A slot's square says whether it holds a lease.
+          let kind = case s.occupation {
+            board.Working(_, _, _, _) -> "busy"
+            board.Waiting(_, _) -> "free"
+            board.Quiet(_, _) | board.Unseen -> "gone"
+          }
 
-  // One pip per ready action, up to a limit.
-  let shown = int.min(p.ready, 24)
-  let pips =
-    list.repeat(Nil, shown)
-    |> list.map(fn(_) { html.span([class("pip")], []) })
-
-  // Only pending work past the pip limit gets an overflow marker.
-  let overflow = case p.ready > shown {
-    True -> [
-      html.span([class("pip-more")], [
-        text("+" <> int.to_string(p.ready - shown)),
-      ]),
-    ]
-    False -> []
-  }
-
-  let label = board.verdict_label(p.verdict)
-
-  html.section([class("pool v-" <> label)], [
-    html.header([class("pool-head")], [
-      html.span([class("pool-name")], [text(p.name)]),
-      html.span([class("verdict")], [text(label)]),
-    ]),
-    html.div(
-      [
-        class("gauge"),
-        attribute.role("img"),
-        attribute.aria_label(
-          int.to_string(p.busy)
-          <> " busy, "
-          <> int.to_string(p.free)
-          <> " free, "
-          <> int.to_string(p.ready)
-          <> " ready",
-        ),
-      ],
-      [
-        html.span([class("supply")], case squares {
-          [] -> [html.span([class("sq sq-none")], [])]
-          _ -> squares
+          html.span([class("sq sq-" <> kind)], [])
         }),
-        html.span([class("gauge-sep"), attribute.aria_hidden(True)], []),
-        html.span([class("demand")], list.append(pips, overflow)),
-      ],
-    ),
-    html.p([class("pool-nums")], [
-      num(p.busy, "busy"),
-      num(p.free, "free"),
-      num(p.ready, "ready"),
-      html.span([class("num")], [
-        text(int.to_string(p.live) <> "/" <> int.to_string(p.known) <> " live"),
-      ]),
+      ),
     ]),
-  ])
-}
-
-fn num(value: Int, label: String) -> Element(Msg) {
-  html.span([class("num")], [
-    html.b([], [text(int.to_string(value))]),
-    text(" " <> label),
+    html.ul([class("slots")], list.map(h.slots, slot(_, b))),
   ])
 }
 
@@ -323,10 +284,6 @@ fn slot(s: Slot, b: Board) -> Element(Msg) {
   let id =
     html.span([class("slot-id")], [
       html.span([class("slot-worker")], [text(s.worker)]),
-      case s.host {
-        Some(host) -> html.span([class("slot-host")], [text(host)])
-        None -> element.none()
-      },
     ])
 
   // A working slot shows its action; any other slot shows its last poll.
@@ -523,10 +480,10 @@ fn run_row(run: RunRow, m: Model) -> Element(Msg) {
           text(run.repo <> " · " <> run.target <> revision(run.revision)),
         ]),
         html.span([class("phase p-" <> board.phase_label(run.phase))], [
-          text(board.phase_label(run.phase)),
+          text(board.progress_label(run)),
         ]),
       ]),
-      strip(run),
+      strip(run, m.history),
       html.p([class("diag")], [text(run.diagnosis.text)]),
     ],
   )
@@ -552,6 +509,7 @@ fn health_label(health: board.Health) -> String {
 /// A short track ending in the group's landing signal. A plain build has no
 /// lane, so it draws a dashed spur with no signal.
 fn lane_glyph(run: RunRow) -> Element(Msg) {
+  use <- bool.lazy_guard(run.signal == board.NoLane, element.none)
   let label = board.signal_label(run.signal)
 
   // A run with a lane shows it in the title.
@@ -592,7 +550,13 @@ fn lane_glyph(run: RunRow) -> Element(Msg) {
 
 /// The run's graph as columns of cells, one column per layer. Each cell is a
 /// button that opens that action.
-fn strip(run: RunRow) -> Element(Msg) {
+fn strip(run: RunRow, h: Option(History)) -> Element(Msg) {
+  // Without a history there is no critical path to mark.
+  let critical = case h {
+    Some(h) -> history.critical(h, run)
+    None -> set.new()
+  }
+
   html.div(
     [class("strip")],
     board.by_layer(run.actions)
@@ -603,16 +567,32 @@ fn strip(run: RunRow) -> Element(Msg) {
             attribute.style(
               "grid-template-rows",
               "repeat("
-                <> int.to_string(int.min(list.length(layer), 4))
-                <> ", 10px)",
+                <> int.to_string(int.min(list.length(layer), 6))
+                <> ", 8px)",
             ),
           ],
           list.map(layer, fn(action) {
             let label = board.cell_label(action.cell)
+            let on_path = set.contains(critical, action.name)
             html.button(
               [
-                class("cell c-" <> label),
-                attribute.title(action.name <> " · " <> label),
+                class(
+                  "cell c-"
+                  <> label
+                  <> case on_path {
+                    True -> " crit"
+                    False -> ""
+                  },
+                ),
+                attribute.title(
+                  action.name
+                  <> " · "
+                  <> label
+                  <> case on_path {
+                    True -> " · critical path"
+                    False -> ""
+                  },
+                ),
                 attribute.aria_label(action.name <> ", " <> label),
                 event.on_click(model.ActionChosen(run.id, action.name))
                   |> event.stop_propagation,
@@ -640,15 +620,24 @@ fn detail(m: Model, b: Board) -> Element(Msg) {
   html.section(
     [class("detail"), attribute.aria_label("Chosen run")],
     case chosen {
-      Error(Nil) -> [
-        html.p([class("quiet-note")], [text("Choose a run to see its graph.")]),
-      ]
+      Error(Nil) ->
+        case m.history {
+          Some(h) -> [fleet_view.summary(b, h)]
+          None -> [
+            html.p([class("quiet-note")], [
+              text("Choose a run to see its graph."),
+            ]),
+          ]
+        }
       Ok(run) -> [
+        html.button([class("back"), event.on_click(model.RunCleared)], [
+          text("← Fleet"),
+        ]),
         html.header([class("detail-head")], [
           lane_glyph(run),
           html.h2([class("detail-id")], [text(run.id)]),
           html.span([class("phase p-" <> board.phase_label(run.phase))], [
-            text(board.phase_label(run.phase)),
+            text(board.progress_label(run)),
           ]),
         ]),
         html.p([class("detail-meta")], [
@@ -810,17 +799,23 @@ fn action_pane(
   let label = board.cell_label(action.cell)
 
   // The timing record decides how the action's time reads.
-  let time = case timing.of(m.memory, run.id, action.name, b.now) {
-    timing.Running(seconds) -> "running " <> board.span(seconds)
-    timing.Took(seconds) -> "took about " <> board.span(seconds)
-    timing.Unknown ->
-      case action.cell {
-        board.Reused -> "reused a stored proof; no time spent"
-        board.Blocked | board.Ready -> "not started"
-        board.Skipped -> "never ran"
-        board.Active | board.Passed | board.Failed | board.Expired ->
-          "finished before this page opened"
-      }
+  let known = case m.history {
+    Some(h) -> history.duration(h, run.id, action.name)
+    None -> None
+  }
+
+  // A known duration wins; otherwise the cell says why there is none.
+  let time = case known, action.cell {
+    Some(seconds), board.Active -> "running " <> board.span(seconds)
+    Some(seconds), _ -> "took " <> board.span(seconds)
+    None, board.Reused -> "reused a stored proof; no time spent"
+    None, board.Blocked | None, board.Ready -> "not started"
+    None, board.Skipped -> "never ran"
+    None, board.Active
+    | None, board.Passed
+    | None, board.Failed
+    | None, board.Expired
+    -> "finished before this controller's history"
   }
 
   html.div([class("action")], [

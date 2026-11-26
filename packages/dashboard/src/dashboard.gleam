@@ -97,6 +97,10 @@ fn update(m: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         None -> #(next, effect.none())
       }
     }
+    model.RunCleared -> #(
+      model.Model(..m, chosen_run: None, chosen_action: None, log: model.NoLog),
+      effect.none(),
+    )
     model.FinishedToggled -> #(
       model.Model(..m, show_finished: !m.show_finished),
       effect.none(),

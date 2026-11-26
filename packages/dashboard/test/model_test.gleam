@@ -4,7 +4,6 @@
 import dashboard/board
 import dashboard/layout
 import dashboard/model
-import dashboard/timing
 import gantry_core/fleet
 import gantry_core/graph
 import gantry_core/queue
@@ -30,7 +29,15 @@ fn leased(granted: Int) -> queue.State {
 }
 
 fn body(state: queue.State, now: Int) -> String {
-  fleet.Fleet(now:, slots: [], runs: state.runs, proofs: 0)
+  fleet.Fleet(
+    now:,
+    since: 0,
+    slots: [],
+    runs: state.runs,
+    proofs: 0,
+    events: [],
+    samples: [],
+  )
   |> fleet.encode
   |> json.to_string
 }
@@ -42,10 +49,10 @@ pub fn a_token_starts_connecting_and_none_signs_out_test() {
   assert !model.signed_in(model.initial(""))
 }
 
-pub fn a_snapshot_goes_live_and_chooses_a_run_test() {
+pub fn a_snapshot_goes_live_and_chooses_nothing_test() {
   let m = model.receive(model.initial("t"), "t", 200, body(leased(10), 12))
   assert m.connection == model.Live
-  assert m.chosen_run == Some("r")
+  assert m.chosen_run == None
   assert !m.in_flight
 }
 
@@ -98,46 +105,9 @@ pub fn a_long_log_keeps_its_tail_test() {
   assert list.length(string.split(model.tail(long, 400), "\n")) == 400
 }
 
-pub fn timing_measures_from_grant_to_the_first_finished_snapshot_test() {
-  let state = leased(100)
-  let seen =
-    timing.observe(
-      timing.new(),
-      board.build(fleet.Fleet(110, [], state.runs, 0)),
-    )
-  assert timing.of(seen, "r", "build", 110) == timing.Running(10)
-  let assert Ok(state) =
-    queue.finish(state, "r", "build", "w1", 1, queue.Succeeded([], "log"))
-  let seen =
-    timing.observe(seen, board.build(fleet.Fleet(130, [], state.runs, 0)))
-  assert timing.of(seen, "r", "build", 200) == timing.Took(30)
-  // A later snapshot does not move the recorded end.
-  let seen =
-    timing.observe(seen, board.build(fleet.Fleet(150, [], state.runs, 0)))
-  assert timing.of(seen, "r", "build", 200) == timing.Took(30)
-  assert timing.of(seen, "r", "test", 200) == timing.Unknown
-}
-
-pub fn a_lapsed_lease_is_timed_again_from_its_next_grant_test() {
-  let state = leased(0)
-  let seen =
-    timing.observe(timing.new(), board.build(fleet.Fleet(5, [], state.runs, 0)))
-  let assert [run] = state.runs
-  let assert [queue.Work(_, queue.Active(lease)), _] = run.work
-  let later = queue.lease_until(lease) + 1
-  let state = queue.expire(state, later)
-  let seen =
-    timing.observe(seen, board.build(fleet.Fleet(later, [], state.runs, 0)))
-  assert timing.of(seen, "r", "build", later) == timing.Unknown
-  let assert #(state, Some(_)) = queue.claim(state, "w1", "linux", later)
-  let seen =
-    timing.observe(seen, board.build(fleet.Fleet(later + 3, [], state.runs, 0)))
-  assert timing.of(seen, "r", "build", later + 3) == timing.Running(3)
-}
-
 pub fn layout_places_layers_in_columns_and_links_each_need_test() {
   let state = leased(0)
-  let b = board.build(fleet.Fleet(1, [], state.runs, 0))
+  let b = board.build(fleet.Fleet(1, 0, [], state.runs, 0, [], []))
   let assert Ok(run) = board.find(b, "r")
   let placed = layout.place(run.actions)
   let assert [first, second] = placed.nodes
@@ -185,7 +155,7 @@ pub fn runs_split_into_live_broken_and_settled_bands_test() {
       queue.lease_serial(job.lease),
       queue.Rejected("no", "log"),
     )
-  let b = board.build(fleet.Fleet(12, [], state.runs, 0))
+  let b = board.build(fleet.Fleet(12, 0, [], state.runs, 0, [], []))
   let #(l, broken, settled) = board.bands(b.runs)
   assert list.map(l, fn(r) { r.id }) == ["r"]
   assert list.map(broken, fn(r) { r.id }) == ["bad"]

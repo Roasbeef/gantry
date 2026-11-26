@@ -182,9 +182,14 @@ button:focus-visible, input:focus-visible {
 .board {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(270px, 320px) minmax(380px, 1fr) minmax(400px, 1.1fr);
+  grid-template-columns: minmax(250px, 290px) minmax(380px, 1fr) minmax(400px, 1.1fr);
+  grid-template-areas: "tl tl tl" "rail runs detail";
+  grid-template-rows: auto 1fr;
   min-height: 0;
 }
+.rail { grid-area: rail; }
+.runs { grid-area: runs; }
+.detail { grid-area: detail; }
 .rail, .runs, .detail { min-width: 0; padding: 14px var(--gap) 24px; }
 .rail { border-right: 1px solid var(--rule); background: var(--ink-sunk); }
 .runs { border-right: 1px solid var(--rule); }
@@ -200,32 +205,52 @@ button:focus-visible, input:focus-visible {
 .quiet-note, .empty { color: var(--fg-faint); margin: 8px 0; }
 .empty { padding: 40px var(--gap); }
 
-/* ------------------------------------------------------------ pools */
+/* ------------------------------------------------------------ occupancy */
 
-.pools { display: grid; gap: 8px; }
-.pool {
-  padding: 10px 12px 9px; background: var(--ink-raised);
-  border-left: 3px solid var(--rule);
+/* The timeline: one lane per slot under its host, time running left to
+   right over fifteen minutes. A bar is a lease in its outcome's colour;
+   hatching before the history's horizon means unknown, not idle. Lanes are
+   plain SVG stretched to the column, so a bar's x is seconds. */
+.timeline {
+  grid-area: tl; padding: 12px var(--gap) 14px;
+  border-bottom: 1px solid var(--rule); background: var(--ink-sunk);
 }
-.pool.v-starved { border-left-color: var(--failed); }
-.pool.v-saturated { border-left-color: var(--ready); }
-.pool.v-draining { border-left-color: var(--active); }
-.pool.v-busy { border-left-color: var(--active); }
-.pool-head { display: flex; justify-content: space-between; align-items: baseline; }
-.pool-name { font: 600 13px var(--mono); }
-.verdict {
-  font: 700 9.5px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.14em;
-  color: var(--fg-faint);
-}
-.v-starved .verdict { color: var(--failed); }
-.v-saturated .verdict { color: var(--ready); }
-.v-draining .verdict, .v-busy .verdict { color: var(--active); }
+.tl-head { display: flex; align-items: flex-start; gap: 16px; }
+.tl-head .pane-title { margin: 0 0 8px; }
+.sparks { display: flex; gap: 18px; margin-left: auto; }
+.spark { display: grid; grid-template-columns: 140px auto; grid-template-rows: auto auto; column-gap: 8px; align-items: end; }
+.spark-plot { grid-row: 1 / 3; width: 140px; height: 28px; border-bottom: 1px solid var(--rule); }
+.spark-line { fill: none; stroke: var(--ready); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.spark-bar { fill: var(--passed); }
+.spark-value { font: 600 15px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.spark-label { font: 600 9px/1.2 var(--mono); color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.12em; }
 
-/* The gauge is supply then demand on one line: a square per slot that
-   polled this pool, a rule, then a pip per ready action. Pips past full
-   squares read as pressure without arithmetic. */
-.gauge { display: flex; align-items: center; gap: 8px; margin: 9px 0 7px; min-height: 14px; flex-wrap: wrap; }
-.supply, .demand { display: flex; gap: 3px; flex-wrap: wrap; align-items: center; }
+.tl-grid { display: grid; grid-template-columns: 92px minmax(0, 1fr); row-gap: 3px; column-gap: 10px; align-items: center; }
+.tl-label { font: 10.5px var(--mono); color: var(--fg-quiet); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-host { font: 600 10px var(--mono); color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.12em; text-align: right; padding-top: 6px; }
+.tl-host-load { color: var(--fg-quiet); letter-spacing: 0; }
+.tl-host-rule { height: 1px; background: var(--rule-soft); margin-top: 6px; }
+.tl-axis { position: relative; height: 14px; }
+.tl-tick {
+  position: absolute; top: 0; transform: translateX(-50%);
+  font: 9.5px var(--mono); color: var(--fg-faint); white-space: nowrap;
+}
+.tl-tick:first-child { transform: none; }
+.tl-tick:last-child { transform: translateX(-100%); }
+.tl-start {
+  position: absolute; top: 0; padding-left: 4px; border-left: 1px solid var(--ready);
+  font: 9.5px var(--mono); color: var(--ready); white-space: nowrap;
+}
+.tl-start + .tl-tick { visibility: hidden; }
+.tl-lane { width: 100%; height: 12px; display: block; background: var(--ink); }
+.tl-lane .unknown { fill: var(--ink-sunk); opacity: 1; }
+.bar { cursor: pointer; }
+.bar.o-passed { fill: var(--passed); }
+.bar.o-failed { fill: var(--failed); }
+.bar.o-lapsed { fill: var(--failed); opacity: 0.55; }
+.bar.o-running { fill: var(--active); }
+.bar:hover { fill: var(--fg); }
+
 .sq { width: 12px; height: 12px; display: inline-block; }
 .sq-busy { background: var(--active); }
 .sq-free { box-shadow: inset 0 0 0 1.5px var(--active); }
@@ -233,11 +258,28 @@ button:focus-visible, input:focus-visible {
   box-shadow: inset 0 0 0 1px var(--fg-faint);
   background: repeating-linear-gradient(135deg, transparent 0 2px, var(--rule) 2px 3px);
 }
-.gauge-sep { width: 1px; height: 16px; background: var(--rule); }
-.pip { width: 5px; height: 12px; background: var(--ready); display: inline-block; }
-.pip-more { font: 600 11px var(--mono); color: var(--ready); }
-.pool-nums { display: flex; gap: 10px; flex-wrap: wrap; margin: 0; font: 11px var(--mono); color: var(--fg-quiet); }
-.pool-nums b { color: var(--fg); font-weight: 600; }
+
+/* ------------------------------------------------------------ summary */
+
+.summary .detail-id { margin-top: 4px; }
+.summary-facts { grid-template-columns: 90px minmax(0, 1fr); }
+.bars { margin-top: 18px; }
+.bar-list { list-style: none; margin: 0; padding: 0; }
+.bar-row {
+  display: grid; grid-template-columns: 8px minmax(0, 1fr) minmax(0, 0.8fr) auto;
+  gap: 10px; align-items: center; width: 100%; text-align: left;
+  padding: 6px 4px; border-top: 1px solid var(--rule-soft); font: 12px var(--mono);
+}
+.bar-row:hover { background: var(--ink-raised); }
+.bar-swatch { width: 8px; height: 8px; background: var(--fg-faint); }
+.o-passed .bar-swatch { background: var(--passed); }
+.o-failed .bar-swatch, .o-lapsed .bar-swatch { background: var(--failed); }
+.o-running .bar-swatch { background: var(--active); }
+.bar-action { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-run { color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-time { color: var(--fg-quiet); font-variant-numeric: tabular-nums; }
+.back { font: 600 10px var(--mono); color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.14em; margin-bottom: 8px; }
+.back:hover { color: var(--fg); }
 
 /* ------------------------------------------------------------ slots */
 
@@ -272,6 +314,14 @@ button:focus-visible, input:focus-visible {
 .lease-track.late .lease-fill { background: var(--ready); }
 .lease-tick { position: absolute; top: -3px; width: 1px; height: 10px; background: var(--fg-quiet); }
 .lease-words { font: 10.5px var(--mono); color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+.hosts { display: grid; gap: 14px; }
+.host-head { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
+.host-name { font: 600 12px var(--mono); }
+.host-name::before { content: "▣ "; color: var(--fg-faint); }
+.host-load { font: 11px var(--mono); color: var(--fg-quiet); }
+.host-bar { display: flex; gap: 2px; margin-left: auto; }
+.host-bar .sq { width: 8px; height: 8px; }
+.host .slot { padding-left: 12px; }
 .rail-foot { margin: 18px 0 0; font-size: 11px; color: var(--fg-faint); }
 
 /* ------------------------------------------------------------ cells */
@@ -348,11 +398,21 @@ button:focus-visible, input:focus-visible {
 /* The strip: one column per graph layer, cells stacked four high and
    wrapping into more columns, so a fan-out looks wide and a chain looks
    long. */
-.strip { grid-area: strip; display: flex; gap: 7px; align-items: flex-start; flex-wrap: wrap; min-height: 10px; }
+/* The strip: one column per wave of the graph, a cell per action stacked
+   up to six high, joined by a short rule so the eye reads left to right.
+   The critical path carries a bright underline. */
+.strip { grid-area: strip; display: flex; gap: 0; align-items: center; flex-wrap: wrap; min-height: 8px; }
 .layer {
   display: grid; grid-auto-flow: column;
-  grid-auto-columns: 10px; gap: 2px;
+  grid-auto-columns: 8px; gap: 2px; position: relative;
 }
+.layer + .layer { margin-left: 12px; }
+.layer + .layer::before {
+  content: ""; position: absolute; left: -10px; top: 50%; width: 8px; height: 1px;
+  background: var(--rule);
+}
+.strip .cell { width: 8px; height: 8px; }
+.strip .cell.crit { box-shadow: 0 2px 0 -0.5px var(--fg); }
 .strip .cell:hover { outline: 1.5px solid var(--fg); outline-offset: 1px; }
 
 .diag { grid-area: diag; margin: 0; font: 12px var(--mono); color: var(--fg-quiet); }
@@ -424,8 +484,12 @@ button:focus-visible, input:focus-visible {
 /* ------------------------------------------------------------ narrow */
 
 @media (max-width: 1180px) {
-  .board { grid-template-columns: minmax(250px, 290px) minmax(0, 1fr); }
-  .detail { grid-column: 1 / -1; border-top: 1px solid var(--rule); }
+  .board {
+    grid-template-columns: minmax(230px, 270px) minmax(0, 1fr);
+    grid-template-areas: "tl tl" "rail runs" "detail detail";
+    grid-template-rows: auto auto auto;
+  }
+  .detail { border-top: 1px solid var(--rule); }
   .runs { border-right: 0; }
 }
 
@@ -447,7 +511,13 @@ button:focus-visible, input:focus-visible {
   .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
   .board { display: block; }
   .rail, .runs, .detail { display: none; border: 0; }
-  .show-pools .rail, .show-runs .runs, .show-detail .detail { display: block; }
+  .timeline { display: none; padding: 12px var(--gap); }
+  .show-pools .rail, .show-pools .timeline, .show-runs .runs, .show-detail .detail { display: block; }
+  .tl-head { flex-wrap: wrap; }
+  .sparks { margin-left: 0; gap: 12px; }
+  .spark { grid-template-columns: 100px auto; }
+  .spark-plot { width: 100px; }
+  .tl-grid { grid-template-columns: 64px minmax(0, 1fr); }
   .legend { display: none; }
   .run-head { flex-wrap: wrap; row-gap: 2px; }
   .run-meta { flex-basis: 100%; order: 3; }

@@ -44,7 +44,17 @@ fn pass(state: queue.State, worker: String, pool: String, now: Int) {
 }
 
 fn snapshot(state: queue.State, slots: List(fleet.Slot), now: Int) {
-  board.build(fleet.Fleet(now:, slots:, runs: state.runs, proofs: 0))
+  board.build(
+    fleet.Fleet(
+      now:,
+      since: 0,
+      slots:,
+      runs: state.runs,
+      proofs: 0,
+      events: [],
+      samples: [],
+    ),
+  )
 }
 
 fn pool_named(b: board.Board, name: String) -> board.Pool {
@@ -290,4 +300,37 @@ pub fn a_failed_queued_group_frees_its_lane_test() {
   let b = snapshot(state, [], 1)
   let assert Ok(next) = board.find(b, "g2")
   assert next.diagnosis.health == board.Moving
+}
+
+pub fn a_started_run_reports_its_progress_test() {
+  let state = fan_out(queue.empty(), "fan", 3, "linux")
+  let b = snapshot(state, [], 0)
+  let assert Ok(run) = board.find(b, "fan")
+  assert board.progress_label(run) == "pending"
+  let state = pass(state, "w1", "linux", 1)
+  let assert #(state, Some(_)) = queue.claim(state, "w1", "linux", 2)
+  let assert Ok(run) = board.find(snapshot(state, [], 3), "fan")
+  assert board.progress_label(run) == "running 1/4"
+}
+
+pub fn slots_group_under_their_host_test() {
+  let state = fan_out(queue.empty(), "fan", 0, "linux")
+  let assert #(state, Some(_)) = queue.claim(state, "a2", "linux", 10)
+  let b =
+    snapshot(
+      state,
+      [
+        fleet.Slot("solo", None, fleet.Polled("linux", 10)),
+        fleet.Slot("b1", Some("beta"), fleet.Polled("linux", 10)),
+        fleet.Slot("a1", Some("alpha"), fleet.Polled("linux", 10)),
+        fleet.Slot("a2", Some("alpha"), fleet.Polled("linux", 10)),
+      ],
+      11,
+    )
+  let hosts = board.hosts(b.slots)
+  assert list.map(hosts, fn(h) { h.name })
+    == [Some("alpha"), Some("beta"), None]
+  let assert [alpha, ..] = hosts
+  assert alpha.busy == 1
+  assert list.map(alpha.slots, fn(s) { s.worker }) == ["a2", "a1"]
 }

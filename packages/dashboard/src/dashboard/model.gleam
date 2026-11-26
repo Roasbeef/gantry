@@ -23,7 +23,7 @@
 //// more than one request at a time from a page.
 
 import dashboard/board.{type Board}
-import dashboard/timing.{type Memory}
+import dashboard/history.{type History}
 import gantry_core/fleet
 import gleam/dynamic/decode
 import gleam/int
@@ -70,7 +70,7 @@ pub type Model {
     draft: String,
     connection: Connection,
     board: Option(Board),
-    memory: Memory,
+    history: Option(History),
     chosen_run: Option(String),
     chosen_action: Option(String),
     log: Log,
@@ -92,6 +92,7 @@ pub type Msg {
   LogAnswered(digest: String, status: Int, body: String)
   TabChosen(Tab)
   FinishedToggled
+  RunCleared
 }
 
 /// The most log lines the pane holds. A longer log shows its tail.
@@ -113,7 +114,7 @@ pub fn initial(token: String) -> Model {
       _ -> Connecting
     },
     board: None,
-    memory: timing.new(),
+    history: None,
     chosen_run: None,
     chosen_action: None,
     log: NoLog,
@@ -167,7 +168,10 @@ fn apply(model: Model, status: Int, body: String) -> Model {
   case status {
     200 ->
       case json.parse(body, fleet.decoder()) {
-        Ok(snapshot) -> show(model, board.build(snapshot))
+        Ok(snapshot) -> {
+          let next = board.build(snapshot)
+          show(model, next, history.read(snapshot, next))
+        }
         Error(_) ->
           Model(
             ..model,
@@ -302,39 +306,29 @@ pub fn tail(text: String, lines: Int) -> String {
 
 /// Install a new board. A chosen run that is no longer retained gives way to
 /// the first stalled run, or the first run when none is stalled.
-fn show(model: Model, next: Board) -> Model {
+fn show(model: Model, next: Board, past: History) -> Model {
   let kept =
     model.chosen_run
     |> option.to_result(Nil)
     |> result.try(board.find(next, _))
     |> result.is_ok
 
-  // A chosen run that was dropped gives way to a stalled run, then the
-  // first run.
-  let chosen = case kept {
-    True -> model.chosen_run
+  // A chosen run the controller no longer retains returns the detail pane to
+  // the fleet summary; nothing is chosen on the reader's behalf.
+  case kept {
+    True ->
+      Model(..model, connection: Live, board: Some(next), history: Some(past))
     False ->
-      list.find(next.runs, fn(run) { run.diagnosis.health == board.Stalled })
-      |> result.lazy_or(fn() { list.first(next.runs) })
-      |> result.map(fn(run) { run.id })
-      |> option.from_result
+      Model(
+        ..model,
+        connection: Live,
+        board: Some(next),
+        history: Some(past),
+        chosen_run: None,
+        chosen_action: None,
+        log: NoLog,
+      )
   }
-
-  Model(
-    ..model,
-    connection: Live,
-    board: Some(next),
-    memory: timing.observe(model.memory, next),
-    chosen_run: chosen,
-    chosen_action: case kept {
-      True -> model.chosen_action
-      False -> None
-    },
-    log: case kept {
-      True -> model.log
-      False -> NoLog
-    },
-  )
 }
 
 /// Describe an error answer from its `{"error": ...}` body, or its status.

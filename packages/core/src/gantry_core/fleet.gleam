@@ -165,6 +165,8 @@ pub fn ready(run: queue.Run) -> List(queue.Work) {
     True ->
       list.filter(run.work, fn(work) {
         let action = work.task.action
+
+        // Pending work is ready when its prerequisites hold results.
         case work.step {
           queue.Pending(_) ->
             list.all(
@@ -217,6 +219,7 @@ fn servable(run: queue.Run) -> Bool {
   }
 }
 
+/// Encode one event under its kind tag.
 fn encode_event(value: Event) -> json.Json {
   // Each event kind carries its own fields under one tag.
   case value {
@@ -247,6 +250,7 @@ fn encode_event(value: Event) -> json.Json {
   }
 }
 
+/// Decode one event, refusing an unknown tag or a negative serial or time.
 fn event_decoder() -> decode.Decoder(Event) {
   use kind <- decode.field("kind", decode.string)
 
@@ -272,6 +276,7 @@ fn event_decoder() -> decode.Decoder(Event) {
   }
 }
 
+/// Decode a result's outcome word.
 fn outcome_decoder() -> decode.Decoder(Outcome) {
   use word <- decode.then(decode.string)
 
@@ -283,6 +288,7 @@ fn outcome_decoder() -> decode.Decoder(Outcome) {
   }
 }
 
+/// Encode one sample as its time and per-pool counts.
 fn encode_sample(value: Sample) -> json.Json {
   json.object([
     #("at", json.int(value.at)),
@@ -298,6 +304,7 @@ fn encode_sample(value: Sample) -> json.Json {
   ])
 }
 
+/// Decode one sample, refusing a negative time or count.
 fn sample_decoder() -> decode.Decoder(Sample) {
   use at <- decode.field("at", natural())
   use ready <- decode.field(

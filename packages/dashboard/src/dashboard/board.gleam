@@ -81,6 +81,7 @@ pub type Cell {
 /// The lease behind an `Active` cell.
 pub type Holder {
   Holder(
+    serial: Int,
     worker: String,
     host: Option(String),
     attempt: Int,
@@ -313,6 +314,70 @@ pub fn first_failure(run: RunRow) -> Result(Action, Nil) {
   list.find(run.actions, fn(a) { a.cell == Failed || a.cell == Expired })
 }
 
+/// The words on a run's state pill. A pending run that has started says how
+/// far it got ("running 4/14", finished over total), because "pending" would
+/// hide that work is under way; every other phase keeps its own word.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // board.progress_label(row) == "running 4/14"
+/// ```
+pub fn progress_label(run: RunRow) -> String {
+  let done =
+    list.count(run.actions, fn(a) { a.cell == Passed || a.cell == Reused })
+  let started = done > 0 || list.any(run.actions, fn(a) { a.cell == Active })
+
+  // Only a pending run that has begun gets a progress count.
+  case run.phase, started {
+    queue.PhasePending, True ->
+      "running "
+      <> int.to_string(done)
+      <> "/"
+      <> int.to_string(list.length(run.actions))
+    _, _ -> phase_label(run.phase)
+  }
+}
+
+/// The slots of one host, with how many of them hold a lease.
+pub type Host {
+  Host(name: Option(String), slots: List(Slot), busy: Int)
+}
+
+/// Group slots under their host label, labelled hosts by name and slots
+/// without a label last, each host's slots in rail order.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // board.hosts(board.slots)
+/// ```
+pub fn hosts(slots: List(Slot)) -> List(Host) {
+  let names =
+    list.map(slots, fn(s) { s.host })
+    |> list.unique
+    |> list.sort(fn(a, b) {
+      // A missing label sorts after every name.
+      case a, b {
+        Some(x), Some(y) -> string.compare(x, y)
+        Some(_), None -> order.Lt
+        None, Some(_) -> order.Gt
+        None, None -> order.Eq
+      }
+    })
+  list.map(names, fn(name) {
+    let mine = rail_order(list.filter(slots, fn(s) { s.host == name }))
+    let busy =
+      list.count(mine, fn(s) {
+        case s.occupation {
+          Working(_, _, _, _) -> True
+          Waiting(_, _) | Quiet(_, _) | Unseen -> False
+        }
+      })
+    Host(name, mine, busy)
+  })
+}
+
 /// The short word for a cell, used in labels and the legend.
 ///
 /// ## Examples
@@ -451,17 +516,11 @@ fn pad(value: Int) -> String {
 
 /// Build the board row for one run: its actions with layers and cells, its landing signal, and its lane.
 fn row(run: Run, hosts: Dict(String, Option(String))) -> RunRow {
-  let servable = servable(run)
-  let done =
-    list.filter_map(run.work, fn(work) {
-      case work.step {
-        queue.Passed(_) | queue.Reused(_) -> Ok(work.task.action.name)
-        queue.Pending(_)
-        | queue.Active(_)
-        | queue.Failed(_, _)
-        | queue.Skipped -> Error(Nil)
-      }
-    })
+  // The core states the claim rule once; a cell is ready exactly when a poll
+  // in its pool could lease it now.
+  let ready =
+    fleet.ready(run)
+    |> list.map(fn(work) { work.task.action.name })
     |> set.from_list
 
   // The work list is in dependency order, so each action's prerequisites
@@ -475,7 +534,7 @@ fn row(run: Run, hosts: Dict(String, Option(String))) -> RunRow {
         list.fold(needs, 0, fn(deepest, need) {
           int.max(deepest, { dict.get(layers, need) |> result.unwrap(-1) } + 1)
         })
-      let placed = place(work, needs, layer, servable, done, hosts)
+      let placed = place(work, needs, layer, ready, hosts)
       #(dict.insert(layers, action.name, layer), [placed, ..actions])
     })
   let actions = list.reverse(actions)
@@ -500,8 +559,7 @@ fn place(
   work: queue.Work,
   needs: List(String),
   layer: Int,
-  servable: Bool,
-  done: set.Set(String),
+  ready: set.Set(String),
   hosts: Dict(String, Option(String)),
 ) -> Action {
   let task = work.task
@@ -523,10 +581,9 @@ fn place(
   // Each step kind maps to one cell, and only its own evidence comes along.
   case work.step {
     queue.Pending(attempts) -> {
-      let ready = servable && list.all(needs, set.contains(done, _))
       Action(
         ..base,
-        cell: case ready {
+        cell: case set.contains(ready, task.action.name) {
           True -> Ready
           False -> Blocked
         },
@@ -537,6 +594,7 @@ fn place(
       let worker = queue.lease_worker(lease)
       let holder =
         Holder(
+          serial: queue.lease_serial(lease),
           worker:,
           host: dict.get(hosts, worker) |> result.unwrap(None),
           attempt: queue.lease_attempt(lease),
@@ -567,21 +625,6 @@ fn place(
         ),
       )
     queue.Skipped -> Action(..base, cell: Skipped)
-  }
-}
-
-/// Whether the queue can lease this run's pending actions, which mirrors the
-/// core's own rule: a build or queued candidate that has not failed.
-fn servable(run: Run) -> Bool {
-  case run.submission, queue.phase(run) {
-    queue.Build, queue.PhaseFailed | queue.Queued(_), queue.PhaseFailed -> False
-    queue.Build, _ | queue.Queued(_), _ -> True
-    queue.Waiting(_, _), _
-    | queue.Landing(_), _
-    | queue.Landed(_), _
-    | queue.Blocked(_, _), _
-    | queue.Unprepared(_, _, _), _
-    -> False
   }
 }
 

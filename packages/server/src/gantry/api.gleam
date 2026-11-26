@@ -242,6 +242,8 @@ pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
   // was watching and nothing else; the page draws the gaps as unknown.
   ffi_history.sample(now, fleet.ready_by_pool(state.runs))
   ffi_history.prune(now, history_window)
+
+  // Every registered slot, with the latest poll this controller served.
   let polls =
     ffi_presence.all()
     |> list.map(fn(poll) { #(poll.0, fleet.Polled(poll.1, poll.2)) })
@@ -251,6 +253,8 @@ pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
       let presence = dict.get(polls, worker.id) |> result.unwrap(fleet.Unseen)
       fleet.Slot(worker.id, worker.host, presence)
     })
+
+  // The recorded past, oldest first, typed from the table's rows.
   let grants =
     ffi_history.grants()
     |> list.map(fn(row) {
@@ -259,10 +263,12 @@ pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
   let settlements =
     ffi_history.settlements()
     |> list.map(fn(row) {
+      // The table stores success as a boolean.
       let outcome = case row.1 {
         True -> fleet.Succeeded
         False -> fleet.Rejected
       }
+
       fleet.Settled(row.0, outcome, row.2)
     })
   let events =
@@ -272,6 +278,7 @@ pub fn fleet(cfg: Config) -> Result(json.Json, Error) {
     ffi_history.samples()
     |> list.map(fn(row) { fleet.Sample(row.0, row.1) })
     |> list.sort(fn(a, b) { int.compare(a.at, b.at) })
+
   Ok(
     fleet.encode(fleet.Fleet(
       now:,
