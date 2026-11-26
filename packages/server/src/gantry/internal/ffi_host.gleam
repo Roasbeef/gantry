@@ -22,6 +22,11 @@
 //// process group ID. `tcp_open` asks `gen_tcp` whether a port already has a
 //// listener. `default_terminate` gives SIGTERM back to the operating system
 //// so a signalled CLI exits 143 without running `init:stop`.
+////
+//// The worker drains instead. `forward_terminate` replaces the kernel's
+//// `erl_signal_server` handler, which would run `init:stop`, with one that
+//// sends the caller a message, and `terminate_signal` recognises it in a
+//// selector. No Gleam binding exposes OS signal events.
 
 import gleam/dynamic.{type Dynamic}
 
@@ -224,6 +229,27 @@ pub fn tcp_open(host: String, port: Int, milliseconds: Int) -> Bool
 /// ```
 @external(erlang, "gantry_host_ffi", "default_terminate")
 pub fn default_terminate() -> Nil
+
+/// Deliver SIGTERM to the calling process as a message from now on, instead
+/// of stopping the VM. Select it with `terminate_signal`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // ffi_host.forward_terminate()
+/// ```
+@external(erlang, "gantry_signal_ffi", "forward_terminate")
+pub fn forward_terminate() -> Nil
+
+/// Recognise the message `forward_terminate` sends on SIGTERM.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // process.select_other(selector, ffi_host.terminate_signal)
+/// ```
+@external(erlang, "gantry_signal_ffi", "terminate_signal")
+pub fn terminate_signal(message: Dynamic) -> Result(Nil, Nil)
 
 /// Hold an exclusive OS lock on `path` for the life of this VM. The lock
 /// fails at once when another process holds it.
