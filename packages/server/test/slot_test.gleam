@@ -128,7 +128,7 @@ pub fn fault_before_the_start_marker_retries_the_attempt_test() {
   worker_fixture.remove(directory)
 }
 
-pub fn fault_after_the_start_marker_rejects_after_cleanup_test() {
+pub fn fault_after_the_start_marker_interrupts_after_cleanup_test() {
   let calls = process.new_subject()
   let script =
     Script(
@@ -143,12 +143,49 @@ pub fn fault_after_the_start_marker_rejects_after_cleanup_test() {
   assert verdict == slot.Faulted(slot.Retry("Docker: lost the daemon"))
   let assert Some(custody.Interrupted(_, _)) = pending(current.db)
 
-  // The action may have run, so it is rejected rather than run twice.
+  // The action may have run, so this slot never runs it again. It reports
+  // the attempt interrupted, and the controller reassigns it.
   let #(_, verdict) = slot.step(current, cursor)
   assert verdict == slot.Advanced
   assert drain(calls) == ["execute", "cleanup"]
   let assert Some(custody.Recorded(_, receipt)) = pending(current.db)
-  assert string.contains(receipt, "worker interrupted before recording outcome")
+  assert string.contains(receipt, "\"kind\":\"interrupted\"")
+  assert custody.referenced(receipt) == Ok([])
+  worker_fixture.remove(directory)
+}
+
+pub fn release_interrupts_an_unfinished_attempt_without_running_it_test() {
+  let calls = process.new_subject()
+  let script = Script(execute: finished, cleanup: fn() { Ok(Nil) })
+  let #(directory, current, _) = claimed(script, calls)
+
+  // The drain deadline gives the attempt up: cleanup, record, then publish.
+  // The offline controller keeps the receipt for the next start.
+  let assert Error(slot.Retry(_)) = slot.release(current, offline())
+  assert drain(calls) == ["cleanup", "cleanup"]
+  let assert Some(custody.Recorded(_, receipt)) = pending(current.db)
+  assert string.contains(receipt, "\"kind\":\"interrupted\"")
+  worker_fixture.remove(directory)
+}
+
+pub fn release_of_an_idle_journal_does_nothing_test() {
+  let calls = process.new_subject()
+  let script = Script(execute: finished, cleanup: fn() { Ok(Nil) })
+  let #(directory, db) = worker_fixture.journal()
+  let engine =
+    slot.Engine(
+      execute: fn(_name, _assignment, _network, start, spool) {
+        process.send(calls, "execute")
+        script.execute(start, spool)
+      },
+      cleanup: fn(_name) {
+        process.send(calls, "cleanup")
+        script.cleanup()
+      },
+    )
+  let current = slot.Slot(directory, "w1", "linux", db, engine)
+  assert slot.release(current, offline()) == Ok(Nil)
+  assert drain(calls) == []
   worker_fixture.remove(directory)
 }
 

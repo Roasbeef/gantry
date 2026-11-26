@@ -248,6 +248,7 @@ fn verify_blobs(
       ..list.map(files, fn(file) { file.digest })
     ]
     queue.Rejected(_, log) -> [log]
+    queue.Interrupted -> []
   }
 
   list.try_each(ids, blobs.require(root, _))

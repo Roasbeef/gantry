@@ -7,7 +7,7 @@
 //// ```text
 //// idle --claim 200--> Ready --execute--> Recorded --cleanup--> publish
 ////                                          |                     |
-////  Interrupted --cleanup, reject---------->+        results 200/409
+////  Interrupted --cleanup, interrupt------->+        results 200/409
 ////                                                    acknowledge: idle
 //// ```
 ////
@@ -15,16 +15,20 @@
 //// | ----------- | ---------------------------------------- | ------------------------------------------------ |
 //// | idle        | claim, then journal the assignment        | no second attempt exists while one is pending    |
 //// | Ready       | clean by name, stage, mark started, run   | the start marker precedes the container start    |
-//// | Interrupted | clean by name, record a rejection         | an action that may have run never runs again     |
+//// | Interrupted | clean by name, record `Interrupted`       | the lease lapses and the action is reassigned    |
 //// | Recorded    | clean once, upload blobs, post the receipt | the result is durable before Docker is touched   |
 ////
 //// A finished result is journaled before its Docker resources are removed.
 //// Cleanup is idempotent and runs in the Recorded phase, so a cleanup fault
-//// retries without discarding the result. The infrastructure faults that
-//// still reach users as a failed action are the Interrupted rejection after
-//// a restart or Docker fault once the container may have started, and
-//// staging faults the worker classifies as the action's own (a bad archive
-//// or an unsafe path). Everything before the start marker retries.
+//// retries without discarding the result. A restart or Docker fault once
+//// the container may have started is reported `Interrupted`, which the
+//// controller counts as one attempt and reassigns. The infrastructure faults
+//// that still reach users as a failed action are staging faults the worker
+//// classifies as the action's own (a bad archive or an unsafe path), and the
+//// last permitted attempt. Everything before the start marker retries.
+////
+//// `release` is the drain deadline's way out: it records whatever attempt
+//// the journal holds as `Interrupted` and publishes it without running it.
 
 import gantry/blobs
 import gantry/worker/controllers
@@ -100,20 +104,10 @@ pub fn step(slot: Slot, cursor: Cursor) -> #(Cursor, Verdict) {
     Ok(None) -> claim(slot, cursor)
     Ok(Some(custody.Recorded(name, receipt))) ->
       recorded(slot, cursor, name, receipt)
-    Ok(Some(custody.Interrupted(name, assignment))) -> {
-      let outcome = {
-        use Nil <- result.try(
-          slot.engine.cleanup(name) |> result.map_error(cleanup_fault),
-        )
-        reject(
-          slot,
-          name,
-          assignment,
-          "worker interrupted before recording outcome",
-        )
-      }
-      #(cursor, verdict(outcome))
-    }
+    Ok(Some(custody.Interrupted(name, assignment))) -> #(
+      cursor,
+      verdict(interrupt(slot, name, assignment)),
+    )
     Ok(Some(custody.Ready(name, assignment))) -> #(
       cursor,
       verdict(perform(slot, cursor.network, name, assignment)),
@@ -213,6 +207,49 @@ fn perform(
     Error(docker.Rejected(reason)) -> reject(slot, name, assignment, reason)
     Error(docker.Unavailable(reason)) -> Error(Retry(reason))
     Error(docker.JournalFault(reason)) -> Error(Stop(reason))
+  }
+}
+
+/// Remove the attempt's Docker resources, then record it `Interrupted`. The
+/// controller lapses the lease and reassigns the action, so a restart costs
+/// one attempt instead of the run.
+fn interrupt(
+  slot: Slot,
+  name: String,
+  assignment: queue.Assignment,
+) -> Result(Nil, Fault) {
+  use Nil <- result.try(
+    slot.engine.cleanup(name) |> result.map_error(cleanup_fault),
+  )
+  custody.record(slot.db, name, assignment, queue.Interrupted)
+  |> result.map_error(Stop)
+}
+
+/// Give up the journaled attempt without running anything more, and publish
+/// its receipt. An attempt that has not recorded an outcome, started or not,
+/// is recorded `Interrupted`. A drain that runs out of time calls this once
+/// the slot loop has stopped, so the action is reassigned at once.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // slot.release(slot, Cursor(network, None))
+/// ```
+pub fn release(slot: Slot, cursor: Cursor) -> Result(Nil, Fault) {
+  // Each pass moves the journal one phase forward, so this ends by idle.
+  case custody.pending(slot.db) {
+    Error(reason) -> Error(Stop(reason))
+    Ok(None) -> Ok(Nil)
+    Ok(Some(custody.Ready(name, assignment)))
+    | Ok(Some(custody.Interrupted(name, assignment))) -> {
+      use Nil <- result.try(interrupt(slot, name, assignment))
+      release(slot, cursor)
+    }
+    Ok(Some(custody.Recorded(name, receipt))) ->
+      case recorded(slot, cursor, name, receipt) {
+        #(_, Faulted(fault)) -> Error(fault)
+        #(_, Advanced) | #(_, Idled) -> Ok(Nil)
+      }
   }
 }
 
