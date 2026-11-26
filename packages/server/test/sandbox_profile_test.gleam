@@ -71,11 +71,18 @@ pub fn preflight_requires_the_named_profile_file_test() {
     docker.check_sandboxes(
       limits([#("GANTRY_WORKER_USERNS_SECCOMP", "/nonexistent/userns.json")]),
     )
+
+  // A file that exists but is not a seccomp profile is refused as well.
+  let directory = worker_fixture.temp_directory()
+  let bogus = directory <> "/bogus.json"
+  let assert Ok(Nil) = simplifile.write(bogus, "{\"truncated\":")
+  let assert Error(_) =
+    docker.check_sandboxes(limits([#("GANTRY_WORKER_USERNS_SECCOMP", bogus)]))
+  worker_fixture.remove(directory)
 }
 
 pub fn the_shipped_profile_is_a_valid_seccomp_document_test() {
   let path = "priv/sandbox/userns-seccomp.json"
-  let assert Ok(True) = simplifile.is_file(path)
   assert docker.check_sandboxes(
       limits([#("GANTRY_WORKER_USERNS_SECCOMP", absolute(path))]),
     )
@@ -83,9 +90,7 @@ pub fn the_shipped_profile_is_a_valid_seccomp_document_test() {
 }
 
 pub fn execute_refuses_before_creating_anything_test() {
-  let directory = "/tmp/gantry-sandbox-refusal"
-  let _ = simplifile.delete(directory)
-  let assert Ok(Nil) = simplifile.create_directory_all(directory)
+  let directory = worker_fixture.temp_directory()
   let assert Ok(network) = controllers.new("http://127.0.0.1:9", "token")
   let job = worker_fixture.assignment(1)
   let job =
@@ -105,7 +110,7 @@ pub fn execute_refuses_before_creating_anything_test() {
     )
   assert simplifile.is_directory(directory <> "/gantry-refused.staging")
     == Ok(False)
-  let _ = simplifile.delete(directory)
+  worker_fixture.remove(directory)
 }
 
 fn absolute(path: String) -> String {

@@ -313,16 +313,17 @@ cat > "$tmp/userns.json" <<'JSON'
 {"name":"userns","argv":["sh","-ec","unshare -U -r -m -p -f --mount-proc sh -ec 'test \"$(id -u)\" = 0'"],"inputs":[],"outputs":[]}
 JSON
 "$cli" run userns-strict fixture/project "$candidate" check "$tmp/userns.json" >/dev/null
-if "$cli" watch userns-strict > "$tmp/userns-strict.jsonl"; then
+if GANTRY_WATCH_SECONDS=120 "$cli" watch userns-strict > "$tmp/userns-strict.jsonl"; then
   echo 'A strict repository created a user namespace' >&2
   exit 1
 fi
+jq -se 'last | .phase == "failed"' "$tmp/userns-strict.jsonl" >/dev/null
 start worker-wide env 'ERL_FLAGS=+S 2:2' "GANTRY_ENDPOINT=$worker_urls" GANTRY_POOL=wide \
   GANTRY_WORKER_ID=worker-wide "GANTRY_WORKER_TOKEN=$wide_token" "GANTRY_WORKER_DIR=$tmp/wide-journal" \
   "GANTRY_WORKER_USERNS_SECCOMP=$root/packages/server/priv/sandbox/userns-seccomp.json" "${worker[@]}"
 wide_pid=${pids[-1]}
 "$cli" run userns-wide fixture/wide "$candidate" check "$tmp/userns.json" >/dev/null
-"$cli" watch userns-wide > "$tmp/userns-wide.jsonl"
+GANTRY_WATCH_SECONDS=120 "$cli" watch userns-wide > "$tmp/userns-wide.jsonl"
 jq -se 'last | .phase == "passed"' "$tmp/userns-wide.jsonl" >/dev/null
 kill -TERM -- "-$wide_pid"
 wait "$wide_pid" 2>/dev/null || true

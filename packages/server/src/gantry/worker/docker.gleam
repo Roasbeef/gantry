@@ -17,8 +17,10 @@ import gantry_core/graph
 import gantry_core/queue
 import gantry_core/sandbox
 import gleam/bit_array
+import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
+import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -174,19 +176,31 @@ pub fn limits_from(
 /// // docker.check_sandboxes(limits)
 /// ```
 pub fn check_sandboxes(limits: Limits) -> Result(Nil, String) {
-  case limits.userns_seccomp {
+  // The fields Docker requires of a seccomp profile document.
+  let profile = {
+    use _ <- decode.field("defaultAction", decode.string)
+    use _ <- decode.field("syscalls", decode.list(decode.dynamic))
+    decode.success(Nil)
+  }
+
+  // Docker reads the file at each container create. An unreadable or
+  // malformed file would fail there as a retryable fault on every attempt,
+  // so a configured path must hold a profile before the slot claims work.
+  let readable = case limits.userns_seccomp {
     None -> Ok(Nil)
     Some(path) ->
-      case simplifile.is_file(path) {
-        Ok(True) -> Ok(Nil)
-        Ok(False) | Error(_) ->
-          Error(
-            "GANTRY_WORKER_USERNS_SECCOMP names "
-            <> path
-            <> ", which is not a readable file",
-          )
-      }
+      simplifile.read(path)
+      |> result.replace_error(path)
+      |> result.try(fn(text) {
+        json.parse(text, profile) |> result.replace_error(path)
+      })
   }
+
+  result.map_error(readable, fn(path) {
+    "GANTRY_WORKER_USERNS_SECCOMP names "
+    <> path
+    <> ", which is not a readable seccomp profile"
+  })
 }
 
 /// The sandbox flags an action container receives, apart from its mounts.

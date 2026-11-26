@@ -307,6 +307,8 @@ fn restart(world: World) -> World {
   // tasks were strict, so dropping the strict fields must decode the same.
   let old = string.replace(encoded, "\"sandbox\":\"strict\",", "")
   let old = string.replace(old, ",\"sandbox\":\"strict\"", "")
+  assert !string.contains(old, "\"sandbox\":\"strict\"")
+    as "every strict field was removed from the old snapshot"
   let assert Ok(upgraded) = json.parse(old, protocol.state_decoder())
   assert upgraded == world.durable
     as "a snapshot without profiles decodes its tasks as strict"

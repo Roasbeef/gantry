@@ -467,7 +467,12 @@ pool, set `GANTRY_WORKER_USERNS_SECCOMP` to the release's
 checks the file at startup. A slot without it rejects a `userns` action
 before creating anything, and the run fails with that reason. The profile
 also turns off AppArmor and Docker's masked paths for the action, so give
-the pool a host that runs no strict repository's slots.
+the pool a host that runs no strict repository's slots. The profile was
+measured on Ubuntu 22.04. On a host with
+`kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10 and later), an
+unconfined process loses its capabilities inside a new user namespace, so
+mounts there may still fail. Check the pool's host with the e2e case before
+relying on it.
 [Sandbox profiles](design-notes/sandbox-profiles.md)
 
 At startup the worker takes an exclusive SQLite lock on its journal, so a
