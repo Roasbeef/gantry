@@ -112,6 +112,12 @@ already a routing label.
   slot would hold its attempt forever. A rejection ends the attempt at once
   and names the cause, and the one-profile-per-pool rule makes it an operator
   error, not a placement race.
+- A slot with the variable set also proves the host at startup. It runs one
+  throwaway container under the `userns` flags that creates a user, mount, and
+  PID namespace, and refuses to start, naming the reason, if the host says no.
+  A host can accept every flag and still refuse the namespace, for example
+  with `kernel.apparmor_restrict_unprivileged_userns=1`, and without the trial
+  such a slot would claim `userns` actions and fail each one.
 - Only the action container widens. The collector container, which reads the
   tmpfs volume the action wrote, keeps `restrictions` and `collector_limits`
   exactly. The action's flags are `action_flags`, so the mapping applies there

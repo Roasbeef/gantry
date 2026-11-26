@@ -7,6 +7,19 @@
 //// the only effect that runs action code. A fault before that point leaves
 //// only Docker resources under the attempt's own name, which `execute`
 //// removes before it begins, so the slot can retry the attempt unchanged.
+////
+//// ## Flow
+////
+//// ```text
+//// boot:    limits -> preflight -> check_sandboxes -> try_sandboxes
+//// attempt: execute -> action_flags -> cleanup -> stage -> run -> start
+//// after:   cleanup -> unstage
+//// ```
+////
+//// The sandbox profile is chosen by the task and turned into flags only by
+//// `action_flags`. A strict task gets the fixed restrictions and limits. A
+//// userns task gets the same flags with three appended, and a slot that
+//// cannot honour them refuses at boot or rejects the action before staging.
 
 import envoy
 import gantry/blobs
@@ -201,6 +214,61 @@ pub fn check_sandboxes(limits: Limits) -> Result(Nil, String) {
     <> path
     <> ", which is not a readable seccomp profile"
   })
+}
+
+/// The command a trial container runs to show that the host lets the
+/// `userns` profile create what a nested `bwrap` creates: a user namespace
+/// mapped to root, a mount namespace, and a PID namespace with a fresh /proc.
+const userns_trial = "unshare -U -r -m -p -f --mount-proc true"
+
+/// Run one throwaway container under the `userns` flags and refuse to start
+/// the slot when the host cannot create the namespaces the profile exists
+/// for. A host can permit every flag and still refuse the namespace, for
+/// example when AppArmor restricts unprivileged user namespaces. Without this
+/// check such a slot would claim `userns` actions and fail every one of them.
+/// A worker without the profile configured skips the trial.
+///
+/// ## Examples
+///
+/// ```gleam
+/// // docker.try_sandboxes(limits)
+/// ```
+pub fn try_sandboxes(limits: Limits) -> Result(Nil, String) {
+  case action_flags(limits, sandbox.Userns) {
+    // Only a worker configured for the profile is asked to prove it.
+    Error(_) -> Ok(Nil)
+    Ok(flags) -> {
+      let reply =
+        ffi_worker.docker(
+          list.flatten([
+            ["run", "--rm"],
+            flags,
+            ["--entrypoint", "/bin/sh", collector, "-c", userns_trial],
+          ]),
+          60_000,
+          4096,
+          ffi_host.Combined,
+        )
+
+      // Only a clean exit shows the namespaces were created.
+      case reply {
+        Ok(ffi_host.Command(exit: ffi_host.Exited(0), ..)) -> Ok(Nil)
+        Ok(ffi_host.Command(bytes:, ..)) ->
+          Error(
+            "this host cannot create user namespaces under the userns sandbox, so the slot will not serve it ("
+            <> {
+              bit_array.to_string(bytes)
+              |> result.unwrap("no output")
+              |> string.trim
+              |> string.slice(0, 256)
+            }
+            <> "); check kernel.apparmor_restrict_unprivileged_userns",
+          )
+        Error(reason) ->
+          Error("could not run the userns sandbox trial: " <> reason)
+      }
+    }
+  }
 }
 
 /// The sandbox flags an action container receives, apart from its mounts.

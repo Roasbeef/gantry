@@ -318,26 +318,50 @@ if GANTRY_WATCH_SECONDS=120 "$cli" watch userns-strict > "$tmp/userns-strict.jso
   exit 1
 fi
 jq -se 'last | .phase == "failed"' "$tmp/userns-strict.jsonl" >/dev/null
+# Whether this host lets the userns flags create the namespaces decides what
+# the wide slot must do: refuse to start with a named reason, or run the
+# action. The probe uses the slot's own sandbox flags, and the slot must agree.
+seccomp="$root/packages/server/priv/sandbox/userns-seccomp.json"
+host_userns=no
+if docker run --rm --pull=never --network=none --cap-drop=ALL --read-only \
+  --user=65534:65534 --security-opt=no-new-privileges --log-driver=none \
+  "--security-opt=seccomp=$seccomp" --security-opt=systempaths=unconfined \
+  --security-opt=apparmor=unconfined --entrypoint /bin/sh "$image" \
+  -c 'unshare -U -r -m -p -f --mount-proc true' >/dev/null 2>&1; then
+  host_userns=yes
+fi
+echo "Host creates user namespaces under the userns flags: $host_userns ($(uname -r))"
 start worker-wide env 'ERL_FLAGS=+S 2:2' "GANTRY_ENDPOINT=$worker_urls" GANTRY_POOL=wide \
   GANTRY_WORKER_ID=worker-wide "GANTRY_WORKER_TOKEN=$wide_token" "GANTRY_WORKER_DIR=$tmp/wide-journal" \
-  "GANTRY_WORKER_USERNS_SECCOMP=$root/packages/server/priv/sandbox/userns-seccomp.json" "${worker[@]}"
+  "GANTRY_WORKER_USERNS_SECCOMP=$seccomp" "${worker[@]}"
 wide_pid=${pids[-1]}
-"$cli" run userns-wide fixture/wide "$candidate" check "$tmp/userns.json" >/dev/null
-if ! GANTRY_WATCH_SECONDS=120 "$cli" watch userns-wide > "$tmp/userns-wide.jsonl"; then
-  # Diagnostic: which host refused the namespace, and why.
-  uname -a >&2
-  cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns >&2 || true
-  jq -sc 'last | .work[0].step' "$tmp/userns-wide.jsonl" >&2 || true
-  wide_log=$(jq -ser 'last | .work[0].step.log' "$tmp/userns-wide.jsonl") && "$cli" blob "$wide_log" >&2 || true
-  exit 1
+refused() { grep -Fq 'cannot create user namespaces under the userns sandbox' "$tmp/worker-wide.log"; }
+if [[ $host_userns == yes ]]; then
+  "$cli" run userns-wide fixture/wide "$candidate" check "$tmp/userns.json" >/dev/null
+  if ! GANTRY_WATCH_SECONDS=120 "$cli" watch userns-wide > "$tmp/userns-wide.jsonl"; then
+    jq -sc 'last | .work[0].step' "$tmp/userns-wide.jsonl" >&2 || true
+    exit 1
+  fi
+  jq -se 'last | .phase == "passed"' "$tmp/userns-wide.jsonl" >/dev/null
+  if refused; then
+    echo 'The wide slot refused a host that ran the userns action' >&2
+    exit 1
+  fi
+  kill -TERM -- "-$wide_pid"
+  wait "$wide_pid" 2>/dev/null || true
+  echo 'Passed the userns profile on its own pool and the strict refusal of the same action'
+else
+  # The slot must stop at boot with the reason, before it can claim anything.
+  wait_for 'the wide slot to refuse the userns sandbox' refused
+  if wait "$wide_pid"; then
+    echo 'The wide slot exited cleanly on a host without user namespaces' >&2
+    exit 1
+  fi
+  echo 'Passed the userns slot refusing to start on a host without user namespaces, and the strict refusal'
 fi
-jq -se 'last | .phase == "passed"' "$tmp/userns-wide.jsonl" >/dev/null
-kill -TERM -- "-$wide_pid"
-wait "$wide_pid" 2>/dev/null || true
 for index in "${!pids[@]}"; do
   if [[ ${pids[index]} == "$wide_pid" ]]; then unset "pids[$index]"; fi
 done
-echo 'Passed the userns profile on its own pool and the strict refusal of the same action'
 
 # Kill the executor after Docker has acknowledged its start. The restarted
 # slot must clean up the original resources and report the attempt

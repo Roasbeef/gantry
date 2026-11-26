@@ -81,6 +81,11 @@ pub fn preflight_requires_the_named_profile_file_test() {
   worker_fixture.remove(directory)
 }
 
+pub fn a_worker_without_the_profile_skips_the_host_trial_test() {
+  // No Docker is needed: an unconfigured worker never runs the trial.
+  assert docker.try_sandboxes(limits([])) == Ok(Nil)
+}
+
 pub fn the_shipped_profile_is_a_valid_seccomp_document_test() {
   let path = "priv/sandbox/userns-seccomp.json"
   assert docker.check_sandboxes(
