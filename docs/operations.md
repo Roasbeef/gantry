@@ -57,6 +57,23 @@ its `controller.toml` therefore needs `pool = "local"` and an absolute
 `local_remote` path to a bare Git repository, because the controller cannot
 authenticate to GitHub. Edit the file while the controller is stopped.
 
+## Watch the fleet
+
+Every controller serves a dashboard at `/ui`. It polls
+[`GET /v1/fleet`](api.md#the-fleet-snapshot) every two seconds and shows
+each pool's ready actions against its busy and free slots, each slot's
+lease against its deadline, every retained run with its graph and a line
+saying why it is or is not moving, and the chosen action's lease, timing,
+and log.
+
+Set `GANTRY_VIEW_TOKEN` (32 bytes or more) in the controller's environment
+and paste that token into the page. It reads and cannot admit work. Give a
+slot a `host` label in its `[[worker]]` entry to show which machine holds a
+lease. A slot's pool and last poll are what the controller behind the page
+has served since it started. In a three-voter quorum a slot that polls
+another voter reads as unseen there, though its leases still show, because
+leases are queue state. [Design note](design-notes/dashboard.md)
+
 ## Recovery
 
 ### A worker is lost
