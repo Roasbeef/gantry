@@ -293,7 +293,7 @@ Path 1 reaches the exit with no new host artifact. Path 2 keeps more of
 Docker's confinement and needs root on each worker. Path 3 is the strongest
 isolation and the most work.
 
-**Chosen: path 1, provisionally, 2026-11-25.** The reopen trigger fired: the
+**Chosen: path 1, the operator's decision, 2026-11-25.** It was first taken provisionally to keep the slice moving, then confirmed by the operator for repositories that are given the profile. The confirmation covers the profile and its flags, not deploying a `userns` pool on the live fleet. The reopen trigger fired: the
 measured set needs `apparmor=unconfined`, which is wider than the council
 ruled on. Path 1 was still taken for two reasons.
 
@@ -317,6 +317,47 @@ whose kernel is separate from the fleet's and disposable. Until then the
 profile is exercised only by tests, by `make e2e`, and by a scratch
 controller and worker that run beside the fleet without joining it.
 
+## Loom's lanes under `userns`
+
+Run 2026-11-25 on the 32-core worker host the same way as the strict
+baseline: one `docker run` per lane with the worker's exact action flags
+(4 CPUs, 8 GiB, a 6000 MiB tmpfs workspace, no network), the same Loom image
+(`gantry-loom-actions:9aa1383`) and source archive, with the three `userns`
+flags appended. The lanes ran one at a time, twice, with the same counts both
+times. The strict column is the earlier probe at the same commit.
+
+| Lane | Strict | `userns` |
+| --- | --- | --- |
+| `fast` | stopped at the `broker` shard with 16 failures | every Gleam shard passes. 1 Go test fails in `sandbox/internal/jail` |
+| `client` 1/3 | 130 failed, 2,162 passed | 16 failed, 2,276 passed |
+| `client` 2/3 | 129 failed, 2,726 passed | 15 failed, 2,840 passed |
+| `client` 3/3 | killed before it finished | 4 failed, 2,033 passed |
+
+So `userns` clears the user namespace failures, which were most of them, and
+the exit is not met. What remains, by cause:
+
+- **Writes outside `/work` (16).** `vm_cli_test` (8) and the `codex_profile`,
+  `codex_browser`, and `codex_native_transport` tests (8) create directories
+  under `/var/tmp`, which the read-only root refuses. This is the second cause
+  the handoff named, and no sandbox profile changes it. Pointing those tests
+  at `TMPDIR`, or giving the action a writable `/var/tmp`, would.
+- **Partial jail enforcement (14).** `project_template_test` fails with "the
+  sandbox ran Git without full enforcement". Loom's jail now starts, but its
+  cgroup v2 layer has no delegated cgroup to use, so it reports itself
+  degraded and the tests that require every layer fail. The worktree
+  observation tests skip for the same reason. This is the delegated cgroup
+  the council set aside because it did not reach the user namespace exit. It
+  is the next requirement, not a substitute for this one.
+- **Probe artifacts (3).** The evolution tests need `build/codemode-seed` and
+  the `loom-exec` helper, which `make e2e-evolution` builds and the probe did
+  not.
+- **Network (1).** An LSP test downloads a Hex package, and actions have no
+  network.
+- **Unexplained (1, and the Go test).** `tui_e2e_test` reports that the TUI never attached, and
+  the Go test `TestFreshProcAndDevSurviveAReadableRootOfSlash` sees as many
+  PIDs inside the jail's `/proc` as in the container's and concludes the fresh
+  procfs was undone. Neither was chased further here.
+
 ## Plan
 
 | Step | Exit |
@@ -326,8 +367,8 @@ controller and worker that run beside the fleet without joining it.
 | `sandbox` in `controller.toml`, with the one-profile-per-pool rule | Done. `sandbox_config_test`: the default, approval, unknown names, a mixed pool |
 | Worker mapping, the profile file preflight, the refusal | Done. `sandbox_profile_test` pins the strict flags exactly, the appended `userns` flags, the refusal before any staging, and the preflight |
 | Simulation | Done. In `queue_dst` the consumer's pool serves `userns`, every assignment must carry its pool's profile, and every restart also decodes the snapshot with the strict fields removed. Dropping the field from the task encoder fails 5 tests |
-| `make e2e` | A repository on its own `userns` pool runs an action that creates a user namespace, and the same action fails on the strict repository |
-| Loom `fast` and `client` under the approved profile | Both lanes pass, or the note names what remains |
+| `make e2e` | Done on Linux (Ubuntu 24.04.5, kernel 6.12, Docker 29.10): exit 0, every check passing, including a repository on its own `userns` pool whose action creates a user namespace while the same action fails on the strict repository |
+| Loom `fast` and `client` under the approved profile | Not met. The user namespace failures are gone, and the 35 failures and 1 Go test that remain are named in [Loom's lanes](#looms-lanes-under-userns) |
 
 Gates: `make check`, `make e2e` on Linux, and the DST sweep. The TLA model
 does not describe task contents, so it should not need to change, and the
