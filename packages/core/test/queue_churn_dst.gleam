@@ -3,8 +3,10 @@
 //// controller can crash at any point of the landing sequence and restart from
 //// the persisted codec bytes. Both can reconcile the same intent at once.
 //// Workers can vanish while holding a lease, restart under the same ID, and
-//// deliver late results. Leases lapse and are reassigned under a new serial,
-//// so a late result is stale and a poisoned action fails its run. Submissions
+//// deliver late results. A restarted worker may instead report its attempt
+//// `Interrupted`, which lapses the lease at once and counts the attempt.
+//// Leases lapse and are reassigned under a new serial, so a late result is
+//// stale and a poisoned action fails its run. Submissions
 //// wait for their lane, are prepared in order as it frees, and a preparation
 //// can be refused. The provider can deny a landing. Retention drops finished
 //// runs while the proof index keeps reuse working. The fixture shares one
@@ -95,7 +97,7 @@ pub const safety = [
   "landed_without_write", "codec_mismatches", "nondeterministic",
   "lane_overlaps", "waiting_built", "out_of_order_preparations",
   "pending_in_failed", "uncapped_reasons", "retention_dropped_live",
-  "retention_lost_proofs", "layout_mismatches",
+  "retention_lost_proofs", "layout_mismatches", "interrupt_miscounted",
 ]
 
 /// Counters that report liveness after the heal phase.
@@ -116,7 +118,8 @@ pub const coverage = [
   "recovery_censored", "expiries", "reassignments", "expired_results_rejected",
   "returned_after_expiry", "poisoned_runs", "poison_drops", "skipped_actions",
   "prepared_groups", "preparation_refusals", "policy_denials",
-  "retained_dropped", "oversized_reasons",
+  "retained_dropped", "oversized_reasons", "interrupted_reports",
+  "interrupted_at_bound",
 ]
 
 /// Expand a seed with the same Park–Miller stream as `queue_dst`.
@@ -467,9 +470,11 @@ fn denial_key(id: String) -> Int {
 }
 
 /// Mask bits: 0 lost claim replies, 1 lost result replies, 2 controller
-/// crashes, 3 outside ref writes, 4 vanishing workers, 5 same-ID restarts and
-/// late results, 6 rejected completions, 7 refused preparations, 8 provider
-/// policy denials, 9 poison actions that never report. A disabled fault runs the honest op.
+/// crashes, 3 outside ref writes, 4 vanishing workers, 5 same-ID restarts,
+/// half of which report the held attempt `Interrupted`, and late results,
+/// 6 rejected completions, 7 refused preparations, 8 provider policy
+/// denials, 9 poison actions that never report. A disabled fault runs the
+/// honest op.
 fn tick(world: World, mask: Int, op: Int) -> World {
   let k = op / 16 % 2
   let pool = case op / 32 % 2 {
@@ -496,7 +501,7 @@ fn tick(world: World, mask: Int, op: Int) -> World {
     11 -> step(world, k)
     12 if vanish_on -> vanish(world, pool)
     12 -> poll(world, k, pool, False)
-    13 if restart_on -> restart_worker(world, k, pool)
+    13 if restart_on -> restart_worker(world, k, pool, op / 64 % 2 == 0)
     13 -> poll(world, k, pool, False)
     14 if restart_on || vanish_on -> late(world, k)
     14 -> complete(world, k, pool, False, False)
@@ -956,6 +961,8 @@ fn report(
             False -> world
           }
         queue.Succeeded(_, _) -> world
+        queue.Interrupted ->
+          interrupted(bump(world, "interrupted_reports"), next, job)
       }
       let live = case current {
         Some(lease) ->
@@ -977,6 +984,54 @@ fn report(
         )
       #(commit(world, k, op, next), True)
     }
+  }
+}
+
+/// An accepted interruption must leave the action where an expiry would: the
+/// next attempt, the bound's `LeaseExpired`, or a skip in a failed run.
+fn interrupted(
+  world: World,
+  next: queue.State,
+  job: queue.Assignment,
+) -> World {
+  let attempt = queue.lease_attempt(job.lease)
+  let step = case queue.find(next, job.run) {
+    Ok(run) ->
+      list.find(run.work, fn(work) {
+        work.task.action.name == job.task.action.name
+      })
+      |> result.map(fn(work) { work.step })
+    Error(Nil) -> Error(Nil)
+  }
+  case step {
+    Ok(queue.Pending(previous))
+      if previous == attempt && attempt < queue.max_attempts
+    -> world
+    Ok(queue.Failed(queue.LeaseExpired(attempts), _))
+      if attempts == attempt && attempt >= queue.max_attempts
+    -> bump(world, "interrupted_at_bound")
+    Ok(queue.Skipped) ->
+      case queue.find(next, job.run) {
+        Ok(run) ->
+          case list.any(run.work, fn(work) { failed_step(work.step) }) {
+            True -> world
+            False -> bump(world, "interrupt_miscounted")
+          }
+        Error(Nil) -> bump(world, "interrupt_miscounted")
+      }
+    _ -> bump(world, "interrupt_miscounted")
+  }
+}
+
+/// Whether a step ended its run in failure.
+fn failed_step(step: queue.Step) -> Bool {
+  case step {
+    queue.Failed(_, _) -> True
+    queue.Pending(_)
+    | queue.Active(_)
+    | queue.Passed(_)
+    | queue.Reused(_)
+    | queue.Skipped -> False
   }
 }
 
@@ -1034,12 +1089,23 @@ fn vanish(world: World, pool: String) -> World {
   }
 }
 
-/// The worker restarts under the same ID, forgets its lease and polls again.
-/// The old incarnation's result can still arrive later.
-fn restart_worker(world: World, k: Int, pool: String) -> World {
+/// The worker restarts under the same ID and polls again. An interrupting
+/// restart first reports the held attempt `Interrupted`, as the worker does
+/// from its journal after `docker start`. Otherwise it forgets the lease, and
+/// the old incarnation's result can still arrive later.
+fn restart_worker(
+  world: World,
+  k: Int,
+  pool: String,
+  interrupt: Bool,
+) -> World {
   let w = worker(world, pool)
   case w.held {
     None -> poll(world, k, pool, False)
+    Some(job) if interrupt -> {
+      let #(world, _) = report(world, k, job, queue.Interrupted)
+      set_worker(world, Worker(..w, held: None)) |> poll(k, pool, False)
+    }
     Some(job) -> {
       let before = world.durable
       let world =
