@@ -360,10 +360,12 @@ pub fn referenced(receipt: String) -> Result(List(String), String) {
     |> result.replace_error("invalid result envelope in the worker journal"),
   )
 
-  // A rejection references only its log. A pass adds its output files.
+  // A rejection references only its log. A pass adds its output files. An
+  // interruption references nothing.
   let digests = case completion {
     queue.Succeeded(files, log) -> [log, ..list.map(files, fn(f) { f.digest })]
     queue.Rejected(_, log) -> [log]
+    queue.Interrupted -> []
   }
 
   Ok(list.unique(digests))

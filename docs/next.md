@@ -18,6 +18,13 @@ branch). The queue simulations report 0 safety and 0 liveness violations:
 and the later commits only reshape lint. The previous edition's claims that
 changed are under
 [what the previous edition got wrong](#what-the-previous-edition-got-wrong).
+The `worker-drain` branch, rebased on it, adds the worker drain and
+interrupted attempts (slice 9, first item). At its head `make check` exits
+0 (50 core tests on each target, 142 server tests, lint 0 errors and the
+same 17 warnings), and `sweep 1 1000 128` reports 0 violations, with 411
+interruptions replayed through the indexed layout and no mismatch. Before
+the rebase, on the same Linux host, `make e2e` passed all 10 checks,
+including a worker sent SIGTERM mid-action whose run passes.
 
 ## Where the tree is
 
@@ -172,10 +179,13 @@ the third slice.
    round. **Guard:** one lease per slot, in the model and the simulations.
 9. **Smaller follow-ups found in review.**
    - Bind a worker credential to its pool as well as its ID.
-   - Let an attempt interrupted after `docker start` lapse and be reassigned
-     instead of recording a failure. The upgrade drill showed that every
-     worker restart, including a routine `make update`, fails the runs it
-     was serving, so this one is first.
+   - Done on `worker-drain`: an attempt interrupted after `docker start`
+     is reported `Interrupted`, lapses at once, and is reassigned, and a
+     worker drains on SIGTERM up to `GANTRY_WORKER_DRAIN`
+     ([drain a worker](operations.md#drain-a-worker)). Not yet rehearsed:
+     a real `make update` of a live fleet mid-action, and the systemd unit
+     settings the operations page now asks for (`KillMode=mixed`, a
+     `TimeoutStopSec` above the drain deadline).
    - Roll a future format change out in two steps, a release that reads both
      formats and then one that writes the new one, so voters can be upgraded
      one at a time. The format now has a name (`indexed-v1`) that a release
@@ -219,8 +229,11 @@ interop proof exists ([ADR 003](adr/003-gantry-docker-worker.md)).
 
 **A lapsed lease is reassigned automatically.** After the deadline the action
 returns to `pending` with one more attempt, and the third lapse fails the run.
-There is no operator retire step. The rule lives in the module comment of
-`gantry_core/queue.gleam` and in the model. It has no ADR yet.
+A worker that reports an attempt `Interrupted` (a restart or Docker fault
+after `docker start`, or a drain past its deadline) lapses the lease the same
+way at once, so a restart costs an attempt, not the run, and an action may
+run twice. There is no operator retire step. The rule lives in the module
+comment of `gantry_core/queue.gleam` and in the model. It has no ADR yet.
 
 **A group is prepared when its lane frees.** Admission pins the heads and
 builds nothing, so a later group never builds on a stale base. Same homes as

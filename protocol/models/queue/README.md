@@ -24,7 +24,10 @@ clock reading supplies no fencing evidence, so the expired worker keeps its
 custody and can still deliver a receipt later. `Accept` takes a receipt only
 for the live generation, so a receipt from an expired generation stays
 unusable. `RejectLive` is a worker rejection of the live generation and also
-skips the run's remaining actions. Worker completion and receipt acceptance
+skips the run's remaining actions. `Interrupt` is a worker that restarted
+after `docker start` reporting the live generation interrupted: the lease
+lapses as `Expire` would, without waiting for the deadline, and the attempt
+counts toward the bound. Worker completion and receipt acceptance
 are separate events, and lost replies and controller restarts may stutter at
 any point.
 

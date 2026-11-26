@@ -3,8 +3,8 @@ EXTENDS Naturals, FiniteSets
 \* Two groups share one lane and, with an independent build, one executor
 \* slot. A group starts Waiting and is prepared in order when the lane is
 \* free. A lease that outlives its deadline expires and is reassigned under a
-\* new generation. The last permitted attempt fails the run and skips its
-\* remaining actions.
+\* new generation, and so is one whose worker reports it interrupted. The
+\* last permitted attempt fails the run and skips its remaining actions.
 Lane == {1, 2}
 Runs == {1, 2, 3}
 MaxAttempts == 2
@@ -48,15 +48,24 @@ WorkerDone(t) == /\ t \in custody /\ custody' = custody \ {t}
                  /\ receipts' = receipts \cup {t}
                  /\ UNCHANGED <<gen, step, sub, base, skip, slot, proof,
                                 intent, head, landed, nwrite>>
+\* A lapsed lease returns the action to pending, or fails the run and skips
+\* its remaining actions at the last permitted attempt.
+Lapse(r) == /\ step' = [step EXCEPT ![r] = IF gen[r] >= MaxAttempts
+                                             THEN "failed" ELSE "pending"]
+            /\ skip' = IF gen[r] >= MaxAttempts THEN skip \cup {r} ELSE skip
+            /\ slot' = 0
 \* The clock supplies no fence. The old worker keeps its custody and may
 \* still report, but its generation is no longer the live one.
-Expire(r) == /\ step[r] = "active"
-             /\ step' = [step EXCEPT ![r] = IF gen[r] >= MaxAttempts
-                                              THEN "failed" ELSE "pending"]
-             /\ skip' = IF gen[r] >= MaxAttempts THEN skip \cup {r} ELSE skip
-             /\ slot' = 0
+Expire(r) == /\ step[r] = "active" /\ Lapse(r)
              /\ UNCHANGED <<gen, sub, base, custody, receipts, proof, intent,
                             head, landed, nwrite>>
+\* A restarted worker reports the live generation interrupted. The lease
+\* lapses at once, and the attempt counts toward the bound.
+Interrupt(t) == LET r == t[1] IN
+                /\ t \in receipts /\ step[r] = "active" /\ t[2] = gen[r]
+                /\ Lapse(r)
+                /\ UNCHANGED <<gen, sub, base, custody, receipts, proof,
+                               intent, head, landed, nwrite>>
 Accept(t) == LET r == t[1] IN
              /\ t \in receipts /\ step[r] = "active" /\ t[2] = gen[r]
              /\ proof' = proof \cup {t}
@@ -99,7 +108,7 @@ Deny == /\ intent \in Runs /\ head = base[intent]
 Next == \/ \E r \in Runs : Prepare(r) \/ Refuse(r) \/ Claim(r) \/ Expire(r)
                            \/ StartLanding(r)
         \/ \E t \in Tokens : Deliver(t) \/ WorkerDone(t) \/ Accept(t)
-                             \/ RejectLive(t)
+                             \/ RejectLive(t) \/ Interrupt(t)
         \/ GitCAS \/ Reconcile \/ Deny \/ ExternalAdvance
 Spec == Init /\ [][Next]_vars
 \* One live lease per slot and no more than one lease in all.
