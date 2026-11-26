@@ -416,6 +416,13 @@ action images containing `/bin/sh`, `tar`, and the toolchains your targets
 need. The action receives its selected Git
 files and verified upstream artifacts in a private tmpfs workspace.
 It runs without network access and has a read-only container root.
+Every staged source file carries the same fixed modification time,
+2000-01-01, so the archive for a revision is byte-identical wherever it is
+prepared. An image that bakes in a warm build cache must not trust file
+times: a compiler that skips a source older than its cache entry, as Gleam
+does, would reuse the image's stale output for a file the revision changed.
+Either touch the workspace after extracting the warm cache, or key the cache
+on content hashes.
 For a worker sharing a host with a single controller, use
 `GANTRY_ENDPOINT=http://127.0.0.1:4737`. The following example uses the
 three HTTPS origins.
