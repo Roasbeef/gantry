@@ -72,3 +72,14 @@ multi-platform index would store different outputs under one key. Docker
 Desktop then emulates the amd64 image. The second condition was a bug:
 Docker prints a platform warning ahead of the container ID, so the worker now
 reads the ID from the last line of the output.
+
+## Addendum · 2026-11-25 · a per-repository sandbox profile
+
+The Docker worker took the per-repository sandbox policy this record
+anticipated, and it was not too costly, so the decision stands. The operator
+may set `sandbox = "userns"` on a repository in `controller.toml`. The task
+carries the profile's name, and the worker appends a narrowed seccomp profile
+and turns off `systempaths` and AppArmor for that repository's action
+containers only. The default stays strict, byte for byte. A host experiment
+showed that all three relaxations are needed for a nested `bwrap`.
+[Sandbox profiles](../design-notes/sandbox-profiles.md)

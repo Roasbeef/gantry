@@ -1,11 +1,11 @@
 # Let a trusted repository ask for a wider sandbox
 
-**Status** · Proposed 2026-11-24 on `6a561d4`, not built. Reopened
-2026-11-25: the host experiment shows that `userns` also needs
-`apparmor=unconfined`, which is the condition the council named for
-reopening. See [what the experiment found](#what-the-experiment-found)
-and [the choice it leaves](#the-choice-it-leaves). Slice 3 of the
-[handoff](../next.md).
+**Status** · Built, not deployed · proposed 2026-11-24 on `6a561d4`,
+reopened and settled 2026-11-25. The host experiment showed that `userns`
+also needs `apparmor=unconfined`, which is the condition the council named for
+reopening. The measured set was taken anyway, for the reasons in
+[the choice it leaves](#the-choice-it-leaves), and no `userns` pool runs until
+it has a host of its own. Slice 3 of the [handoff](../next.md).
 
 **Add one operator-approved sandbox profile, `userns`, beside the default
 `strict`. A repository cannot ask for it. The operator sets it on the
@@ -38,9 +38,10 @@ the same kind of setting. The four candidates were:
 The type has two values and no reserved ones:
 
 ```gleam
-pub type SandboxProfile {
+// gantry_core/sandbox
+pub type Profile {
   Strict
-  UserNamespaces
+  Userns
 }
 ```
 
@@ -75,7 +76,7 @@ already a routing label.
 
 ## How the request reaches the worker
 
-1. `Repository` gains `sandbox: SandboxProfile`.
+1. `Repository` gains `sandbox: sandbox.Profile`.
 2. `prepare` copies it into the `Task` beside `pool` and `image`
    (`prepare.gleam`, where `queue.Task` is built). `queue.Task` gains the
    field, defined in `gantry_core` so the core stays portable.
@@ -99,12 +100,18 @@ already a routing label.
   `GANTRY_WORKER_USERNS_SECCOMP=/absolute/path/userns.json`. The controller
   never ships a path or a flag.
 - A worker without that variable is not capable of `userns`. If it receives a
-  `UserNamespaces` task it refuses before creating anything and reports
-  `Unavailable`. It never runs the task with the strict flags and calls it
-  done, and it never runs it wide without the profile file. The lease lapses
-  and the task is reassigned, and the third lapse fails the run with a typed
-  reason. A worker with the variable set checks at startup that the file is
-  readable, as `preflight` checks the collector image.
+  `Userns` task it refuses before creating anything and records a rejection
+  that names the missing variable, so the run fails with that reason. It never
+  runs the task with the strict flags and calls it done, and it never runs it
+  wide without the profile file. A worker with the variable set checks at
+  startup that the file is readable, as `preflight` checks the collector
+  image.
+- The proposal had the refusal report `Unavailable` and let the lease lapse.
+  The slot treats `Unavailable` as a fault to retry in place: it keeps the
+  journaled attempt and runs it again on the next step, so a misconfigured
+  slot would hold its attempt forever. A rejection ends the attempt at once
+  and names the cause, and the one-profile-per-pool rule makes it an operator
+  error, not a placement race.
 - Only the action container widens. The collector container, which reads the
   tmpfs volume the action wrote, keeps `restrictions` and `collector_limits`
   exactly. The action's flags are `action_flags`, so the mapping applies there
@@ -137,7 +144,7 @@ with no `sandbox` line equals today's exactly: `--pull=never`,
 `--network=none`, `--cap-drop=ALL`, `--read-only`, `--user=65534:65534`,
 `--security-opt=no-new-privileges`, `--log-driver=none`, and the limit flags.
 It also asserts that a task for a repository with no profile never reaches the
-`UserNamespaces` branch, and that the collector's flags are the same for both
+`Userns` branch, and that the collector's flags are the same for both
 profiles.
 
 ## What `userns` exposes
@@ -264,7 +271,7 @@ None of the three is enough without the other two.
 The council's ruling rested on `userns` needing no more than a seccomp
 profile and `systempaths=unconfined`. It said to reopen if `apparmor=unconfined`
 turned out to be needed, and it is. The design above still holds as a
-mechanism. What is open is which flags sit behind the `UserNamespaces` name,
+mechanism. What is open is which flags sit behind the `Userns` name,
 and whether that name is the right first profile. Three paths, none taken
 yet:
 
@@ -284,18 +291,42 @@ yet:
 
 Path 1 reaches the exit with no new host artifact. Path 2 keeps more of
 Docker's confinement and needs root on each worker. Path 3 is the strongest
-isolation and the most work. The operator decides which risk fits the host,
-so this note stops here until one is chosen.
+isolation and the most work.
+
+**Chosen: path 1, provisionally, 2026-11-25.** The reopen trigger fired: the
+measured set needs `apparmor=unconfined`, which is wider than the council
+ruled on. Path 1 was still taken for two reasons.
+
+- **Paths 2 and 3 cannot be deployed today.** Both need root on each worker
+  host, to load an AppArmor profile or to add a `runsc` runtime to `dockerd`.
+  The worker host's user has no root.
+- **Path 1's code is what the others need.** Path 2 changes only the
+  `apparmor` value that `Userns` maps to, and path 3 adds a constructor. The
+  wire and the config stay as they are.
+
+It is easy to undo. Strict stays the default, nothing changes on a running
+host, and removing a repository's `sandbox` line puts it back.
+
+The dissent stands. With AppArmor off, a `userns` action reaches more of the
+shared kernel than the council weighed, so the condition that fences it
+matters more: a `userns` pool runs on a host with no strict repository's
+slots. Today's fleet cannot meet that. Its one worker host runs the strict
+slots, so no `userns` pool is deployed until the operator gives it a host.
+The candidates are a second Linux host, or the laptop's Docker Desktop VM,
+whose kernel is separate from the fleet's and disposable. Until then the
+profile is exercised only by tests, by `make e2e`, and by a scratch
+controller and worker that run beside the fleet without joining it.
 
 ## Plan
 
 | Step | Exit |
 | --- | --- |
-| Run the experiment and record the passing flag set here | Done 2026-11-25. A path from [the choice it leaves](#the-choice-it-leaves) is chosen |
-| `SandboxProfile` in `gantry_core`, the `Task` field, the optional wire field, the recipe rule | Core tests on BEAM and JavaScript. An old snapshot decodes as `Strict`. A strict task's recipe is unchanged, and a `userns` task's differs |
-| `sandbox` in `controller.toml`, with the one-profile-per-pool rule | Config tests for the default, an unknown name, and a shared pool |
-| Worker mapping, the profile file preflight, the refusal | The guard test above, and a refusal test for a worker without the file |
-| Simulation | The seeded fault schedule gains a slot that cannot run a profile, and a snapshot written before the field. 0 violations over the 1,000-seed `sweep` |
+| Run the experiment and record the passing flag set here | Done. Path 1 chosen |
+| `gantry_core/sandbox`, the `Task` field, the optional wire field, the recipe rule | Done. `sandbox_test`: every profile survives the wire, a task without the field decodes as `Strict`, an unknown name fails. `sandbox_config_test`: only `userns` changes the recipe |
+| `sandbox` in `controller.toml`, with the one-profile-per-pool rule | Done. `sandbox_config_test`: the default, approval, unknown names, a mixed pool |
+| Worker mapping, the profile file preflight, the refusal | Done. `sandbox_profile_test` pins the strict flags exactly, the appended `userns` flags, the refusal before any staging, and the preflight |
+| Simulation | Done. In `queue_dst` the consumer's pool serves `userns`, every assignment must carry its pool's profile, and every restart also decodes the snapshot with the strict fields removed. Dropping the field from the task encoder fails 5 tests |
+| `make e2e` | A repository on its own `userns` pool runs an action that creates a user namespace, and the same action fails on the strict repository |
 | Loom `fast` and `client` under the approved profile | Both lanes pass, or the note names what remains |
 
 Gates: `make check`, `make e2e` on Linux, and the DST sweep. The TLA model
