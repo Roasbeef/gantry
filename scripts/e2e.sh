@@ -148,6 +148,22 @@ stop_worker() {
     if [[ ${pids[index]} == "$worker_pid" ]]; then unset "pids[$index]"; fi
   done
 }
+# Send SIGTERM to the worker's VM alone, as a service manager does with
+# KillMode=mixed, wait for the worker to exit on its own, and require
+# status 0.
+term_worker() {
+  local beam index status=0
+  beam=$(pgrep -g "$worker_pid" -x beam.smp)
+  kill -TERM "$beam"
+  wait "$worker_pid" 2>/dev/null || status=$?
+  if (( status != 0 )); then
+    echo "Worker exited with status $status after SIGTERM" >&2
+    exit 1
+  fi
+  for index in "${!pids[@]}"; do
+    if [[ ${pids[index]} == "$worker_pid" ]]; then unset "pids[$index]"; fi
+  done
+}
 empty_poll "${endpoints[1]}"
 empty_poll "${endpoints[1]}"
 
@@ -278,9 +294,10 @@ grep -Fx 'fixture-error' "$tmp/adhoc-result.log"
 echo 'Passed agent plan, ad hoc admission replay, failure diagnostics, and submit authorization'
 
 # Kill the executor after Docker has acknowledged its start. The restarted
-# slot must clean up the original resources and publish a single rejection.
+# slot must clean up the original resources and report the attempt
+# interrupted, and the controller must reassign it rather than fail the run.
 cat > "$tmp/interrupted.json" <<'JSON'
-{"name":"interrupted","argv":["sleep","60"],"inputs":[],"outputs":[],"timeout":90}
+{"name":"interrupted","argv":["sleep","12"],"inputs":[],"outputs":[],"timeout":90}
 JSON
 "$cli" run worker-crash fixture/project "$candidate" check "$tmp/interrupted.json" > "$tmp/crash.json"
 wait_for 'interruption fixture lease' matches "$GANTRY_URL" worker-crash '
@@ -293,8 +310,9 @@ wait_for 'interruption fixture container' container_running "gantry-$name"
 stop_worker KILL
 start_worker worker-restarted
 worker_pid=${pids[-1]}
-wait_for 'interruption receipt' matches "$GANTRY_URL" worker-crash '
-  .phase == "failed" and .work[0].step.reason == "worker interrupted before recording outcome"'
+wait_for 'reassigned interrupted attempt' matches "$GANTRY_URL" worker-crash '
+  .work[0].step.kind == "active" and .work[0].step.lease.attempt == 2'
+[[ $(jq -er '.work[0].step.lease.serial' "$tmp/current.json") != "$serial" ]]
 containers=$(docker container ls -a --format '{{.Names}}')
 volumes=$(docker volume ls --format '{{.Name}}')
 if grep -Fxq -e "gantry-$name" -e "gantry-$name-collector" <<< "$containers" ||
@@ -303,7 +321,61 @@ if grep -Fxq -e "gantry-$name" -e "gantry-$name-collector" <<< "$containers" ||
   echo "Interrupted attempt left resources behind: gantry-$name" >&2
   exit 1
 fi
-echo 'Passed worker restart, interrupted attempt fencing, and Docker resource cleanup'
+wait_for 'interrupted run to pass on its second attempt' matches "$GANTRY_URL" worker-crash '
+  .phase == "passed"'
+echo 'Passed worker restart, interrupted attempt reassignment, and Docker resource cleanup'
+
+# SIGTERM mid-action drains: the worker finishes the attempt, publishes it,
+# and exits 0, and the run passes on its first attempt.
+cat > "$tmp/drained.json" <<'JSON'
+{"name":"drained","argv":["sleep","8"],"inputs":[],"outputs":[],"timeout":90}
+JSON
+"$cli" run worker-drain fixture/project "$candidate" check "$tmp/drained.json" > "$tmp/drain.json"
+wait_for 'drain fixture lease' matches "$GANTRY_URL" worker-drain '
+  .work[0].step.kind == "active"'
+serial=$(jq -er '.work[0].step.lease.serial' "$tmp/current.json")
+name=$(jq -cn --arg dir "$tmp/journal" --argjson serial "$serial" \
+  '[$dir,"worker-one","worker-drain","drained",$serial]' | tr -d '\n' | sha256sum | cut -d ' ' -f 1)
+wait_for 'drain fixture container' container_running "gantry-$name"
+drained_log=$tmp/worker-restarted.log
+term_worker
+grep -Fx 'gantry worker: drained' "$drained_log"
+wait_for 'drained run to pass' matches "$GANTRY_URL" worker-drain '.phase == "passed"'
+if grep -Fq 'drain deadline passed' "$drained_log"; then
+  echo 'A drain within its deadline released the attempt' >&2
+  exit 1
+fi
+echo 'Passed SIGTERM drain of an attempt in flight'
+
+# Past the drain deadline the worker gives the attempt up as interrupted,
+# and a later worker runs it again.
+worker_environment+=(GANTRY_WORKER_DRAIN=1)
+start_worker worker-drain-deadline
+worker_pid=${pids[-1]}
+cat > "$tmp/released.json" <<'JSON'
+{"name":"released","argv":["sleep","10"],"inputs":[],"outputs":[],"timeout":90}
+JSON
+"$cli" run worker-release fixture/project "$candidate" check "$tmp/released.json" > "$tmp/release.json"
+wait_for 'release fixture lease' matches "$GANTRY_URL" worker-release '
+  .work[0].step.kind == "active"'
+serial=$(jq -er '.work[0].step.lease.serial' "$tmp/current.json")
+name=$(jq -cn --arg dir "$tmp/journal" --argjson serial "$serial" \
+  '[$dir,"worker-one","worker-release","released",$serial]' | tr -d '\n' | sha256sum | cut -d ' ' -f 1)
+wait_for 'release fixture container' container_running "gantry-$name"
+term_worker
+grep -F 'drain deadline passed' "$tmp/worker-drain-deadline.log"
+wait_for 'released attempt back to pending' matches "$GANTRY_URL" worker-release '
+  .work[0].step.kind == "pending" and .work[0].step.attempts == 1'
+if docker container ls -a --format '{{.Names}}' | grep -Fxq "gantry-$name"; then
+  echo "Released attempt left its container behind: gantry-$name" >&2
+  exit 1
+fi
+unset 'worker_environment[-1]'
+start_worker worker-after-release
+worker_pid=${pids[-1]}
+wait_for 'released run to pass on its second attempt' matches "$GANTRY_URL" worker-release '
+  .phase == "passed"'
+echo 'Passed SIGTERM past the drain deadline and reassignment'
 
 # Lose a committed result reply, then recover the same receipt from SQLite.
 stop_worker TERM
