@@ -6,8 +6,15 @@ is open on purpose. It is rewritten at the end of each body of work and is
 not appended to. [Tour of the code](guide/tour.md) ·
 [Status](architecture/runtime.md#status)
 
-**Baseline.** Branch `indexed-queue-layout`, whose last code commit is
-`7fa0052` (2026-11-25), on top of `main` at `6a561d4`. At that commit
+**Baseline.** `main` at `1daf7b9` (2026-11-27). Its last code commit is
+`5c95c58` (#22, the attempt cgroup), and everything after it is
+documentation. This pass changed only this file and did not re-run the
+gates; the figures below are the last ones recorded. The next body of work is
+[adopting Gantry as Loom's CI](#adopting-gantry-for-loom), starting with
+[#26](https://github.com/Roasbeef/gantry/issues/26).
+
+The indexed layout was last gated on branch `indexed-queue-layout` at
+`7fa0052` (2026-11-25). At that commit
 `make check` exits 0 (49 core tests on BEAM and on JavaScript, 134 server
 tests, Loom lint with 0 errors and 17 warnings, 3 of them from before this
 branch). The queue simulations report 0 safety and 0 liveness violations:
@@ -36,7 +43,8 @@ including a worker sent SIGTERM mid-action whose run passes.
 | CLI | Gleam (`gantry/cli*`), no jq or curl at runtime, onboarding (`init --local`, `local start`, `worker setup`) in the same program, schema in `packages/server/priv` |
 | Verification | TLA+ model with expiry, waiting, and skipping (TLC: 109,896 distinct states, exit 0), seeded queue simulations (`sweep`, `churn`, `growth`) that also replay every operation through the layout and compare, live gate `make e2e` |
 | Throughput | One voter holds 100 actions per second across 100 repositories on four vCPUs (ready p99 145 ms), and saturates near 110. Three voters on that host hold 75 ([measurements](controller-load.md#the-indexed-layout-9f273c1)) |
-| GitHub | Pilot done on a disposable, unprotected branch. Protected-branch rules are not piloted |
+| GitHub | Reads pull metadata and lands submit groups by push, piloted on a disposable, unprotected branch. It does not discover new heads or post commit statuses, so it cannot yet be a repository's CI ([#26](https://github.com/Roasbeef/gantry/issues/26)). Protected-branch rules are not piloted |
+| Loom on the fleet | Eleven actions (a shared `prepare` and ten lanes) on two `loom` slots, every lane's outcome matching Loom's CI. Estimated makespan about 12.5 minutes against 47 for the first run. Proposed to Loom in [Roasbeef/loom#1408](https://github.com/Roasbeef/loom/pull/1408), started by hand, not wired to Loom's CI |
 | Documentation | Brought level with the code in this pass, and a tour, an API reference, a scheduling page, and an operations page added |
 | Dashboard | A Lustre pressure board at `/ui` reads `GET /v1/fleet` with an optional view token, verified against a local controller and two Docker slots, and not yet against the live fleet ([design note](design-notes/dashboard.md)) |
 
@@ -72,6 +80,15 @@ launchers, and it did not say the result-proxy fixture needs Node.js on the
 requirements are now under [how to verify](#how-to-verify). It listed the
 indexed layout as designed and unbuilt, and it was built here.
 
+The edition of 2026-11-26 (#25) said Loom's lanes were not yet on Loom's
+GitHub; they are proposed there as
+[Roasbeef/loom#1408](https://github.com/Roasbeef/loom/pull/1408). It gave
+1,107 s as the makespan and the longest lane, about 7 minutes, as the floor.
+A shared `prepare` action has since cut the slot time from 2,079 s to
+1,478 s, and the floor is now `prepare` followed by `client-3`, about
+7.5 minutes. It did not say that a fleet run is not CI: nothing starts one
+when a PR changes, and nothing reports its result to GitHub.
+
 Not re-checked in this pass, and carried as historical: the Loom pilot numbers
 (318 and 319 tests, the landed commit `676951e`), the CLI latency comparison
 (about 230 to 340 ms against 7 to 24 ms for the old Bash CLI), and the
@@ -79,13 +96,42 @@ hand-checked interrupt behaviour of `gantry local start`.
 
 ## What to do next
 
+Start with [adopting Gantry for Loom](#adopting-gantry-for-loom): it is the
+first real user, and every gap it names is concrete. The numbered slices
+after it are ordered by what the measurements in this series say binds
+first.
+
+### Adopting Gantry for Loom
+
+Loom's Linux check lanes run on the fleet with the same outcomes as its
+GitHub Actions jobs, and faster. Using that as Loom's CI still needs the
+items below. The first is a Gantry slice; the rest are Loom changes or fleet
+operations. Each row says whose it is and what done looks like.
+
+| # | Gap | Whose | Done when |
+| --- | --- | --- | --- |
+| 1 | **Gantry cannot be CI.** It starts no run on its own and posts nothing back. Build the poller and commit statuses of [#26](https://github.com/Roasbeef/gantry/issues/26): poll open pulls and watched branches (the gateway is tailnet-only, so GitHub cannot call a webhook), admit by a run ID derived from repository, PR and head, post `pending` then the result as a durable intent, and build only heads from authors with write access | Gantry | A push to a Loom PR shows `gantry/check` within one poll interval and ends with the run's result, and a leader killed before the post still ends with the right status |
+| 2 | **The fleet reads a local mirror.** `fleet/loom` in `controller.toml` has `local_remote = …/loom.git`, filled by hand. Point it at GitHub (`name = "Roasbeef/loom"`, no `local_remote`) and give the controller a fine-grained `GH_TOKEN` with `contents: read`, `pull_requests: read` and `statuses: write` | Fleet | A run admits a Loom PR head fetched from GitHub through the mirror |
+| 3 | **`eval` does not compile on Loom's main.** The `check` target stops scheduling at the first failure, so every run skips the client lanes, and the Actions `gate` fails for the same reason | Loom | `scripts/check.sh eval` exits 0 on Loom's main |
+| 4 | **Land the lanes.** [Roasbeef/loom#1408](https://github.com/Roasbeef/loom/pull/1408) adds `gantry.json`, `scripts/gantry_lane.sh` and `docs/gantry.md` | Loom | Merged |
+| 5 | **Lockfile changes break the image.** The action image carries an offline Hex and Go cache and a warm build, so a PR that adds a dependency fails, and a stale warm build only costs time. Rebuild and push the image when a lockfile changes on main, and pin the new digest in `controller.toml` | Loom and fleet | A dependency bump on main produces a new image digest without a hand step; until then, a documented rebuild command |
+| 6 | **Two slots.** The worker host has about 10 GiB free and a client lane peaks near 5 GiB, so two PRs at once queue, and one PR's full set takes about 12.5 minutes rather than the 7.5-minute floor | Fleet | Six or more `loom` slots on a host with the memory, then a measured full `check` run within 1.15 times its floor (slice 6's exit) |
+| 7 | **Fleet hosts are hand-set.** On the worker host `docker0` is missing, the root egress rules that keep the `cgroupfs` daemon off the network do not persist across reboot, and `docker-loom` runs without a unit file | Fleet | A reboot of the worker host brings the slots back with the same isolation, checked by `make e2e`'s sandbox checks |
+| 8 | **Known lane failures.** One per client shard when last listed: a remote evolution test, `tui_e2e` as uid 65534, and a deadline flake. They match Actions, so they do not block the switch, but a required check needs them green or skipped by Loom | Loom | Each client shard passes on the fleet three times running |
+| 9 | **What stays on Actions.** macOS, `deps`, `jail`, `e2e`, `e2e-client-bootstrap`, `deliverables`, `soak`, the stock compiler and release jobs have no actions. Moving `jail` needs a pool whose sandbox lets Loom's self-tests run; macOS needs a macOS worker | Loom | Branch protection requires `gantry/check` plus the remaining Actions jobs, and the Linux check jobs are gone from `ci.yml` |
+| 10 | **Landing on a protected branch is not piloted.** Needed only if Loom also uses Gantry's merge queue rather than GitHub's merge button | Gantry | The pilot in [integrating](integrating.md#check-a-live-deployment) on a disposable protected repository |
+
+Items 1 to 4 are the switch; 5 to 7 make it survive a week of real PRs; 8
+to 10 can follow. The fleet throwaway refs (`climb`, `calib`, `probe-stale`
+in `~/gantry-fleet/loom.git`) can go once item 2 lands.
+
+### Ordered slices
+
 The slices below are ordered by what the measurements in this series say
 binds first. Each names its measured payoff, its exit, and the property that
 must not regress. The numbers come from the depth run recorded in
 [controller load](controller-load.md) and the Loom lane probes described in
 the third slice.
-
-### Ordered slices
 
 1. **Find what ended three samples with `ResponseTimeout`.** Three of about 40
    one-voter samples at 100 and 150 actions per second ended with the
@@ -198,6 +244,17 @@ the third slice.
    overhead is 2 to 7 s per action with the worker's blob cache (#21).
    Staged sources all carry the 2000-01-01 mtime, so a warm cache must touch
    the tree after extracting ([running](running.md#start-a-worker)).
+   **Status (2026-11-27):** a `prepare` action now builds the server shipment
+   and code-mode seed once and hands them to six lanes as two tarballs of
+   about 47 MiB together, unpacked with fresh mtimes so Loom's staleness
+   checks hold. Measured per lane at Loom `eb3d61ffc`: slot time fell from
+   2,079 s to 1,478 s (client lanes about 120 s faster each, `conformance`
+   175 to 44 s, `eval` 150 to 13 s), with every lane's outcome unchanged. A
+   whole `check` run was not timed, because it stops at `eval`'s compile
+   error; laid out on two slots the estimate is about 750 s. Pushed as
+   [Roasbeef/loom#1408](https://github.com/Roasbeef/loom/pull/1408). What
+   remains of the exit is slots, item 6 of
+   [adopting Gantry for Loom](#adopting-gantry-for-loom).
 7. **Deploy the first fleet.** The gateway and one controller on
    a four-vCPU controller host, worker slots on the 32-core worker host, and
    the laptop's Docker as an optional worker. **Exit:** a Loom group lands through the gateway. Add a second
@@ -399,6 +456,10 @@ None of these is unfinished work somebody forgot.
 - **Cancellation, workspace overlays, event cursors, resource reservations,
   quotas, and priority.** Described as targets in the
   [design pages](architecture/build-and-submit.md#what-is-built), unbuilt.
+- **A webhook receiver.** The CI slice ([#26](https://github.com/Roasbeef/gantry/issues/26))
+  polls, because the gateway is reachable only on the tailnet and a 30 s
+  poll is small against a 7-minute run. A receiver can feed the same
+  admission path later if latency matters.
 - **A cancel route for a stuck landing.** Today the lane frees when the target
   branch moves ([operations](operations.md#a-landing-is-stuck)). Undesigned.
 - **Blob and bundle collection.** Unbuilt. `blob_dir` grows with every run.
